@@ -1,0 +1,128 @@
+[debug] [2026-01-24T15:48:46.950Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-01-24T15:48:46.951Z] > authorizing via signed-in user (coenhallie@gmail.com)
+[debug] [2026-01-24T15:48:46.952Z] Checked if tokens are valid: false, expires at: 1769022467605
+[debug] [2026-01-24T15:48:46.952Z] Checked if tokens are valid: false, expires at: 1769022467605
+[debug] [2026-01-24T15:48:46.952Z] > refreshing access token with scopes: []
+[debug] [2026-01-24T15:48:46.955Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-01-24T15:48:46.955Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-01-24T15:48:46.963Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-01-24T15:48:46.963Z] > authorizing via signed-in user (coenhallie@gmail.com)
+[debug] [2026-01-24T15:48:46.963Z] Checked if tokens are valid: false, expires at: 1769022467605
+[debug] [2026-01-24T15:48:46.964Z] Checked if tokens are valid: false, expires at: 1769022467605
+[debug] [2026-01-24T15:48:46.964Z] > refreshing access token with scopes: []
+[debug] [2026-01-24T15:48:46.964Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-01-24T15:48:46.964Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-01-24T15:48:47.150Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 200
+[debug] [2026-01-24T15:48:47.151Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-01-24T15:48:47.164Z] >>> [apiv2][query] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo [none]
+[debug] [2026-01-24T15:48:47.166Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 200
+[debug] [2026-01-24T15:48:47.166Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-01-24T15:48:47.174Z] >>> [apiv2][query] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo [none]
+[debug] [2026-01-24T15:48:51.011Z] <<< [apiv2][status] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo 200
+[debug] [2026-01-24T15:48:51.011Z] <<< [apiv2][body] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo {"name":"projects/workapp-76f52/billingInfo","projectId":"workapp-76f52","billingAccountName":"","billingEnabled":false}
+[debug] [2026-01-24T15:48:51.014Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.014Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.019Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.019Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.019Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.019Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.019Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com [none]
+[debug] [2026-01-24T15:48:51.019Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:48:51.019Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com [none]
+[debug] [2026-01-24T15:48:51.019Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:48:51.020Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com [none]
+[debug] [2026-01-24T15:48:51.020Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:48:51.635Z] <<< [apiv2][status] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo 200
+[debug] [2026-01-24T15:48:51.635Z] <<< [apiv2][body] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo {"name":"projects/workapp-76f52/billingInfo","projectId":"workapp-76f52","billingAccountName":"","billingEnabled":false}
+[debug] [2026-01-24T15:48:51.635Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.635Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.637Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.637Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.637Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.637Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:51.637Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com [none]
+[debug] [2026-01-24T15:48:51.637Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:48:51.637Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com [none]
+[debug] [2026-01-24T15:48:51.638Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:48:51.639Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com [none]
+[debug] [2026-01-24T15:48:51.639Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:48:51.719Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com 403
+[debug] [2026-01-24T15:48:51.719Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com [omitted]
+[debug] [2026-01-24T15:48:51.825Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com 200
+[debug] [2026-01-24T15:48:51.825Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com [omitted]
+[debug] [2026-01-24T15:48:51.826Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com 200
+[debug] [2026-01-24T15:48:51.826Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com [omitted]
+[debug] [2026-01-24T15:48:52.332Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com 403
+[debug] [2026-01-24T15:48:52.332Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com [omitted]
+[debug] [2026-01-24T15:48:52.555Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com 200
+[debug] [2026-01-24T15:48:52.556Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com [omitted]
+[debug] [2026-01-24T15:48:52.557Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com 200
+[debug] [2026-01-24T15:48:52.557Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com [omitted]
+[debug] [2026-01-24T15:48:52.559Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-01-24T15:48:52.559Z] > authorizing via signed-in user (coenhallie@gmail.com)
+[debug] [2026-01-24T15:48:52.559Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:52.559Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:48:52.560Z] >>> [apiv2][query] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo [none]
+[debug] [2026-01-24T15:48:52.828Z] <<< [apiv2][status] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo 200
+[debug] [2026-01-24T15:48:52.829Z] <<< [apiv2][body] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo {"name":"projects/workapp-76f52/billingInfo","projectId":"workapp-76f52","billingAccountName":"","billingEnabled":false}
+[debug] [2026-01-24T15:48:52.831Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-01-24T15:48:52.831Z] > authorizing via signed-in user (coenhallie@gmail.com)
+[debug] [2026-01-24T15:49:17.018Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-01-24T15:49:17.019Z] > authorizing via signed-in user (coenhallie@gmail.com)
+[debug] [2026-01-24T15:49:17.020Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.020Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.020Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-01-24T15:49:17.020Z] > authorizing via signed-in user (coenhallie@gmail.com)
+[debug] [2026-01-24T15:49:17.020Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.020Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.023Z] >>> [apiv2][query] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo [none]
+[debug] [2026-01-24T15:49:17.031Z] >>> [apiv2][query] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo [none]
+[debug] [2026-01-24T15:49:17.680Z] <<< [apiv2][status] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo 200
+[debug] [2026-01-24T15:49:17.680Z] <<< [apiv2][body] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo {"name":"projects/workapp-76f52/billingInfo","projectId":"workapp-76f52","billingAccountName":"","billingEnabled":false}
+[debug] [2026-01-24T15:49:17.685Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.685Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.693Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.693Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.693Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.693Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.693Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com [none]
+[debug] [2026-01-24T15:49:17.693Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:49:17.694Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com [none]
+[debug] [2026-01-24T15:49:17.694Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:49:17.695Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com [none]
+[debug] [2026-01-24T15:49:17.695Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:49:17.706Z] <<< [apiv2][status] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo 200
+[debug] [2026-01-24T15:49:17.706Z] <<< [apiv2][body] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo {"name":"projects/workapp-76f52/billingInfo","projectId":"workapp-76f52","billingAccountName":"","billingEnabled":false}
+[debug] [2026-01-24T15:49:17.706Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.706Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.708Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.708Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.708Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.708Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:17.708Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com [none]
+[debug] [2026-01-24T15:49:17.708Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:49:17.709Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com [none]
+[debug] [2026-01-24T15:49:17.709Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:49:17.710Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com [none]
+[debug] [2026-01-24T15:49:17.710Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com x-goog-quota-user=projects/workapp-76f52
+[debug] [2026-01-24T15:49:18.399Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com 403
+[debug] [2026-01-24T15:49:18.399Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com [omitted]
+[debug] [2026-01-24T15:49:18.409Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com 403
+[debug] [2026-01-24T15:49:18.409Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseio.com [omitted]
+[debug] [2026-01-24T15:49:18.486Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com 200
+[debug] [2026-01-24T15:49:18.486Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com [omitted]
+[debug] [2026-01-24T15:49:18.487Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com 200
+[debug] [2026-01-24T15:49:18.487Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com [omitted]
+[debug] [2026-01-24T15:49:18.488Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com 200
+[debug] [2026-01-24T15:49:18.488Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebasedataconnect.googleapis.com [omitted]
+[debug] [2026-01-24T15:49:18.491Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com 200
+[debug] [2026-01-24T15:49:18.491Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/workapp-76f52/services/firebaseapphosting.googleapis.com [omitted]
+[debug] [2026-01-24T15:49:18.493Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-01-24T15:49:18.494Z] > authorizing via signed-in user (coenhallie@gmail.com)
+[debug] [2026-01-24T15:49:18.494Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:18.494Z] Checked if tokens are valid: true, expires at: 1769273326166
+[debug] [2026-01-24T15:49:18.494Z] >>> [apiv2][query] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo [none]
+[debug] [2026-01-24T15:49:18.669Z] <<< [apiv2][status] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo 200
+[debug] [2026-01-24T15:49:18.669Z] <<< [apiv2][body] GET https://cloudbilling.googleapis.com/v1/projects/workapp-76f52/billingInfo {"name":"projects/workapp-76f52/billingInfo","projectId":"workapp-76f52","billingAccountName":"","billingEnabled":false}
+[debug] [2026-01-24T15:49:18.671Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-01-24T15:49:18.672Z] > authorizing via signed-in user (coenhallie@gmail.com)
