@@ -1,5 +1,5 @@
 {
-  "name": "vue-project",
+  "name": "badminton-tracker",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,10 @@
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
-    "vue": "^3.5.26"
+    "chart.js": "^4.5.1",
+    "chartjs-plugin-annotation": "^3.1.0",
+    "vue": "^3.5.26",
+    "vue-chartjs": "^5.3.3"
   },
   "devDependencies": {
     "@tsconfig/node24": "^24.0.4",

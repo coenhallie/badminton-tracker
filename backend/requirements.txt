@@ -1,0 +1,16 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+ultralytics>=8.0.0
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+aiofiles>=23.0.0
+websockets>=11.0
+pydantic>=2.0.0
+inference-sdk>=0.24.0
+roboflow>=1.1.0
+python-dotenv>=1.0.0
+
+# Modal.com remote GPU inference (optional)
+httpx>=0.26.0  # Async HTTP client for Modal API calls
+modal>=0.64.0  # Modal SDK (only needed for deployment, not runtime)
