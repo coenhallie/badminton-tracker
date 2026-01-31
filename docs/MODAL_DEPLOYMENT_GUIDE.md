@@ -36,7 +36,7 @@ This guide explains how to deploy the YOLO inference pipeline to Modal.com for G
 │  │                 BadmintonInference Class                     │    │
 │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │    │
 │  │  │ Pose Model  │  │  Detection  │  │    Court Model      │  │    │
-│  │  │ (YOLOv8n)   │  │   Model     │  │   (Custom YOLO)     │  │    │
+│  │  │ (YOLO26n)   │  │   Model     │  │   (Custom YOLO26)   │  │    │
 │  │  └─────────────┘  └─────────────┘  └─────────────────────┘  │    │
 │  │                         GPU: T4/A10G/A100                    │    │
 │  └─────────────────────────────────────────────────────────────┘    │

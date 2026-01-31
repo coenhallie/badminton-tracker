@@ -708,7 +708,7 @@ class HybridInferenceManager:
         
         logger.info("Loading local YOLO models...")
         self._local_pose_model = YOLO("yolo26n-pose.pt")
-        self._local_detection_model = YOLO("yolov8n.pt")
+        self._local_detection_model = YOLO("yolo26n.pt")  # Updated to YOLO26
         logger.info("Local models loaded")
     
     async def process_frame(
@@ -751,13 +751,25 @@ class HybridInferenceManager:
         confidence_threshold: float = 0.5,
         **kwargs
     ) -> Dict[str, Any]:
-        """Process frame using local YOLO models"""
+        """
+        Process frame using local YOLO models.
+        
+        Optimized for 2-player badminton:
+        - Uses lower person detection threshold (0.25) for far players
+        - Uses very low keypoint threshold (0.01) to show all keypoints
+        """
         if self._local_pose_model is None:
             self._load_local_models()
         
-        # Run pose estimation
+        # Use lower threshold for person detection (far player support)
+        person_conf = min(confidence_threshold, 0.25)
+        
+        # Very low keypoint threshold for far player skeleton visibility
+        keypoint_conf = 0.01
+        
+        # Run pose estimation with lower threshold and larger image size
         pose_results = self._local_pose_model.track(
-            frame, persist=True, verbose=False, conf=confidence_threshold
+            frame, persist=True, verbose=False, conf=person_conf, imgsz=960
         )
         
         # COCO keypoint indices
@@ -773,38 +785,44 @@ class HybridInferenceManager:
                 for idx, kpts in enumerate(result.keypoints.data.cpu().numpy()):
                     keypoints = []
                     for kp_idx, kp in enumerate(kpts):
+                        # Use very low threshold for keypoint visibility (far player support)
+                        has_position = kp[2] > keypoint_conf and (kp[0] > 0 or kp[1] > 0)
                         keypoints.append({
                             "name": f"kp_{kp_idx}",
-                            "x": float(kp[0]) if kp[2] > confidence_threshold else None,
-                            "y": float(kp[1]) if kp[2] > confidence_threshold else None,
+                            "x": float(kp[0]) if has_position else None,
+                            "y": float(kp[1]) if has_position else None,
                             "confidence": float(kp[2])
                         })
                     
-                    valid_kps = [(kp[0], kp[1]) for kp in kpts if kp[2] > confidence_threshold]
+                    # Use very low threshold for valid keypoints (far player support)
+                    valid_kps = [(kp[0], kp[1]) for kp in kpts if kp[2] > keypoint_conf and (kp[0] > 0 or kp[1] > 0)]
                     if not valid_kps:
                         continue
                     
                     # Calculate center using ankle midpoint (feet) as primary
                     # This matches modal_inference.py for consistent court positioning
+                    # Use very low threshold for center calculation (far player support)
                     center_x = None
                     center_y = None
                     
                     if (len(kpts) > RIGHT_ANKLE_IDX and
-                        kpts[LEFT_ANKLE_IDX][2] > confidence_threshold and
-                        kpts[RIGHT_ANKLE_IDX][2] > confidence_threshold):
+                        kpts[LEFT_ANKLE_IDX][2] > keypoint_conf and
+                        kpts[RIGHT_ANKLE_IDX][2] > keypoint_conf):
                         # Primary: use ankle midpoint (most accurate for court position)
                         center_x = (kpts[LEFT_ANKLE_IDX][0] + kpts[RIGHT_ANKLE_IDX][0]) / 2
                         center_y = (kpts[LEFT_ANKLE_IDX][1] + kpts[RIGHT_ANKLE_IDX][1]) / 2
                     elif (len(kpts) > RIGHT_HIP_IDX and
-                          kpts[LEFT_HIP_IDX][2] > confidence_threshold and
-                          kpts[RIGHT_HIP_IDX][2] > confidence_threshold):
+                          kpts[LEFT_HIP_IDX][2] > keypoint_conf and
+                          kpts[RIGHT_HIP_IDX][2] > keypoint_conf):
                         # Fallback 1: use hip midpoint if ankles not visible
                         center_x = (kpts[LEFT_HIP_IDX][0] + kpts[RIGHT_HIP_IDX][0]) / 2
                         center_y = (kpts[LEFT_HIP_IDX][1] + kpts[RIGHT_HIP_IDX][1]) / 2
-                    else:
+                    elif len(valid_kps) >= 1:
                         # Fallback 2: mean of all valid keypoints
                         center_x = sum(k[0] for k in valid_kps) / len(valid_kps)
                         center_y = sum(k[1] for k in valid_kps) / len(valid_kps)
+                    else:
+                        continue
                     
                     players.append({
                         "player_id": idx,

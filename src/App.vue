@@ -10,7 +10,7 @@ import {
   checkApiHealth, getOriginalVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
   getHeatmap, preloadHeatmap, triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline
 } from '@/services/api'
-import type { UploadResponse, AnalysisResult, SkeletonFrame, CourtModelType } from '@/types/analysis'
+import type { UploadResponse, AnalysisResult, SkeletonFrame } from '@/types/analysis'
 import type { HeatmapData, SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
 
 type AppState = 'upload' | 'analyzing' | 'results'
@@ -47,6 +47,9 @@ const showSpeedGraph = ref(false)
 
 // Settings panel visibility toggle
 const showSettingsPanel = ref(false)
+
+// Changelog modal visibility
+const showChangelogModal = ref(false)
 
 // Video container height tracking for MiniCourt sync
 const videoSectionRef = ref<HTMLElement | null>(null)
@@ -526,6 +529,9 @@ watch(videoSectionRef, () => {
       <div class="header-content">
         <div class="logo">
           <h1>SHUTTL.</h1>
+          <button class="alpha-badge" @click="showChangelogModal = true">
+            alpha v1.0
+          </button>
         </div>
 
         <nav class="nav">
@@ -536,6 +542,46 @@ watch(videoSectionRef, () => {
         </nav>
       </div>
     </header>
+
+    <!-- Changelog Modal -->
+    <Transition name="fade">
+      <div v-if="showChangelogModal" class="modal-overlay" @click.self="showChangelogModal = false">
+        <div class="changelog-modal">
+          <div class="changelog-header">
+            <h2>📋 Changelog</h2>
+            <button class="modal-close-btn" @click="showChangelogModal = false">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <div class="changelog-content">
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.0.0-alpha</span>
+                <span class="version-date">January 31, 2026</span>
+              </div>
+              <h3>🎉 Initial Alpha Launch</h3>
+              <p class="changelog-description">
+                Welcome to SHUTTL. — your AI-powered badminton analysis companion!
+              </p>
+              <ul class="changelog-list">
+                <li>🏸 <strong>Player Detection:</strong> AI-powered player tracking with skeleton overlay</li>
+                <li>🎯 <strong>Pose Estimation:</strong> Real-time body position analysis</li>
+                <li>⚡ <strong>Speed Tracking:</strong> Player movement and shuttlecock speed metrics</li>
+                <li>📊 <strong>Court Mapping:</strong> Interactive mini-court visualization with 12-point calibration</li>
+                <li>🔥 <strong>Position Heatmaps:</strong> Visual representation of player court coverage</li>
+                <li>📈 <strong>Performance Dashboard:</strong> Comprehensive match statistics and insights</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
 
     <!-- Error Message -->
     <Transition name="fade">
@@ -1599,6 +1645,167 @@ a:hover {
   .court-model-indicator {
     justify-content: center;
   }
+}
+
+/* Alpha Badge */
+.alpha-badge {
+  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  color: #000;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border: none;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: all 0.2s ease;
+  margin-left: 4px;
+}
+
+.alpha-badge:hover {
+  background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(34, 197, 94, 0.3);
+}
+
+/* Changelog Modal */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.changelog-modal {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  max-width: 520px;
+  width: 100%;
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.changelog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid #333;
+}
+
+.changelog-header h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #fff;
+  margin: 0;
+}
+
+.modal-close-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid #444;
+  color: #888;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.modal-close-btn:hover {
+  background: #333;
+  color: #fff;
+  border-color: #555;
+}
+
+.modal-close-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.changelog-content {
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.changelog-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.changelog-version {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.version-tag {
+  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  color: #000;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 4px 10px;
+}
+
+.version-date {
+  color: #888;
+  font-size: 0.875rem;
+}
+
+.changelog-entry h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #fff;
+  margin: 0;
+}
+
+.changelog-description {
+  color: #ccc;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.changelog-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.changelog-list li {
+  color: #bbb;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  padding-left: 4px;
+}
+
+.changelog-list li strong {
+  color: #fff;
+}
+
+.changelog-note {
+  color: #888;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 8px 0 0 0;
+  padding-top: 16px;
+  border-top: 1px solid #333;
 }
 
 </style>

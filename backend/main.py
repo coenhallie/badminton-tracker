@@ -674,7 +674,7 @@ async def send_log_message(video_id: str, message: str, level: str = "info", cat
 
 async def process_video(video_path: Path, video_id: str, config: AnalysisConfig):
     """
-    Process video with YOLOv8 pose estimation and court keypoint detection
+    Process video with YOLO26 pose estimation and court keypoint detection
     Sends progress updates via WebSocket
     
     Performance Optimizations Applied:
@@ -1189,6 +1189,8 @@ async def process_video(video_path: Path, video_id: str, config: AnalysisConfig)
                         
                         # Classify pose from keypoints (for Modal inference)
                         # Build keypoints dict in the format expected by PoseAnalyzer
+                        # Use very low threshold (0.01) for far player skeleton visibility
+                        keypoint_visibility_threshold = 0.01  # Very low for far players
                         pose_keypoints_dict = {}
                         for kp in keypoints_list:
                             if kp["x"] is not None and kp["y"] is not None:
@@ -1198,7 +1200,7 @@ async def process_video(video_path: Path, video_id: str, config: AnalysisConfig)
                                         x=kp["x"],
                                         y=kp["y"],
                                         confidence=kp["confidence"],
-                                        visible=kp["confidence"] > config.confidence_threshold
+                                        visible=kp["confidence"] > keypoint_visibility_threshold
                                     )
                                 except (KeyError, ValueError):
                                     pass
@@ -1464,6 +1466,8 @@ async def process_video(video_path: Path, video_id: str, config: AnalysisConfig)
                         
                         # Classify pose from keypoints
                         # Build keypoints dict in the format expected by PoseAnalyzer
+                        # Use very low threshold (0.01) for far player skeleton visibility
+                        keypoint_visibility_threshold = 0.01  # Very low for far players
                         pose_keypoints_dict = {}
                         for kp in keypoints_list:
                             if kp["x"] is not None and kp["y"] is not None:
@@ -1473,7 +1477,7 @@ async def process_video(video_path: Path, video_id: str, config: AnalysisConfig)
                                         x=kp["x"],
                                         y=kp["y"],
                                         confidence=kp["confidence"],
-                                        visible=kp["confidence"] > config.confidence_threshold
+                                        visible=kp["confidence"] > keypoint_visibility_threshold
                                     )
                                 except (KeyError, ValueError):
                                     pass

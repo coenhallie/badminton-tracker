@@ -287,8 +287,8 @@ class BadmintonInference:
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
         
         # Load pose model (downloads automatically from Ultralytics hub)
-        print("Loading YOLOv8 pose model...")
-        self.pose_model = YOLO("yolov8n-pose.pt")  # yolo26n-pose when available
+        print("Loading YOLOv26 pose model...")
+        self.pose_model = YOLO("yolo26n-pose.pt")  # YOLO26 nano pose model - NMS-free
         self.pose_model.to(self.device)
         
         # Load custom badminton detection model if available
@@ -299,7 +299,7 @@ class BadmintonInference:
             self.detection_model.to(self.device)
         else:
             print("Custom badminton model not found, using COCO for detection")
-            self.detection_model = YOLO("yolov8n.pt")  # Fallback to COCO
+            self.detection_model = YOLO("yolo26n.pt")  # Fallback to COCO with YOLO26
             self.detection_model.to(self.device)
         
         # Load custom pose/action classification model if available
@@ -342,13 +342,27 @@ class BadmintonInference:
         return frame
     
     def _run_pose_detection(self, frame, confidence_threshold: float) -> list[PersonPoseResult]:
-        """Run pose estimation on a frame"""
+        """
+        Run pose estimation on a frame.
+        
+        Optimized for 2-player badminton:
+        - Uses lower person detection threshold (0.25) for far players
+        - Uses very low keypoint threshold (0.01) to show all keypoints
+        - Far players appear smaller and have lower keypoint confidence
+        """
+        # Use lower detection threshold for far players
+        person_conf = min(confidence_threshold, 0.25)
+        
+        # Very low keypoint threshold - far players often have conf < 0.1
+        keypoint_conf = 0.01
+        
         results = self.pose_model.track(
             frame,
             persist=True,
             verbose=False,
-            conf=confidence_threshold,
-            half=True  # FP16 for speed
+            conf=person_conf,  # Lower threshold for far player detection
+            half=True,  # FP16 for speed
+            imgsz=960  # Larger image for better far-player detection
         )
         
         poses = []
@@ -372,31 +386,39 @@ class BadmintonInference:
                     for kp_idx, keypoint in enumerate(kpts):
                         x, y, conf = keypoint[0], keypoint[1], keypoint[2] if len(keypoint) > 2 else 1.0
                         
+                        # Use very low keypoint threshold for far player skeleton visibility
+                        # Any keypoint with position (x,y > 0) and minimal confidence is shown
+                        has_position = conf > keypoint_conf and (x > 0 or y > 0)
+                        
                         kp_result = KeypointResult(
                             name=KEYPOINT_NAMES[kp_idx],
-                            x=float(x) if conf > confidence_threshold else None,
-                            y=float(y) if conf > confidence_threshold else None,
+                            x=float(x) if has_position else None,
+                            y=float(y) if has_position else None,
                             confidence=float(conf)
                         )
                         keypoints.append(kp_result)
                         
-                        if conf > confidence_threshold:
+                        if has_position:
                             valid_kps.append((float(x), float(y)))
                     
                     # Calculate center position (using ankle midpoint for accurate court positioning)
                     # Ankles represent where the player is actually standing on the court
+                    # Use very low threshold for far players (keypoint_conf = 0.01)
                     left_ankle_idx = KEYPOINT_NAMES.index("left_ankle")
                     right_ankle_idx = KEYPOINT_NAMES.index("right_ankle")
                     left_hip_idx = KEYPOINT_NAMES.index("left_hip")
                     right_hip_idx = KEYPOINT_NAMES.index("right_hip")
                     
-                    if (kpts[left_ankle_idx][2] > confidence_threshold and
-                        kpts[right_ankle_idx][2] > confidence_threshold):
+                    # Use very low threshold for center calculation (far players have low confidence)
+                    center_threshold = 0.01
+                    
+                    if (kpts[left_ankle_idx][2] > center_threshold and
+                        kpts[right_ankle_idx][2] > center_threshold):
                         # Primary: use ankle midpoint (most accurate for court position)
                         center_x = (float(kpts[left_ankle_idx][0]) + float(kpts[right_ankle_idx][0])) / 2
                         center_y = (float(kpts[left_ankle_idx][1]) + float(kpts[right_ankle_idx][1])) / 2
-                    elif (kpts[left_hip_idx][2] > confidence_threshold and
-                          kpts[right_hip_idx][2] > confidence_threshold):
+                    elif (kpts[left_hip_idx][2] > center_threshold and
+                          kpts[right_hip_idx][2] > center_threshold):
                         # Fallback 1: use hip midpoint if ankles not visible
                         center_x = (float(kpts[left_hip_idx][0]) + float(kpts[right_hip_idx][0])) / 2
                         center_y = (float(kpts[left_hip_idx][1]) + float(kpts[right_hip_idx][1])) / 2
@@ -404,6 +426,10 @@ class BadmintonInference:
                         # Fallback 2: mean of all valid keypoints
                         center_x = sum(kp[0] for kp in valid_kps) / len(valid_kps)
                         center_y = sum(kp[1] for kp in valid_kps) / len(valid_kps)
+                    elif len(valid_kps) >= 1:
+                        # Fallback 3: use any single valid keypoint for far players
+                        center_x = valid_kps[0][0]
+                        center_y = valid_kps[0][1]
                     else:
                         continue
                     

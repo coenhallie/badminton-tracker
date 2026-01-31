@@ -276,15 +276,26 @@ class MultiModelDetector:
             print(f"Error loading model '{name}': {e}")
     
     def _init_pose_detector(self, model_path: Optional[str] = None):
-        """Initialize the pose detector"""
+        """Initialize the pose detector with badminton-optimized settings"""
         try:
             from pose_detection import PoseDetector
+            # Use lower confidence threshold and larger image size for better
+            # detection of both near and far players in badminton
+            # show_low_confidence_keypoints=True ensures far player skeleton appears
             self.pose_detector = PoseDetector(
                 model_path=model_path,
-                confidence_threshold=self.confidence_threshold
+                confidence_threshold=0.25,  # Lower threshold for far players
+                keypoint_confidence=0.05,   # Very low for far-player keypoints
+                imgsz=960,  # Larger input for better small person detection
+                max_persons=4,  # Allow detecting up to 4, will filter to 2 main players
+                show_low_confidence_keypoints=True  # Show all keypoints for far player
             )
             self.enabled_models["pose"] = True
-            print(f"Pose detector initialized")
+            print(f"Pose detector initialized (optimized for 2-player badminton)")
+            print(f"  - confidence_threshold: 0.25")
+            print(f"  - keypoint_confidence: 0.05 (very low for far players)")
+            print(f"  - imgsz: 960 (for better far-player detection)")
+            print(f"  - show_low_confidence_keypoints: True")
         except ImportError as e:
             print(f"Warning: Could not import pose_detection module: {e}")
             self.pose_detector = None

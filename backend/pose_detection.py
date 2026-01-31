@@ -235,6 +235,9 @@ class FramePoses:
         """
         Filter poses to only include the main players.
         
+        For badminton (max_players=2), uses spatial diversity to ensure one player
+        from each side of the court is detected, rather than just taking the 2 largest.
+        
         Args:
             max_players: Maximum number of players to keep (default: 2)
             player_bboxes: Optional list of (x, y, width, height) bounding boxes
@@ -261,16 +264,24 @@ class FramePoses:
                 if best_iou > 0.3:
                     filtered_players.append(pose)
         else:
-            # No bboxes provided - keep largest/most confident poses
-            # Sort by bounding box area (larger = more likely main player, not spectator)
-            sorted_poses = sorted(
-                self.players,
-                key=lambda p: p.bbox_width * p.bbox_height,
-                reverse=True
-            )
-            filtered_players = sorted_poses[:max_players]
+            # For badminton with 2 players, use spatial diversity filtering
+            # This ensures we get one player from each side of the court
+            if max_players == 2 and len(self.players) >= 2:
+                filtered_players = self._filter_for_badminton(self.players)
+            else:
+                # Default: Sort by bounding box area (larger = more likely main player)
+                sorted_poses = sorted(
+                    self.players,
+                    key=lambda p: p.bbox_width * p.bbox_height,
+                    reverse=True
+                )
+                filtered_players = sorted_poses[:max_players]
         
-        # Reassign player IDs to be 0 and 1 (P1 and P2)
+        # Reassign player IDs based on vertical position (top=0/far, bottom=1/near)
+        if len(filtered_players) >= 2:
+            # Sort by Y position to assign consistent IDs (top player = far court = P0)
+            filtered_players = sorted(filtered_players, key=lambda p: p.bbox_y)
+        
         for idx, pose in enumerate(filtered_players):
             pose.player_id = idx
         
@@ -278,6 +289,65 @@ class FramePoses:
             frame_number=self.frame_number,
             players=filtered_players
         )
+    
+    def _filter_for_badminton(self, players: List[PlayerPose]) -> List[PlayerPose]:
+        """
+        Smart filtering for badminton - ensures one player from each court side.
+        
+        Uses a combination of:
+        1. Spatial diversity: Players should be on opposite sides of the court
+        2. Size consideration: Larger detections are more reliable
+        3. Confidence weighting: Higher confidence detections preferred
+        
+        Args:
+            players: List of detected player poses
+            
+        Returns:
+            List of 2 players (one from each side of the court)
+        """
+        if len(players) < 2:
+            return players
+        
+        # Calculate frame midpoint (approximate court division)
+        all_y = [p.bbox_y for p in players]
+        y_mid = (min(all_y) + max(all_y)) / 2
+        
+        # Split players into top (far) and bottom (near) court halves
+        top_players = [p for p in players if p.bbox_y < y_mid]
+        bottom_players = [p for p in players if p.bbox_y >= y_mid]
+        
+        # Score function: prioritize size * confidence
+        # For far players, we lower the size bias since they appear smaller
+        def score_player(p: PlayerPose, is_far: bool = False) -> float:
+            area = p.bbox_width * p.bbox_height
+            conf = p.confidence
+            # For far players, reduce size penalty (they naturally appear smaller)
+            size_weight = 0.3 if is_far else 0.7
+            conf_weight = 1.0 - size_weight
+            return (area * size_weight) + (conf * 10000 * conf_weight)
+        
+        selected = []
+        
+        # Select best player from each half
+        if top_players:
+            # Top players are far, apply adjusted scoring
+            best_top = max(top_players, key=lambda p: score_player(p, is_far=True))
+            selected.append(best_top)
+        
+        if bottom_players:
+            # Bottom players are near, use standard scoring
+            best_bottom = max(bottom_players, key=lambda p: score_player(p, is_far=False))
+            selected.append(best_bottom)
+        
+        # If we only have players on one side, take the top 2 from that side
+        if len(selected) < 2:
+            remaining = top_players if not bottom_players else bottom_players
+            remaining_sorted = sorted(remaining, key=lambda p: score_player(p, is_far=bool(not bottom_players)), reverse=True)
+            for player in remaining_sorted:
+                if player not in selected and len(selected) < 2:
+                    selected.append(player)
+        
+        return selected
     
     def _calculate_bbox_iou(self, pose: PlayerPose, bbox: Tuple[float, float, float, float]) -> float:
         """Calculate IoU between a pose's bbox and a detection bbox"""
@@ -545,25 +615,39 @@ class PoseDetector:
     def __init__(
         self,
         model_path: Optional[str] = None,
-        confidence_threshold: float = 0.5,
-        keypoint_confidence: float = 0.3,
+        confidence_threshold: float = 0.25,  # Lowered from 0.5 for better far-player detection
+        keypoint_confidence: float = 0.05,   # Very low for far players (was 0.3)
         enable_smoothing: bool = False,
         smoothing_preset: str = "auto",
-        fps: float = 30.0
+        fps: float = 30.0,
+        imgsz: int = 960,  # Larger image size for better small/distant player detection
+        max_persons: int = 2,  # Max number of persons to detect (for badminton: 2 players)
+        show_low_confidence_keypoints: bool = True  # Show all keypoints even with low confidence
     ):
         """
         Initialize the pose detector.
         
+        Optimized for 2-player badminton where the far player appears small:
+        - Lower confidence threshold (0.25) for person detection
+        - Very low keypoint confidence (0.05) to show far player's skeleton
+        - Larger image size (960) for better distant player detection
+        
         Args:
             model_path: Path to pose model (default: yolo26n-pose.pt)
-            confidence_threshold: Minimum confidence for person detection
-            keypoint_confidence: Minimum confidence for keypoint visibility
+            confidence_threshold: Minimum confidence for person detection (0.25 for far players)
+            keypoint_confidence: Minimum confidence for keypoint visibility (0.05 for far players)
             enable_smoothing: Enable temporal smoothing for smooth skeleton output
             smoothing_preset: Smoothing preset - "auto", "high_speed", "stability", "real_time", "none"
             fps: Video frame rate for smoothing calculations
+            imgsz: Input image size for inference (larger = better for distant players, but slower)
+            max_persons: Maximum number of persons to detect per frame
+            show_low_confidence_keypoints: If True, show all detected keypoints even with very low confidence
         """
         self.confidence_threshold = confidence_threshold
         self.keypoint_confidence = keypoint_confidence
+        self.imgsz = imgsz
+        self.max_persons = max_persons
+        self.show_low_confidence_keypoints = show_low_confidence_keypoints
         self.model = None
         self.analyzer = PoseAnalyzer()
         
@@ -636,6 +720,11 @@ class PoseDetector:
         """
         Detect poses in a frame with optional temporal smoothing.
         
+        Uses optimized parameters for badminton:
+        - Larger image size (imgsz) for better detection of far court players
+        - Lower confidence threshold to catch players at various distances
+        - max_det to ensure we detect both players
+        
         Args:
             frame: BGR image frame
             frame_number: Current frame number
@@ -648,7 +737,16 @@ class PoseDetector:
             return FramePoses(frame_number=frame_number)
         
         try:
-            results = self.model(frame, conf=self.confidence_threshold, verbose=False)
+            # Use larger image size and max_det for better 2-player detection
+            # imgsz: Larger input improves small/distant player detection
+            # max_det: Ensure we get detections for both players (plus margin for spectators)
+            results = self.model(
+                frame,
+                conf=self.confidence_threshold,
+                imgsz=self.imgsz,
+                max_det=max(self.max_persons * 2, 10),  # Allow extra detections, will filter later
+                verbose=False
+            )
             frame_poses = self._parse_results(results, frame_number)
             
             # Apply smoothing if enabled
@@ -888,15 +986,31 @@ class PoseDetector:
                 person_kpts = kpts[person_idx]
                 
                 # Build keypoints dictionary
+                # For far players, keypoint confidence is often very low (< 0.1)
+                # We use a very low threshold + show_low_confidence_keypoints option
                 keypoints = {}
+                visible_count = 0
                 for kp_idx in range(17):
                     x, y, conf = person_kpts[kp_idx]
                     kp_enum = Keypoint(kp_idx)
+                    
+                    # Determine visibility:
+                    # - If show_low_confidence_keypoints is True and keypoint has any position, show it
+                    # - Otherwise use the keypoint_confidence threshold
+                    if self.show_low_confidence_keypoints:
+                        # Show keypoint if it has any valid position (x, y > 0 and conf > 0)
+                        is_visible = conf > 0.01 and (x > 0 or y > 0)
+                    else:
+                        is_visible = conf > self.keypoint_confidence
+                    
+                    if is_visible:
+                        visible_count += 1
+                    
                     keypoints[kp_enum] = KeypointData(
                         x=float(x),
                         y=float(y),
                         confidence=float(conf),
-                        visible=conf > self.keypoint_confidence
+                        visible=is_visible
                     )
                 
                 # Get bounding box
@@ -1066,22 +1180,34 @@ _pose_detector_instance: Optional[PoseDetector] = None
 
 def get_pose_detector(
     model_path: Optional[str] = None,
-    confidence_threshold: float = 0.5,
-    keypoint_confidence: float = 0.3,
+    confidence_threshold: float = 0.25,  # Lowered for better far-player detection
+    keypoint_confidence: float = 0.05,   # Very low for far-player keypoints
     enable_smoothing: bool = True,
     smoothing_preset: str = "auto",
-    fps: float = 30.0
+    fps: float = 30.0,
+    imgsz: int = 960,      # Larger input for better small person detection
+    max_persons: int = 2,  # For badminton: 2 players
+    show_low_confidence_keypoints: bool = True  # Show far player skeleton
 ) -> PoseDetector:
     """
     Get or create the pose detector singleton.
     
+    Optimized defaults for badminton:
+    - Lower confidence threshold (0.25) to detect far-court players
+    - Very low keypoint confidence (0.05) to show far player skeleton
+    - Larger image size (960) for better detection of distant/small players
+    - show_low_confidence_keypoints=True to ensure far player skeleton appears
+    
     Args:
         model_path: Path to YOLO pose model
-        confidence_threshold: Minimum confidence for person detection
-        keypoint_confidence: Minimum confidence for keypoint visibility
+        confidence_threshold: Minimum confidence for person detection (0.25 for far players)
+        keypoint_confidence: Minimum confidence for keypoint visibility (0.05 for far players)
         enable_smoothing: Enable temporal smoothing (recommended)
         smoothing_preset: Smoothing preset - "auto", "high_speed", "stability", "real_time", "none"
         fps: Video frame rate for smoothing calculations
+        imgsz: Input image size (larger = better far-player detection)
+        max_persons: Maximum number of persons to detect
+        show_low_confidence_keypoints: Show all keypoints even with very low confidence
         
     Returns:
         PoseDetector instance with optional smoothing enabled
@@ -1093,6 +1219,9 @@ def get_pose_detector(
         kp_conf = float(os.getenv("POSE_KEYPOINT_CONFIDENCE", keypoint_confidence))
         smooth = os.getenv("POSE_ENABLE_SMOOTHING", str(enable_smoothing)).lower() == "true"
         preset = os.getenv("POSE_SMOOTHING_PRESET", smoothing_preset)
+        img_size = int(os.getenv("POSE_IMAGE_SIZE", imgsz))
+        max_det = int(os.getenv("POSE_MAX_PERSONS", max_persons))
+        show_low_conf = os.getenv("POSE_SHOW_LOW_CONFIDENCE", str(show_low_confidence_keypoints)).lower() == "true"
         
         _pose_detector_instance = PoseDetector(
             model_path=model_path,
@@ -1100,7 +1229,10 @@ def get_pose_detector(
             keypoint_confidence=kp_conf,
             enable_smoothing=smooth,
             smoothing_preset=preset,
-            fps=fps
+            fps=fps,
+            imgsz=img_size,
+            max_persons=max_det,
+            show_low_confidence_keypoints=show_low_conf
         )
     
     return _pose_detector_instance
@@ -1116,7 +1248,8 @@ def reset_pose_detector():
 
 def get_smoothed_pose_detector(
     fps: float = 30.0,
-    preset: str = "high_speed"
+    preset: str = "high_speed",
+    imgsz: int = 960
 ) -> PoseDetector:
     """
     Convenience function to get a pose detector with smoothing enabled.
@@ -1126,6 +1259,7 @@ def get_smoothed_pose_detector(
     Args:
         fps: Video frame rate
         preset: Smoothing preset (default: "high_speed" for sports)
+        imgsz: Input image size (default: 960 for better far-player detection)
         
     Returns:
         PoseDetector with smoothing enabled
@@ -1133,5 +1267,6 @@ def get_smoothed_pose_detector(
     return get_pose_detector(
         enable_smoothing=True,
         smoothing_preset=preset,
-        fps=fps
+        fps=fps,
+        imgsz=imgsz
     )

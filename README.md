@@ -1,10 +1,10 @@
 # 🏸 Badminton Tracker
 
-An AI-powered badminton match analysis application that uses YOLOv8 pose estimation to track player movements, calculate speeds, and provide detailed performance metrics.
+An AI-powered badminton match analysis application that uses YOLO26 pose estimation to track player movements, calculate speeds, and provide detailed performance metrics.
 
 ![Badminton Tracker](https://img.shields.io/badge/Vue.js-3.5-4FC08D?logo=vue.js)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)
-![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-FF6F00)
+![YOLO26](https://img.shields.io/badge/YOLO26-Ultralytics-FF6F00)
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript)
 
@@ -16,7 +16,7 @@ An AI-powered badminton match analysis application that uses YOLOv8 pose estimat
 - **Frame-by-Frame Analysis** - Detailed pose estimation on each video frame
 
 ### Pose Estimation
-- **Skeleton Overlay** - Visual skeleton tracking using YOLOv11 pose model
+- **Skeleton Overlay** - Visual skeleton tracking using YOLO26 pose model
 - **17 Keypoint Detection** - Full body keypoint tracking (nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles)
 - **Multi-Player Tracking** - Simultaneous tracking of multiple players on court
 
@@ -496,11 +496,11 @@ npm run format
 
 ## 📄 License
 
-This project is for educational and personal use. The YOLOv8/v11 models are provided by [Ultralytics](https://ultralytics.com/) under the AGPL-3.0 license.
+This project is for educational and personal use. The YOLO26 models are provided by [Ultralytics](https://ultralytics.com/) under the AGPL-3.0 license.
 
 ## 🙏 Acknowledgments
 
-- [Ultralytics](https://ultralytics.com/) for YOLOv8/v11 pose estimation models
+- [Ultralytics](https://ultralytics.com/) for YOLO26 pose estimation models
 - [Vue.js](https://vuejs.org/) for the reactive frontend framework
 - [FastAPI](https://fastapi.tiangolo.com/) for the high-performance Python API
 - [OpenCV](https://opencv.org/) for video processing capabilities

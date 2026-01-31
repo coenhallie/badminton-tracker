@@ -172,55 +172,10 @@ export async function getResults(videoId: string): Promise<AnalysisResult> {
 }
 
 /**
- * Get skeleton overlay data for client-side rendering
- */
-export async function getSkeletonData(
-  videoId: string
-): Promise<{ video_id: string; skeleton_data: SkeletonFrame[] }> {
-  const response = await fetch(`${API_BASE_URL}/api/skeleton/${videoId}`)
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to get skeleton data')
-  }
-
-  return response.json()
-}
-
-/**
- * Get processed video URL (with skeleton overlay baked in)
- */
-export function getProcessedVideoUrl(videoId: string): string {
-  return `${API_BASE_URL}/api/video/${videoId}`
-}
-
-/**
  * Get original uploaded video URL (browser-compatible streaming)
  */
 export function getOriginalVideoUrl(videoId: string): string {
   return `${API_BASE_URL}/api/original/${videoId}`
-}
-
-/**
- * Get original uploaded video URL (legacy - uses static file serving)
- * @deprecated Use getOriginalVideoUrl instead
- */
-export function getUploadedVideoUrl(videoId: string, extension: string = '.mp4'): string {
-  return `${API_BASE_URL}/uploads/${videoId}${extension}`
-}
-
-/**
- * Delete a video and its analysis
- */
-export async function deleteVideo(videoId: string): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/api/video/${videoId}`, {
-    method: 'DELETE'
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to delete video')
-  }
 }
 
 /**
@@ -370,22 +325,6 @@ export async function setManualCourtKeypoints(keypoints: ManualKeypointsRequest)
   return response.json()
 }
 
-/**
- * Clear manual court keypoints
- */
-export async function clearManualCourtKeypoints(): Promise<{ status: string; message: string }> {
-  const response = await fetch(`${API_BASE_URL}/api/court-keypoints/manual/clear`, {
-    method: 'DELETE'
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to clear manual keypoints')
-  }
-
-  return response.json()
-}
-
 // ============================================================================
 // Heatmap API
 // ============================================================================
@@ -412,46 +351,6 @@ export interface HeatmapResponse {
   player_id: number | null
   heatmap: HeatmapData
   status: string
-}
-
-export interface HeatmapConfigRequest {
-  colormap?: string  // turbo, parula, inferno, viridis, plasma, hot, jet, cool
-  kernel_size?: number  // Gaussian kernel size
-  sigma?: number  // Gaussian spread
-  decay_rate?: number  // Per-frame decay rate
-  intensity_scale?: number  // Heat intensity multiplier
-}
-
-export interface HeatmapGenerateRequest {
-  config?: HeatmapConfigRequest
-  player_id?: number  // null = all players
-  start_frame?: number
-  end_frame?: number
-}
-
-export interface HeatmapGenerateResponse {
-  video_id: string
-  player_id: number | null
-  frame_range: {
-    start: number | null
-    end: number | null
-    frames_processed: number
-  }
-  heatmap: HeatmapData
-  status: string
-}
-
-export interface ColorMapInfo {
-  name: string
-  display_name: string
-  description: string
-  opencv_code: string
-}
-
-export interface ColormapsResponse {
-  colormaps: ColorMapInfo[]
-  default: string
-  recommended_for_badminton: string
 }
 
 // Heatmap cache with longer TTL (heatmaps are expensive to compute)
@@ -498,111 +397,6 @@ export async function getHeatmap(
   }
   
   return data
-}
-
-/**
- * Generate heatmap with custom configuration
- */
-export async function generateHeatmap(
-  videoId: string,
-  request: HeatmapGenerateRequest
-): Promise<HeatmapGenerateResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/heatmap/${videoId}/generate`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(request)
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to generate heatmap')
-  }
-
-  const data: HeatmapGenerateResponse = await response.json()
-  
-  // Update cache with new data
-  const cacheKey = `heatmap:${videoId}:${request.player_id ?? 'all'}`
-  if (data.heatmap) {
-    heatmapCache.set(cacheKey, data.heatmap)
-  }
-  
-  return data
-}
-
-/**
- * Get heatmap data up to a specific frame (for progressive rendering)
- */
-export async function getHeatmapAtFrame(
-  videoId: string,
-  frameNumber: number,
-  playerId?: number,
-  colormap: string = 'turbo',
-  decayRate: number = 0.995
-): Promise<HeatmapResponse> {
-  let url = `${API_BASE_URL}/api/heatmap/${videoId}/frame/${frameNumber}`
-  url += `?colormap=${colormap}&decay_rate=${decayRate}`
-  if (playerId !== undefined) {
-    url += `&player_id=${playerId}`
-  }
-
-  const response = await fetch(url)
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to get heatmap at frame')
-  }
-
-  return response.json()
-}
-
-/**
- * Get available colormap options
- */
-export async function getHeatmapColormaps(): Promise<ColormapsResponse> {
-  // Use shared API cache
-  const cacheKey = 'heatmap:colormaps'
-  const cached = apiCache.get(cacheKey) as ColormapsResponse | undefined
-  if (cached) {
-    return cached
-  }
-
-  const response = await fetch(`${API_BASE_URL}/api/heatmap/colormaps`)
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to get colormaps')
-  }
-
-  const data: ColormapsResponse = await response.json()
-  apiCache.set(cacheKey, data, 3600000) // Cache for 1 hour
-  
-  return data
-}
-
-/**
- * Clear heatmap cache (for a specific video or all)
- */
-export async function clearHeatmapCache(videoId?: string): Promise<void> {
-  // Clear local cache
-  if (videoId) {
-    heatmapCache.delete(`heatmap:${videoId}:all`)
-    heatmapCache.delete(`heatmap:${videoId}:1`)
-    heatmapCache.delete(`heatmap:${videoId}:2`)
-  } else {
-    heatmapCache.clear()
-  }
-  
-  // Also clear on backend
-  const response = await fetch(`${API_BASE_URL}/api/heatmap/cache/clear`, {
-    method: 'DELETE'
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to clear heatmap cache')
-  }
 }
 
 /**

@@ -127,7 +127,7 @@ function formatDistance(distance: number): string {
 }
 
 // Zone analytics functions
-async function loadZoneAnalytics() {
+async function loadZoneAnalytics(forceRefresh: boolean = false) {
   if (!props.result.video_id) return
   
   zoneAnalyticsLoading.value = true
@@ -135,8 +135,13 @@ async function loadZoneAnalytics() {
   
   try {
     // Try to get recalculated zone analytics (uses manual keypoints if set)
-    const response = await getRecalculatedZoneAnalytics(props.result.video_id)
+    const response = await getRecalculatedZoneAnalytics(props.result.video_id, forceRefresh)
     zoneAnalytics.value = response.player_zone_analytics
+    console.log('[ResultsDashboard] Zone analytics loaded:', {
+      forceRefresh,
+      manualKeypointsUsed: response.manual_keypoints_used,
+      playerCount: Object.keys(response.player_zone_analytics).length
+    })
   } catch (error) {
     console.warn('Failed to fetch recalculated zone analytics:', error)
     // Fall back to stored zone analytics from result
@@ -186,11 +191,11 @@ watch(() => props.result.video_id, () => {
 watch(() => props.manualKeypointsSet, (newValue, oldValue) => {
   // Only reload when transitioning from false/undefined to true
   if (newValue && !oldValue && props.result.video_id) {
-    console.log('[ResultsDashboard] Manual keypoints set - reloading zone analytics')
+    console.log('[ResultsDashboard] Manual keypoints set - reloading zone analytics with forceRefresh')
     // Clear cache first to ensure fresh data
     clearZoneAnalyticsCache(props.result.video_id)
-    // Reload with fresh data
-    loadZoneAnalytics()
+    // Reload with fresh data - pass forceRefresh=true to bypass any remaining cache
+    loadZoneAnalytics(true)
   }
 })
 </script>
@@ -293,7 +298,7 @@ watch(() => props.manualKeypointsSet, (newValue, oldValue) => {
     <section class="metrics-section">
       <h3>Movement Analysis</h3>
       <div class="metrics-grid">
-        <div class="metric-card highlight">
+        <div class="metric-card">
           <span class="metric-label">Total Distance Covered</span>
           <span class="metric-value">{{ formatDistance(totalDistance) }}</span>
         </div>

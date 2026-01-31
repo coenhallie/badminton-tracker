@@ -24,7 +24,7 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "models")
 DEFAULT_EPOCHS = 150  # More epochs for small object detection
 DEFAULT_IMGSZ = 640
 DEFAULT_BATCH = 16
-DEFAULT_MODEL = "yolov8n.pt"  # Nano model - fast, good for real-time detection
+DEFAULT_MODEL = "yolo26n.pt"  # YOLO26 Nano model - NMS-free, optimized for real-time detection
 
 
 def train_model(

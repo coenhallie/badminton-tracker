@@ -55,7 +55,7 @@ backend/uploads/*
 backend/processed/*
 !backend/processed/.gitkeep
 
-# YOLOv8 model files (downloaded on first run)
+# YOLO model files (downloaded on first run)
 *.pt
 
 # ML Training datasets and model outputs (too large for version control)

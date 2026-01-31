@@ -330,60 +330,12 @@ export const SKELETON_CONNECTIONS: [number, number][] = [
   [11, 13], [13, 15], [12, 14], [14, 16]  // Legs
 ]
 
-export const KEYPOINT_COLORS: Record<string, string> = {
-  // Face keypoints
-  nose: '#FF6B6B',
-  left_eye: '#4ECDC4',
-  right_eye: '#4ECDC4',
-  left_ear: '#45B7D1',
-  right_ear: '#45B7D1',
-  // Upper body
-  left_shoulder: '#96CEB4',
-  right_shoulder: '#96CEB4',
-  left_elbow: '#FFEAA7',
-  right_elbow: '#FFEAA7',
-  left_wrist: '#DDA0DD',
-  right_wrist: '#DDA0DD',
-  // Lower body
-  left_hip: '#98D8C8',
-  right_hip: '#98D8C8',
-  left_knee: '#F7DC6F',
-  right_knee: '#F7DC6F',
-  left_ankle: '#BB8FCE',
-  right_ankle: '#BB8FCE'
-}
-
 export const PLAYER_COLORS = [
   '#FF6B6B', // Red
   '#4ECDC4', // Cyan
   '#45B7D1', // Blue
   '#96CEB4', // Green
 ]
-
-// Court zone colors for heatmap visualization
-export const COURT_ZONE_COLORS: Record<string, string> = {
-  front_left: '#FF6B6B',
-  front_center: '#FF8E8E',
-  front_right: '#FFB0B0',
-  mid_left: '#4ECDC4',
-  mid_center: '#70D7D0',
-  mid_right: '#92E1DC',
-  back_left: '#45B7D1',
-  back_center: '#67C5DB',
-  back_right: '#89D3E5',
-}
-
-// Shot type colors for visualization
-export const SHOT_TYPE_COLORS: Record<ShotType, string> = {
-  smash: '#FF4444',      // Red - aggressive
-  clear: '#4488FF',      // Blue - defensive
-  drop: '#44FF88',       // Green - deceptive
-  drive: '#FF8844',      // Orange - fast
-  net_shot: '#8844FF',   // Purple - finesse
-  lob: '#44FFFF',        // Cyan - high
-  serve: '#FFFF44',      // Yellow - start
-  unknown: '#888888',    // Gray
-}
 
 // Pose type colors for visualization
 export const POSE_TYPE_COLORS: Record<PoseType, string> = {
@@ -466,16 +418,6 @@ export const TRAINED_POSE_ICONS: Record<TrainedPoseClass, string> = {
   'smash': '💥',
   'unknown': '❓',
 }
-
-// Court keypoint names
-export const COURT_KEYPOINT_NAMES = [
-  'tr-1', 'tr-2',           // Top-right corner
-  'tl-1', 'tl-2', 'tl-3', 'tl-4',  // Top-left corner
-  'tm-1', 'tm-2',           // Top-middle (centerline)
-  'bm-1', 'bm-2',           // Bottom-middle (centerline)
-  'br-1', 'br-2',           // Bottom-right corner
-  'bl-1', 'bl-2', 'bl-3', 'bl-4',  // Bottom-left corner
-] as const
 
 // Standard badminton court dimensions (in meters)
 export const COURT_DIMENSIONS = {
