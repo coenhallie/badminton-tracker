@@ -35,6 +35,9 @@ interface ShuttlePosition {
   y: number
 }
 
+// Import SkeletonFrame type for trail computation
+import type { SkeletonFrame } from '@/types/analysis'
+
 const props = withDefaults(defineProps<{
   // Court corners in video pixel coordinates [x, y]
   // Order: top-left, top-right, bottom-right, bottom-left
@@ -56,15 +59,23 @@ const props = withDefaults(defineProps<{
   // Keypoint selection mode
   isKeypointSelectionMode?: boolean
   keypointSelectionCount?: number
+  // Full skeleton data for computing trails dynamically
+  // When provided, trails are computed from frame 0 to currentFrame
+  skeletonData?: SkeletonFrame[]
+  // Current frame number (for dynamic trail computation)
+  currentFrame?: number
+  // Maximum trail length (number of points to show)
+  maxTrailLength?: number
 }>(), {
   width: 240,
   height: 440,
   showGrid: true,
   showLabels: true,
   showShuttle: true,
-  showTrails: false,
+  showTrails: true, // Enable trails by default
   isKeypointSelectionMode: false,
-  keypointSelectionCount: 0
+  keypointSelectionCount: 0,
+  maxTrailLength: 100 // Show last 100 positions (~3.3 seconds at 30fps)
 })
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -80,9 +91,141 @@ const RENDER_THROTTLE_MS = 33 // ~30fps max
 // PERFORMANCE OPTIMIZATION: Track last player positions to skip redundant renders
 let lastPlayerHash = ''
 
-// Store position history for trails
+// Store position history for trails (legacy - only used when skeletonData is not provided)
 const playerTrails = ref<Map<number, { x: number; y: number }[]>>(new Map())
 const MAX_TRAIL_LENGTH = 30
+
+// =============================================================================
+// DYNAMIC TRAIL COMPUTATION from skeleton data
+// =============================================================================
+// When skeletonData and currentFrame are provided, compute trails dynamically
+// by looking back through the history of frames up to the current frame.
+// This gives a smooth trail that shows where each player has been.
+// =============================================================================
+
+/**
+ * Compute dynamic player trails from skeleton data up to the current frame
+ * Returns a Map of player_id -> array of court positions (in meters)
+ */
+const dynamicPlayerTrails = computed((): Map<number, { x: number; y: number }[]> => {
+  const trails = new Map<number, { x: number; y: number }[]>()
+  
+  // If no skeleton data or no homography matrix, return empty trails
+  if (!props.skeletonData || props.skeletonData.length === 0 || !homographyMatrix.value) {
+    return trails
+  }
+  
+  const currentFrameNum = props.currentFrame ?? 0
+  const maxLength = props.maxTrailLength ?? 100
+  
+  // Look back through frames to build trails
+  // Start from the frame that gives us maxTrailLength points back
+  const startIdx = Math.max(0, currentFrameNum - maxLength)
+  const endIdx = Math.min(props.skeletonData.length - 1, currentFrameNum)
+  
+  for (let i = startIdx; i <= endIdx; i++) {
+    const frame = props.skeletonData[i]
+    if (!frame?.players) continue
+    
+    for (const player of frame.players) {
+      // Get feet position for accurate court positioning
+      const feetPos = getPlayerFeetPosition(player)
+      if (!feetPos) continue
+      
+      // Transform to court coordinates
+      const courtPos = applyHomography(homographyMatrix.value!, feetPos.x, feetPos.y)
+      if (!courtPos) continue
+      
+      // Check bounds
+      const margin = 1
+      if (courtPos.x < -margin || courtPos.x > COURT_WIDTH + margin ||
+          courtPos.y < -margin || courtPos.y > COURT_LENGTH + margin) {
+        continue
+      }
+      
+      // Add to player's trail
+      let trail = trails.get(player.player_id)
+      if (!trail) {
+        trail = []
+        trails.set(player.player_id, trail)
+      }
+      trail.push({ x: courtPos.x, y: courtPos.y })
+    }
+  }
+  
+  return trails
+})
+
+/**
+ * Get feet position from player (similar to getFeetPosition but works with FramePlayer type)
+ */
+function getPlayerFeetPosition(player: FramePlayer): { x: number; y: number } | null {
+  const LEFT_ANKLE_IDX = 15
+  const RIGHT_ANKLE_IDX = 16
+  const LEFT_KNEE_IDX = 13
+  const RIGHT_KNEE_IDX = 14
+  const LEFT_HIP_IDX = 11
+  const RIGHT_HIP_IDX = 12
+  const CONFIDENCE_THRESHOLD = 0.3
+  
+  const keypoints = player.keypoints
+  
+  if (keypoints && keypoints.length >= 17) {
+    const leftAnkle = keypoints[LEFT_ANKLE_IDX]
+    const rightAnkle = keypoints[RIGHT_ANKLE_IDX]
+    
+    // Primary: use ankle midpoint
+    if (leftAnkle && rightAnkle &&
+        leftAnkle.x !== null && leftAnkle.y !== null &&
+        rightAnkle.x !== null && rightAnkle.y !== null &&
+        leftAnkle.confidence > CONFIDENCE_THRESHOLD &&
+        rightAnkle.confidence > CONFIDENCE_THRESHOLD) {
+      return {
+        x: (leftAnkle.x + rightAnkle.x) / 2,
+        y: (leftAnkle.y + rightAnkle.y) / 2
+      }
+    }
+    
+    // Fallback: single ankle
+    if (leftAnkle?.x !== null && leftAnkle?.y !== null && (leftAnkle?.confidence ?? 0) > CONFIDENCE_THRESHOLD) {
+      return { x: leftAnkle!.x!, y: leftAnkle!.y! }
+    }
+    if (rightAnkle?.x !== null && rightAnkle?.y !== null && (rightAnkle?.confidence ?? 0) > CONFIDENCE_THRESHOLD) {
+      return { x: rightAnkle!.x!, y: rightAnkle!.y! }
+    }
+    
+    // Fallback: knees
+    const leftKnee = keypoints[LEFT_KNEE_IDX]
+    const rightKnee = keypoints[RIGHT_KNEE_IDX]
+    if (leftKnee && rightKnee &&
+        leftKnee.x !== null && leftKnee.y !== null &&
+        rightKnee.x !== null && rightKnee.y !== null &&
+        leftKnee.confidence > CONFIDENCE_THRESHOLD &&
+        rightKnee.confidence > CONFIDENCE_THRESHOLD) {
+      return {
+        x: (leftKnee.x + rightKnee.x) / 2,
+        y: (leftKnee.y + rightKnee.y) / 2
+      }
+    }
+    
+    // Fallback: hips
+    const leftHip = keypoints[LEFT_HIP_IDX]
+    const rightHip = keypoints[RIGHT_HIP_IDX]
+    if (leftHip && rightHip &&
+        leftHip.x !== null && leftHip.y !== null &&
+        rightHip.x !== null && rightHip.y !== null &&
+        leftHip.confidence > CONFIDENCE_THRESHOLD &&
+        rightHip.confidence > CONFIDENCE_THRESHOLD) {
+      return {
+        x: (leftHip.x + rightHip.x) / 2,
+        y: (leftHip.y + rightHip.y) / 2
+      }
+    }
+  }
+  
+  // Final fallback: use player center
+  return player.center || null
+}
 
 // Court dimensions in meters (standard badminton court)
 const COURT_LENGTH = COURT_DIMENSIONS.length // 13.4m
@@ -644,35 +787,74 @@ function drawCourt(ctx: CanvasRenderingContext2D) {
 
 /**
  * Draw player trails (position history)
+ * Uses dynamicPlayerTrails when skeletonData is available, otherwise falls back to legacy playerTrails
  */
 function drawPlayerTrails(ctx: CanvasRenderingContext2D) {
   if (!props.showTrails) return
   
-  playerTrails.value.forEach((trail, playerId) => {
+  // Use dynamic trails from skeleton data if available, otherwise use legacy trails
+  const trails = props.skeletonData && props.skeletonData.length > 0
+    ? dynamicPlayerTrails.value
+    : playerTrails.value
+  
+  trails.forEach((trail, playerId) => {
     if (trail.length < 2) return
     
-    const color = PLAYER_COLORS[playerId % PLAYER_COLORS.length] ?? '#FF6B6B'
+    // Use player index for consistent coloring
+    const colorIndex = playerId - 1 // player_id is 1-based
+    const color = PLAYER_COLORS[colorIndex >= 0 ? colorIndex % PLAYER_COLORS.length : 0] ?? '#FF6B6B'
     
-    ctx.beginPath()
-    ctx.strokeStyle = color
-    ctx.lineWidth = 2
+    // Draw trail as a gradient line that fades from old to new
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
     
-    const first = trail[0]!
-    const firstCanvas = courtToCanvas(first.x, first.y)
-    ctx.moveTo(firstCanvas.x, firstCanvas.y)
-    
+    // Draw trail segments with gradient opacity
     for (let i = 1; i < trail.length; i++) {
-      const point = trail[i]!
-      const canvasPos = courtToCanvas(point.x, point.y)
+      const prev = trail[i - 1]!
+      const curr = trail[i]!
+      const prevCanvas = courtToCanvas(prev.x, prev.y)
+      const currCanvas = courtToCanvas(curr.x, curr.y)
       
-      // Fade opacity based on age
-      const alpha = (i / trail.length) * 0.5
-      ctx.strokeStyle = color + Math.round(alpha * 255).toString(16).padStart(2, '0')
-      ctx.lineTo(canvasPos.x, canvasPos.y)
+      // Fade opacity based on position in trail (older = more transparent)
+      const progress = i / trail.length
+      const alpha = 0.15 + progress * 0.65 // Range from 0.15 to 0.80
+      const lineWidth = 1.5 + progress * 2 // Range from 1.5 to 3.5
+      
+      ctx.beginPath()
+      ctx.moveTo(prevCanvas.x, prevCanvas.y)
+      ctx.lineTo(currCanvas.x, currCanvas.y)
+      ctx.strokeStyle = hexToRgba(color, alpha)
+      ctx.lineWidth = lineWidth
+      ctx.stroke()
     }
     
-    ctx.stroke()
+    // Draw small dots at key positions along the trail
+    const dotInterval = Math.max(1, Math.floor(trail.length / 10)) // Show ~10 dots max
+    for (let i = 0; i < trail.length; i += dotInterval) {
+      const point = trail[i]!
+      const canvasPos = courtToCanvas(point.x, point.y)
+      const progress = i / trail.length
+      const alpha = 0.2 + progress * 0.5
+      const radius = 2 + progress * 2
+      
+      ctx.beginPath()
+      ctx.arc(canvasPos.x, canvasPos.y, radius, 0, Math.PI * 2)
+      ctx.fillStyle = hexToRgba(color, alpha)
+      ctx.fill()
+    }
   })
+}
+
+/**
+ * Convert hex color to rgba with specified alpha
+ */
+function hexToRgba(hex: string, alpha: number): string {
+  // Remove # if present
+  const cleanHex = hex.replace('#', '')
+  const r = parseInt(cleanHex.substring(0, 2), 16)
+  const g = parseInt(cleanHex.substring(2, 4), 16)
+  const b = parseInt(cleanHex.substring(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
 }
 
 /**
@@ -1035,25 +1217,22 @@ function render(force = false) {
   // Clear canvas
   ctx.clearRect(0, 0, props.width, canvasHeight.value)
   
-  // In keypoint selection mode, always show the guide (even without court data)
+  // Always draw the court first (even without court corner data)
+  drawCourt(ctx)
+  
+  // In keypoint selection mode, show the keypoint guide overlay
   if (props.isKeypointSelectionMode) {
-    // Draw the court background for reference
-    drawCourt(ctx)
     // Draw keypoint selection guide on top
     drawKeypointSelectionGuide(ctx)
     return
   }
   
-  // Check if we have valid court corners (only needed for player tracking)
+  // Only draw players/trails/shuttle when we have valid court corners for tracking
   if (!effectiveCourtCorners.value) {
-    drawNoCourtMessage(ctx)
+    // No court corners - show the court but no player tracking
     return
   }
   
-  // Draw court
-  drawCourt(ctx)
-  
-  // Only draw players/trails/shuttle when NOT in selection mode
   // Draw player trails
   drawPlayerTrails(ctx)
   
@@ -1077,12 +1256,21 @@ watch([
   () => props.isKeypointSelectionMode,
   () => props.keypointSelectionCount,
   () => props.height,
-  () => props.width
+  () => props.width,
+  () => props.currentFrame,  // Re-render when frame changes for dynamic trails
+  () => props.skeletonData   // Re-render when skeleton data changes
 ], () => {
   // Reset cached context when dimensions change
   cachedCtx = null
   render(true) // Force render when props change
 }, { deep: true })
+
+// Optimized watch for currentFrame changes (high frequency during playback)
+// Use a separate watcher with throttling for smooth trail updates
+watch(() => props.currentFrame, () => {
+  // Don't force render, let the throttle in render() handle it
+  render(false)
+})
 
 // Initial render
 onMounted(() => {

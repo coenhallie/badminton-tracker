@@ -8,7 +8,8 @@ import MiniCourt from '@/components/MiniCourt.vue'
 import SpeedGraph from '@/components/SpeedGraph.vue'
 import {
   checkApiHealth, getOriginalVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
-  getHeatmap, preloadHeatmap, triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline
+  getHeatmap, preloadHeatmap, triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
+  clearZoneAnalyticsCache, getRecalculatedZoneAnalytics
 } from '@/services/api'
 import type { UploadResponse, AnalysisResult, SkeletonFrame } from '@/types/analysis'
 import type { HeatmapData, SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
@@ -90,6 +91,10 @@ interface ExtendedCourtKeypoints {
 
 // Manual court keypoints storage (for mini court when manually set)
 const manualCourtKeypoints = ref<ExtendedCourtKeypoints | null>(null)
+
+// Zone analytics recalculation trigger counter
+// Incremented each time keypoints are confirmed to trigger ResultsDashboard refresh
+const zoneRecalculationTrigger = ref(0)
 
 // ============================================================================
 // DELAYED SPEED CALCULATION STATE
@@ -469,6 +474,45 @@ async function handleCourtKeypointsSet(keypoints: ExtendedCourtKeypoints) {
   }
 }
 
+// Handle keypoints confirmed event from VideoPlayer (when Done button is clicked)
+// This triggers zone coverage recalculation with the new homography
+async function handleKeypointsConfirmed(keypoints: ExtendedCourtKeypoints) {
+  try {
+    console.log('[App] Keypoints confirmed by user - triggering zone recalculation')
+    
+    // Store locally for MiniCourt component
+    manualCourtKeypoints.value = keypoints
+    
+    // Backend API still uses 4-corner format for basic court detection
+    // Send the 4 corners to backend for homography calculation
+    const fourCornerFormat = {
+      top_left: keypoints.top_left,
+      top_right: keypoints.top_right,
+      bottom_right: keypoints.bottom_right,
+      bottom_left: keypoints.bottom_left
+    }
+    
+    // Set keypoints on backend
+    await setManualCourtKeypoints(fourCornerFormat)
+    console.log('[App] Manual keypoints sent to backend')
+    
+    // Clear zone analytics cache to force fresh recalculation
+    if (analysisResult.value) {
+      console.log('[App] Clearing zone analytics cache for video:', analysisResult.value.video_id)
+      clearZoneAnalyticsCache(analysisResult.value.video_id)
+      
+      // Increment trigger to force ResultsDashboard to reload zone analytics
+      zoneRecalculationTrigger.value++
+      console.log('[App] Zone recalculation trigger incremented to:', zoneRecalculationTrigger.value)
+    }
+    
+    errorMessage.value = '' // Clear any previous error
+  } catch (e) {
+    console.error('Failed to process keypoints confirmation:', e)
+    errorMessage.value = 'Failed to recalculate zone coverage'
+  }
+}
+
 // Watch for heatmap toggle - load data when enabled
 watch(showHeatmap, (enabled) => {
   if (enabled && !heatmapData.value && analysisResult.value) {
@@ -612,7 +656,7 @@ watch(videoSectionRef, () => {
             <h2>Analyze Your Badminton Match</h2>
             <p>
               Upload a video of your badminton match and get detailed analysis including
-              player movement patterns, speed metrics, and shot analysis powered by AI.
+              player movement patterns, speed metrics, and court coverage by AI.
             </p>
           </div>
 
@@ -642,7 +686,7 @@ watch(videoSectionRef, () => {
                 </svg>
               </div>
               <h3>Speed Analysis</h3>
-              <p>Calculate player movement speed and shot velocities</p>
+              <p>Calculate player movement speed and court coverage</p>
             </div>
 
             <div class="feature">
@@ -842,6 +886,7 @@ watch(videoSectionRef, () => {
                   :pose-source="poseSource"
                   :show-heatmap="showHeatmap"
                   @court-keypoints-set="handleCourtKeypointsSet"
+                  @keypoints-confirmed="handleKeypointsConfirmed"
                   @time-update="handleTimeUpdate"
                   @frame-update="handleFrameUpdate"
                   @play="handleVideoPlay"
@@ -890,6 +935,7 @@ watch(videoSectionRef, () => {
               <ResultsDashboard
                 :result="analysisResult"
                 :manual-keypoints-set="manualCourtKeypoints !== null"
+                :zone-recalculation-trigger="zoneRecalculationTrigger"
               />
             </div>
           </div>

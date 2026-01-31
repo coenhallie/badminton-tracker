@@ -11,6 +11,8 @@ const props = defineProps<{
   result: AnalysisResult
   // Indicates whether manual court keypoints have been set (triggers zone analytics reload)
   manualKeypointsSet?: boolean
+  // Counter that increments when keypoints are confirmed (triggers zone recalculation)
+  zoneRecalculationTrigger?: number
 }>()
 
 // PDF Export state
@@ -195,6 +197,26 @@ watch(() => props.manualKeypointsSet, (newValue, oldValue) => {
     // Clear cache first to ensure fresh data
     clearZoneAnalyticsCache(props.result.video_id)
     // Reload with fresh data - pass forceRefresh=true to bypass any remaining cache
+    loadZoneAnalytics(true)
+  }
+})
+
+// Watch for zone recalculation trigger - reloads zone analytics when keypoints are confirmed via Done button
+// This triggers every time the trigger counter increments, ensuring recalculation happens
+// even when keypoints are adjusted and Done is clicked multiple times
+watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
+  // Only trigger when counter increases (and is a valid number)
+  if (newValue && newValue > 0 && newValue !== oldValue && props.result.video_id) {
+    console.log(`[ResultsDashboard] Zone recalculation triggered (counter: ${newValue})`)
+    console.log('[ResultsDashboard] Clearing cache and reloading zone analytics...')
+    
+    // Clear cache to force fresh calculation from backend
+    clearZoneAnalyticsCache(props.result.video_id)
+    
+    // Set loading state for UI feedback
+    zoneAnalyticsLoading.value = true
+    
+    // Reload with force refresh to get recalculated data using new homography
     loadZoneAnalytics(true)
   }
 })

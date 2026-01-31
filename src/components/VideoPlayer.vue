@@ -301,6 +301,7 @@ const emit = defineEmits<{
   timeUpdate: [time: number]
   frameUpdate: [frame: number]
   courtKeypointsSet: [keypoints: ExtendedCourtKeypoints]
+  keypointsConfirmed: [keypoints: ExtendedCourtKeypoints]
   play: []
   keypointSelectionChange: [isActive: boolean, currentCount: number]
 }>()
@@ -699,6 +700,50 @@ function undoLastKeypoint() {
     manualKeypoints.value.pop()
     drawKeypointOverlay()
   }
+}
+
+/**
+ * Confirm and apply the selected keypoints
+ * Called when the "Done" button is clicked
+ * This triggers zone coverage recalculation with the new homography
+ */
+function confirmKeypoints() {
+  if (manualKeypoints.value.length !== TOTAL_KEYPOINTS) {
+    console.warn('[Keypoint Selection] Cannot confirm - need all 12 keypoints')
+    return
+  }
+  
+  const kp = manualKeypoints.value
+  const keypointsData: ExtendedCourtKeypoints = {
+    // 4 outer corners
+    top_left: [kp[0]?.x ?? 0, kp[0]?.y ?? 0],
+    top_right: [kp[1]?.x ?? 0, kp[1]?.y ?? 0],
+    bottom_right: [kp[2]?.x ?? 0, kp[2]?.y ?? 0],
+    bottom_left: [kp[3]?.x ?? 0, kp[3]?.y ?? 0],
+    // Net intersections
+    net_left: [kp[4]?.x ?? 0, kp[4]?.y ?? 0],
+    net_right: [kp[5]?.x ?? 0, kp[5]?.y ?? 0],
+    // Service line corners (near court)
+    service_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
+    service_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
+    // Service line corners (far court)
+    service_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
+    service_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
+    // Center line endpoints
+    center_near: [kp[10]?.x ?? 0, kp[10]?.y ?? 0],
+    center_far: [kp[11]?.x ?? 0, kp[11]?.y ?? 0]
+  }
+  
+  console.log('[Keypoint Selection] Keypoints confirmed by user - triggering recalculation')
+  
+  // Emit the confirmed keypoints - this should trigger zone recalculation
+  emit('keypointsConfirmed', keypointsData)
+  
+  // Also emit courtKeypointsSet for initial setup if not already set
+  emit('courtKeypointsSet', keypointsData)
+  
+  // Exit keypoint selection mode
+  isKeypointSelectionMode.value = false
 }
 
 /**
@@ -1515,8 +1560,8 @@ watch([isKeypointSelectionMode, () => manualKeypoints.value.length], ([isActive,
           <button
             v-if="manualKeypoints.length === 12"
             class="keypoint-btn apply"
-            @click="isKeypointSelectionMode = false"
-            title="Finish and apply keypoints"
+            @click="confirmKeypoints"
+            title="Confirm keypoints and recalculate zone coverage"
           >
             ✓ Done
           </button>
