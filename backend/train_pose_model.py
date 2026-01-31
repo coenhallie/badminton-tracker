@@ -99,8 +99,8 @@ def train_pose_model(
         print("Resuming training from last checkpoint...")
         model = YOLO(str(output_dir / "weights" / "last.pt"))
     else:
-        # Use YOLOv8 detection model as base
-        model_name = f"yolo11{model_size}.pt"
+        # Use YOLO26 detection model as base (consistent with application)
+        model_name = f"yolo26{model_size}.pt"
         print(f"Loading base model: {model_name}")
         model = YOLO(model_name)
     
@@ -108,7 +108,7 @@ def train_pose_model(
     print("\n" + "="*60)
     print("BADMINTON POSE MODEL TRAINING")
     print("="*60)
-    print(f"Model: YOLO11{model_size.upper()}")
+    print(f"Model: YOLO26{model_size.upper()}")
     print(f"Epochs: {epochs}")
     print(f"Batch size: {batch_size}")
     print(f"Image size: {img_size}")

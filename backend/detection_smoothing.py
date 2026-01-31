@@ -5,6 +5,7 @@ Provides smooth tracking of detected objects using:
 1. Kalman filtering for noise reduction and prediction
 2. Temporal interpolation for frames without detections
 3. Motion prediction for fast-moving objects (shuttlecock)
+4. Static detection filtering for false positive removal
 
 This module addresses the lag between detections and video frames
 during rapid movements in badminton matches.
@@ -27,6 +28,271 @@ class SmoothPosition:
     confidence: float = 1.0
     frame_number: int = 0
     is_predicted: bool = False
+
+
+@dataclass
+class StaticDetectionZone:
+    """Represents a zone where static false positives are detected"""
+    x: float
+    y: float
+    radius: float  # Detection radius in pixels
+    detection_count: int = 0
+    last_frame: int = 0
+    first_frame: int = 0
+    
+    def contains(self, px: float, py: float, tolerance: float = 0) -> bool:
+        """Check if a point is within this zone"""
+        distance = np.sqrt((px - self.x) ** 2 + (py - self.y) ** 2)
+        return distance <= (self.radius + tolerance)
+    
+    def update(self, px: float, py: float, frame_number: int):
+        """Update zone center with a new detection (running average)"""
+        # Smooth update of position
+        alpha = 0.1  # Learning rate for position update
+        self.x = self.x * (1 - alpha) + px * alpha
+        self.y = self.y * (1 - alpha) + py * alpha
+        self.detection_count += 1
+        self.last_frame = frame_number
+
+
+class StaticDetectionFilter:
+    """
+    Filters out static false positive detections by tracking positions
+    that remain stationary across multiple frames.
+    
+    Static objects (like scoring card points, UI elements, or artifacts)
+    will be detected in the same location repeatedly without movement.
+    Real shuttlecocks are always moving during active play.
+    
+    This filter:
+    1. Tracks detection positions across frames
+    2. Identifies zones where detections appear consistently without movement
+    3. Filters out detections in these static zones
+    """
+    
+    def __init__(
+        self,
+        static_threshold_frames: int = 30,
+        position_tolerance: float = 25.0,
+        min_movement_per_frame: float = 2.0,
+        zone_expiry_frames: int = 300,
+        min_detections_for_static: int = 15
+    ):
+        """
+        Initialize the static detection filter.
+        
+        Args:
+            static_threshold_frames: Number of consecutive frames a detection
+                must appear without significant movement to be considered static
+            position_tolerance: Maximum pixel distance to consider detections
+                as the same position (default: 25px)
+            min_movement_per_frame: Minimum expected movement (pixels/frame)
+                for a real shuttle
+            zone_expiry_frames: Frames after which an unused static zone expires
+            min_detections_for_static: Minimum detections needed to mark a zone as static
+        """
+        self.static_threshold_frames = static_threshold_frames
+        self.position_tolerance = position_tolerance
+        self.min_movement_per_frame = min_movement_per_frame
+        self.zone_expiry_frames = zone_expiry_frames
+        self.min_detections_for_static = min_detections_for_static
+        
+        # Track static zones (areas with false positives)
+        self.static_zones: List[StaticDetectionZone] = []
+        
+        # Track recent detection positions for movement analysis
+        self.recent_positions: deque = deque(maxlen=static_threshold_frames)
+        
+        # Candidate zones (being evaluated)
+        self.candidate_zones: List[StaticDetectionZone] = []
+        
+        # Current frame number
+        self.current_frame = 0
+        
+        # Statistics
+        self.total_filtered: int = 0
+        self.total_passed: int = 0
+    
+    def _find_matching_zone(
+        self,
+        x: float,
+        y: float,
+        zones: List[StaticDetectionZone],
+        tolerance_multiplier: float = 1.0
+    ) -> Optional[StaticDetectionZone]:
+        """Find a zone that contains the given position"""
+        for zone in zones:
+            if zone.contains(x, y, self.position_tolerance * tolerance_multiplier):
+                return zone
+        return None
+    
+    def _calculate_recent_movement(self) -> float:
+        """Calculate average movement from recent positions"""
+        if len(self.recent_positions) < 2:
+            return float('inf')  # Not enough data
+        
+        positions = list(self.recent_positions)
+        total_movement = 0.0
+        
+        for i in range(1, len(positions)):
+            p1, p2 = positions[i-1], positions[i]
+            frame_diff = p2[2] - p1[2]  # Frame difference
+            if frame_diff > 0:
+                distance = np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+                movement_per_frame = distance / frame_diff
+                total_movement += movement_per_frame
+        
+        return total_movement / (len(positions) - 1) if len(positions) > 1 else float('inf')
+    
+    def _cleanup_expired_zones(self, current_frame: int):
+        """Remove zones that haven't been seen recently"""
+        self.static_zones = [
+            zone for zone in self.static_zones
+            if (current_frame - zone.last_frame) < self.zone_expiry_frames
+        ]
+        self.candidate_zones = [
+            zone for zone in self.candidate_zones
+            if (current_frame - zone.last_frame) < self.static_threshold_frames * 2
+        ]
+    
+    def _promote_candidate_to_static(self, candidate: StaticDetectionZone):
+        """Promote a candidate zone to confirmed static zone"""
+        # Check if there's already a similar static zone
+        existing = self._find_matching_zone(candidate.x, candidate.y, self.static_zones)
+        if existing:
+            existing.update(candidate.x, candidate.y, candidate.last_frame)
+        else:
+            self.static_zones.append(StaticDetectionZone(
+                x=candidate.x,
+                y=candidate.y,
+                radius=self.position_tolerance,
+                detection_count=candidate.detection_count,
+                last_frame=candidate.last_frame,
+                first_frame=candidate.first_frame
+            ))
+            print(f"[StaticFilter] New static zone detected at ({candidate.x:.1f}, {candidate.y:.1f}) - likely false positive")
+    
+    def filter_detections(
+        self,
+        detections: List[Dict],
+        frame_number: int
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Filter detections, removing those in static zones.
+        
+        Args:
+            detections: List of detection dicts with 'x' and 'y' keys
+            frame_number: Current frame number
+            
+        Returns:
+            Tuple of (valid_detections, filtered_detections)
+        """
+        self.current_frame = frame_number
+        self._cleanup_expired_zones(frame_number)
+        
+        valid = []
+        filtered = []
+        
+        for det in detections:
+            x = det.get("x", 0)
+            y = det.get("y", 0)
+            
+            # Check if detection is in a known static zone
+            static_zone = self._find_matching_zone(x, y, self.static_zones)
+            if static_zone:
+                static_zone.update(x, y, frame_number)
+                filtered.append(det)
+                self.total_filtered += 1
+                continue
+            
+            # Check if detection matches a candidate zone
+            candidate_zone = self._find_matching_zone(x, y, self.candidate_zones)
+            if candidate_zone:
+                candidate_zone.update(x, y, frame_number)
+                
+                # Check if candidate should be promoted
+                frames_span = frame_number - candidate_zone.first_frame
+                if (candidate_zone.detection_count >= self.min_detections_for_static and
+                    frames_span >= self.static_threshold_frames):
+                    self._promote_candidate_to_static(candidate_zone)
+                    self.candidate_zones.remove(candidate_zone)
+                    filtered.append(det)
+                    self.total_filtered += 1
+                    continue
+            else:
+                # Create new candidate zone
+                self.candidate_zones.append(StaticDetectionZone(
+                    x=x,
+                    y=y,
+                    radius=self.position_tolerance,
+                    detection_count=1,
+                    last_frame=frame_number,
+                    first_frame=frame_number
+                ))
+            
+            # Track position for movement analysis
+            self.recent_positions.append((x, y, frame_number))
+            
+            valid.append(det)
+            self.total_passed += 1
+        
+        return valid, filtered
+    
+    def is_static_position(self, x: float, y: float) -> bool:
+        """Check if a position is within a known static zone"""
+        return self._find_matching_zone(x, y, self.static_zones) is not None
+    
+    def add_manual_exclusion_zone(self, x: float, y: float, radius: float = 50.0):
+        """
+        Manually add an exclusion zone (useful for known problem areas).
+        
+        Args:
+            x: Center x coordinate
+            y: Center y coordinate
+            radius: Exclusion radius in pixels
+        """
+        self.static_zones.append(StaticDetectionZone(
+            x=x,
+            y=y,
+            radius=radius,
+            detection_count=1,
+            last_frame=self.current_frame,
+            first_frame=self.current_frame
+        ))
+        print(f"[StaticFilter] Manual exclusion zone added at ({x:.1f}, {y:.1f}), radius={radius:.1f}px")
+    
+    def get_static_zones(self) -> List[Dict]:
+        """Get list of current static zones for debugging/visualization"""
+        return [
+            {
+                "x": zone.x,
+                "y": zone.y,
+                "radius": zone.radius,
+                "detection_count": zone.detection_count,
+                "first_frame": zone.first_frame,
+                "last_frame": zone.last_frame
+            }
+            for zone in self.static_zones
+        ]
+    
+    def get_stats(self) -> Dict:
+        """Get filter statistics"""
+        return {
+            "total_filtered": self.total_filtered,
+            "total_passed": self.total_passed,
+            "static_zones_count": len(self.static_zones),
+            "candidate_zones_count": len(self.candidate_zones),
+            "filter_rate": self.total_filtered / max(1, self.total_filtered + self.total_passed)
+        }
+    
+    def reset(self):
+        """Reset all zones and statistics"""
+        self.static_zones.clear()
+        self.candidate_zones.clear()
+        self.recent_positions.clear()
+        self.total_filtered = 0
+        self.total_passed = 0
+        self.current_frame = 0
 
 
 @dataclass
@@ -208,6 +474,7 @@ class DetectionSmoother:
     
     Maintains separate Kalman trackers for each detected object
     and provides interpolation for frames without detections.
+    Also filters out static false positive detections (e.g., scoring card points).
     """
     
     def __init__(
@@ -217,7 +484,9 @@ class DetectionSmoother:
         player_measurement_noise: float = 1.0,
         shuttle_process_noise: float = 2.0,
         shuttle_measurement_noise: float = 0.5,
-        max_prediction_frames: int = 5
+        max_prediction_frames: int = 5,
+        enable_static_filter: bool = True,
+        static_filter_threshold_frames: int = 30
     ):
         """
         Initialize the detection smoother.
@@ -229,6 +498,8 @@ class DetectionSmoother:
             shuttle_process_noise: Process noise for shuttle (higher = more responsive)
             shuttle_measurement_noise: Measurement noise for shuttle
             max_prediction_frames: Maximum frames to predict without detection
+            enable_static_filter: Enable filtering of static false positives
+            static_filter_threshold_frames: Frames needed to classify as static
         """
         self.fps = fps
         self.max_prediction_frames = max_prediction_frames
@@ -243,6 +514,16 @@ class DetectionSmoother:
         self.player_measurement_noise = player_measurement_noise
         self.shuttle_process_noise = shuttle_process_noise
         self.shuttle_measurement_noise = shuttle_measurement_noise
+        
+        # Static detection filter for shuttle (filters false positives like scoring cards)
+        self.enable_static_filter = enable_static_filter
+        self.static_filter: Optional[StaticDetectionFilter] = None
+        if enable_static_filter:
+            self.static_filter = StaticDetectionFilter(
+                static_threshold_frames=static_filter_threshold_frames,
+                position_tolerance=25.0,  # 25px tolerance for same position
+                min_detections_for_static=15  # Need 15 detections to confirm static
+            )
         
         # History for interpolation
         self.frame_history: deque = deque(maxlen=100)
@@ -319,10 +600,21 @@ class DetectionSmoother:
                             "confidence": max(0.3, 1.0 - frames_since_update * 0.2)
                         })
         
-        # Process shuttle detections
+        # Process shuttle detections with static filter
+        filtered_shuttlecocks = shuttlecocks
         if shuttlecocks and len(shuttlecocks) > 0:
-            # Use highest confidence shuttle
-            best_shuttle = max(shuttlecocks, key=lambda s: s.get("confidence", 0))
+            # Apply static detection filter to remove false positives (e.g., scoring card points)
+            if self.enable_static_filter and self.static_filter:
+                filtered_shuttlecocks, removed = self.static_filter.filter_detections(
+                    shuttlecocks, frame_number
+                )
+                if removed:
+                    # Store info about filtered detections for debugging
+                    result["filtered_static_detections"] = len(removed)
+        
+        if filtered_shuttlecocks and len(filtered_shuttlecocks) > 0:
+            # Use highest confidence shuttle from filtered list
+            best_shuttle = max(filtered_shuttlecocks, key=lambda s: s.get("confidence", 0))
             x = best_shuttle.get("x", 0)
             y = best_shuttle.get("y", 0)
             
@@ -383,11 +675,38 @@ class DetectionSmoother:
         return result
     
     def reset(self):
-        """Reset all trackers"""
+        """Reset all trackers and static filter"""
         self.player_trackers.clear()
         self.shuttle_tracker = None
         self.racket_trackers.clear()
         self.frame_history.clear()
+        if self.static_filter:
+            self.static_filter.reset()
+    
+    def add_exclusion_zone(self, x: float, y: float, radius: float = 50.0):
+        """
+        Add a manual exclusion zone for shuttlecock detection.
+        Useful for areas with known false positives like scoring cards.
+        
+        Args:
+            x: Center x coordinate in pixels
+            y: Center y coordinate in pixels
+            radius: Exclusion radius in pixels (default: 50)
+        """
+        if self.static_filter:
+            self.static_filter.add_manual_exclusion_zone(x, y, radius)
+    
+    def get_static_filter_stats(self) -> Dict:
+        """Get statistics about filtered detections"""
+        if self.static_filter:
+            return self.static_filter.get_stats()
+        return {"enabled": False}
+    
+    def get_static_zones(self) -> List[Dict]:
+        """Get list of identified static zones (false positive areas)"""
+        if self.static_filter:
+            return self.static_filter.get_static_zones()
+        return []
 
 
 class FrameInterpolator:

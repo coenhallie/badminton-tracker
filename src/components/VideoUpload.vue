@@ -187,19 +187,19 @@ async function startUpload() {
 
 .upload-zone {
   position: relative;
-  border: 2px dashed #4a5568;
-  border-radius: 12px;
+  border: 2px dashed #333;
+  border-radius: 0;
   padding: 48px 24px;
   text-align: center;
   cursor: pointer;
   transition: all 0.3s ease;
-  background: linear-gradient(145deg, #1a1f2e, #242b3d);
+  background: #141414;
 }
 
 .upload-zone:hover,
 .upload-zone.dragging {
-  border-color: #667eea;
-  background: linear-gradient(145deg, #1e2436, #2a3349);
+  border-color: #22c55e;
+  background: #1a1a1a;
 }
 
 .upload-zone.dragging {
@@ -210,7 +210,7 @@ async function startUpload() {
   width: 64px;
   height: 64px;
   margin: 0 auto 16px;
-  color: #667eea;
+  color: #22c55e;
 }
 
 .upload-icon svg {
@@ -219,19 +219,19 @@ async function startUpload() {
 }
 
 .upload-zone h3 {
-  color: #e2e8f0;
+  color: #fff;
   font-size: 1.25rem;
   margin-bottom: 8px;
 }
 
 .upload-zone p {
-  color: #a0aec0;
+  color: #888;
   margin-bottom: 8px;
 }
 
 .file-types {
   font-size: 0.875rem;
-  color: #718096;
+  color: #666;
 }
 
 .file-input {
@@ -244,9 +244,10 @@ async function startUpload() {
 }
 
 .file-preview {
-  background: linear-gradient(145deg, #1a1f2e, #242b3d);
-  border-radius: 12px;
+  background: #141414;
+  border-radius: 0;
   padding: 24px;
+  border: 1px solid #222;
 }
 
 .file-info {
@@ -260,9 +261,9 @@ async function startUpload() {
   width: 48px;
   height: 48px;
   padding: 10px;
-  background: rgba(102, 126, 234, 0.2);
-  border-radius: 10px;
-  color: #667eea;
+  background: #1a1a1a;
+  border-radius: 0;
+  color: #22c55e;
 }
 
 .file-icon svg {
@@ -278,7 +279,7 @@ async function startUpload() {
 }
 
 .file-name {
-  color: #e2e8f0;
+  color: #fff;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
@@ -286,7 +287,7 @@ async function startUpload() {
 }
 
 .file-size {
-  color: #718096;
+  color: #666;
   font-size: 0.875rem;
 }
 
@@ -294,30 +295,31 @@ async function startUpload() {
   width: 36px;
   height: 36px;
   padding: 8px;
-  background: rgba(239, 68, 68, 0.2);
-  border: none;
-  border-radius: 8px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0;
   color: #ef4444;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .remove-btn:hover {
-  background: rgba(239, 68, 68, 0.3);
+  background: #222;
+  border-color: #ef4444;
 }
 
 .progress-bar {
   height: 8px;
-  background: #2d3748;
-  border-radius: 4px;
+  background: #1a1a1a;
+  border-radius: 0;
   overflow: hidden;
   margin-bottom: 16px;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #667eea, #764ba2);
-  border-radius: 4px;
+  background: #22c55e;
+  border-radius: 0;
   transition: width 0.3s ease;
 }
 
@@ -328,10 +330,10 @@ async function startUpload() {
   justify-content: center;
   gap: 8px;
   padding: 14px 24px;
-  background: linear-gradient(135deg, #667eea, #764ba2);
+  background: #22c55e;
   border: none;
-  border-radius: 8px;
-  color: white;
+  border-radius: 0;
+  color: #000;
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
@@ -339,8 +341,7 @@ async function startUpload() {
 }
 
 .upload-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+  background: #16a34a;
 }
 
 .upload-btn svg {
@@ -353,14 +354,14 @@ async function startUpload() {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  color: #a0aec0;
+  color: #888;
 }
 
 .spinner {
   width: 24px;
   height: 24px;
-  border: 3px solid #2d3748;
-  border-top-color: #667eea;
+  border: 3px solid #222;
+  border-top-color: #22c55e;
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }

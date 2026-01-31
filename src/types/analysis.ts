@@ -89,7 +89,7 @@ export interface CourtPosition {
   distance_to_net: number | null
 }
 
-// Pose types for player pose classification
+// Pose types for player pose classification (from skeleton keypoint analysis)
 export type PoseType =
   | 'standing'
   | 'ready'
@@ -102,6 +102,30 @@ export type PoseType =
   | 'jump'
   | 'recovery'
   | 'unknown'
+
+// Trained pose/action classification types (from custom trained YOLO model)
+// Classes: backhand-general, defense, lift, offense, serve, smash
+export type TrainedPoseClass =
+  | 'backhand-general'
+  | 'defense'
+  | 'lift'
+  | 'offense'
+  | 'serve'
+  | 'smash'
+  | 'unknown'
+
+// Pose classification result from custom trained model
+export interface PoseClassificationResult {
+  class_name: TrainedPoseClass  // Class name from the trained YOLO model
+  confidence: number
+  class_id?: number
+  bbox?: {
+    x: number
+    y: number
+    width: number
+    height: number
+  } | null
+}
 
 // Body angles for pose analysis
 export interface BodyAngles {
@@ -157,6 +181,7 @@ export interface SkeletonFrame {
   players: FramePlayer[]
   court_detected?: boolean
   badminton_detections?: BadmintonDetections | null
+  pose_classifications?: PoseClassificationResult[] | null  // Custom trained pose/action classifications
   shuttle_position?: { x: number; y: number } | null
   shuttle_speed_kmh?: number | null
 }
@@ -403,6 +428,43 @@ export const POSE_TYPE_ICONS: Record<PoseType, string> = {
   jump: '🦘',
   recovery: '🔄',
   unknown: '❓',
+}
+
+// =============================================================================
+// TRAINED POSE CLASSIFICATION COLORS/NAMES/ICONS
+// =============================================================================
+
+// Colors for trained pose classification model
+export const TRAINED_POSE_COLORS: Record<TrainedPoseClass, string> = {
+  'backhand-general': '#9F7AEA', // Purple - backhand strokes
+  'defense': '#48BB78',          // Green - defensive stance
+  'lift': '#38B2AC',             // Teal - lifting shot
+  'offense': '#F56565',          // Red - offensive position
+  'serve': '#ECC94B',            // Yellow - service action
+  'smash': '#ED8936',            // Orange - smash attack
+  'unknown': '#718096',          // Gray
+}
+
+// Display names for trained pose classes
+export const TRAINED_POSE_NAMES: Record<TrainedPoseClass, string> = {
+  'backhand-general': 'Backhand',
+  'defense': 'Defense',
+  'lift': 'Lift',
+  'offense': 'Offense',
+  'serve': 'Serve',
+  'smash': 'Smash',
+  'unknown': 'Unknown',
+}
+
+// Icons for trained pose classes
+export const TRAINED_POSE_ICONS: Record<TrainedPoseClass, string> = {
+  'backhand-general': '🔙',
+  'defense': '🛡️',
+  'lift': '⬆️',
+  'offense': '⚔️',
+  'serve': '🎯',
+  'smash': '💥',
+  'unknown': '❓',
 }
 
 // Court keypoint names

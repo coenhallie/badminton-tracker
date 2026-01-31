@@ -53,13 +53,18 @@ const props = withDefaults(defineProps<{
   showLabels?: boolean
   showShuttle?: boolean
   showTrails?: boolean
+  // Keypoint selection mode
+  isKeypointSelectionMode?: boolean
+  keypointSelectionCount?: number
 }>(), {
   width: 240,
   height: 440,
   showGrid: true,
   showLabels: true,
   showShuttle: true,
-  showTrails: false
+  showTrails: false,
+  isKeypointSelectionMode: false,
+  keypointSelectionCount: 0
 })
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -120,11 +125,23 @@ const keypointCount = computed((): number => {
   return effectiveCourtCorners.value?.length ?? 0
 })
 
+// Calculate canvas height (container height minus header and legend)
+// Header is ~32px, legend is ~40px, padding is 24px (12px top + 12px bottom)
+const HEADER_HEIGHT = 32
+const LEGEND_HEIGHT = 40
+const CONTAINER_PADDING = 24
+
+const canvasHeight = computed(() => {
+  // Subtract header, legend, and padding from total height
+  const availableHeight = props.height - HEADER_HEIGHT - LEGEND_HEIGHT - CONTAINER_PADDING
+  return Math.max(200, availableHeight) // Minimum 200px
+})
+
 // Calculate drawing scale and padding
 const drawConfig = computed(() => {
   const padding = 20
   const availableWidth = props.width - padding * 2
-  const availableHeight = props.height - padding * 2
+  const availableHeight = canvasHeight.value - padding * 2
   
   // Scale to fit, maintaining aspect ratio
   const scaleX = availableWidth / COURT_WIDTH
@@ -137,7 +154,7 @@ const drawConfig = computed(() => {
   
   // Center the court
   const offsetX = (props.width - courtWidthPx) / 2
-  const offsetY = (props.height - courtLengthPx) / 2
+  const offsetY = (canvasHeight.value - courtLengthPx) / 2
   
   return {
     scale,
@@ -859,16 +876,93 @@ function drawShuttle(ctx: CanvasRenderingContext2D) {
 }
 
 /**
+ * Draw keypoint selection guide overlay
+ * Shows numbered positions on the court for each keypoint
+ */
+function drawKeypointSelectionGuide(ctx: CanvasRenderingContext2D) {
+  if (!props.isKeypointSelectionMode) return
+  
+  const count = props.keypointSelectionCount
+  
+  // Keypoint labels (abbreviated)
+  const KEYPOINT_LABELS = ['TL', 'TR', 'BR', 'BL', 'NL', 'NR', 'SNL', 'SNR', 'SFL', 'SFR', 'CTN', 'CTF']
+  
+  // Draw each keypoint position
+  COURT_KEYPOINT_POSITIONS.forEach((pos, index) => {
+    const canvasPos = courtToCanvas(pos[0]!, pos[1]!)
+    const isCompmleted = index < count
+    const isActive = index === count
+    const isPending = index > count
+    
+    // Draw the point circle
+    ctx.beginPath()
+    ctx.arc(canvasPos.x, canvasPos.y, isActive ? 14 : 10, 0, Math.PI * 2)
+    
+    if (isActive) {
+      // Active point - bright green with pulse effect (simulated with glow)
+      ctx.fillStyle = '#22c55e'
+      ctx.shadowColor = '#22c55e'
+      ctx.shadowBlur = 12
+    } else if (isCompmleted) {
+      // Completed point - dimmed green
+      ctx.fillStyle = 'rgba(34, 197, 94, 0.4)'
+      ctx.shadowBlur = 0
+    } else {
+      // Pending point - gray
+      ctx.fillStyle = 'rgba(100, 100, 100, 0.6)'
+      ctx.shadowBlur = 0
+    }
+    
+    ctx.fill()
+    ctx.shadowBlur = 0
+    
+    // Draw border
+    ctx.strokeStyle = isActive ? '#22c55e' : isCompmleted ? 'rgba(34, 197, 94, 0.6)' : 'rgba(150, 150, 150, 0.5)'
+    ctx.lineWidth = 2
+    ctx.stroke()
+    
+    // Draw number
+    ctx.font = isActive ? 'bold 11px Inter, sans-serif' : '10px Inter, sans-serif'
+    ctx.fillStyle = isActive ? '#000' : isCompmleted ? '#22c55e' : 'rgba(255, 255, 255, 0.6)'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(`${index + 1}`, canvasPos.x, canvasPos.y)
+    
+    // Draw label below for active or completed points
+    if (isActive || isCompmleted) {
+      ctx.font = '8px Inter, sans-serif'
+      ctx.fillStyle = isActive ? '#22c55e' : 'rgba(34, 197, 94, 0.7)'
+      ctx.fillText(KEYPOINT_LABELS[index]!, canvasPos.x, canvasPos.y + 18)
+    }
+  })
+  
+  // Draw instruction at the bottom of the canvas
+  const instructionY = canvasHeight.value - 8
+  if (count < 12) {
+    ctx.font = 'bold 11px Inter, sans-serif'
+    ctx.fillStyle = '#22c55e'
+    ctx.textAlign = 'center'
+    ctx.fillText(`Click point ${count + 1}`, props.width / 2, instructionY)
+  } else {
+    ctx.font = 'bold 11px Inter, sans-serif'
+    ctx.fillStyle = '#22c55e'
+    ctx.textAlign = 'center'
+    ctx.fillText('✓ All set!', props.width / 2, instructionY)
+  }
+}
+
+/**
  * Draw "No Court Detected" message
  */
 function drawNoCourtMessage(ctx: CanvasRenderingContext2D) {
+  const cHeight = canvasHeight.value
   ctx.fillStyle = '#1e1e2e'
-  ctx.fillRect(0, 0, props.width, props.height)
+  ctx.fillRect(0, 0, props.width, cHeight)
   
   // Draw placeholder court outline
   const padding = 30
   const courtWidth = props.width - padding * 2
-  const courtHeight = props.height - padding * 2
+  const courtHeight = cHeight - padding * 2
   
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)'
   ctx.lineWidth = 2
@@ -881,12 +975,12 @@ function drawNoCourtMessage(ctx: CanvasRenderingContext2D) {
   ctx.fillStyle = 'rgba(255, 255, 255, 0.6)'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.fillText('Court Detection Required', props.width / 2, props.height / 2 - 20)
+  ctx.fillText('Court Detection Required', props.width / 2, cHeight / 2 - 20)
   
   ctx.font = '12px Inter, sans-serif'
   ctx.fillStyle = 'rgba(255, 255, 255, 0.4)'
-  ctx.fillText('Set court corners manually or', props.width / 2, props.height / 2 + 5)
-  ctx.fillText('wait for automatic detection', props.width / 2, props.height / 2 + 22)
+  ctx.fillText('Set court corners manually or', props.width / 2, cHeight / 2 + 5)
+  ctx.fillText('wait for automatic detection', props.width / 2, cHeight / 2 + 22)
 }
 
 /**
@@ -909,8 +1003,9 @@ function render(force = false) {
   if (!canvas) return
   
   // PERFORMANCE OPTIMIZATION: Skip render if positions haven't changed
+  // But always render in keypoint selection mode
   const currentHash = computePlayerHash()
-  if (!force && currentHash === lastPlayerHash) return
+  if (!force && !props.isKeypointSelectionMode && currentHash === lastPlayerHash) return
   lastPlayerHash = currentHash
   
   // PERFORMANCE OPTIMIZATION: Throttle render calls
@@ -938,9 +1033,18 @@ function render(force = false) {
   if (!ctx) return
   
   // Clear canvas
-  ctx.clearRect(0, 0, props.width, props.height)
+  ctx.clearRect(0, 0, props.width, canvasHeight.value)
   
-  // Check if we have valid court corners
+  // In keypoint selection mode, always show the guide (even without court data)
+  if (props.isKeypointSelectionMode) {
+    // Draw the court background for reference
+    drawCourt(ctx)
+    // Draw keypoint selection guide on top
+    drawKeypointSelectionGuide(ctx)
+    return
+  }
+  
+  // Check if we have valid court corners (only needed for player tracking)
   if (!effectiveCourtCorners.value) {
     drawNoCourtMessage(ctx)
     return
@@ -949,6 +1053,7 @@ function render(force = false) {
   // Draw court
   drawCourt(ctx)
   
+  // Only draw players/trails/shuttle when NOT in selection mode
   // Draw player trails
   drawPlayerTrails(ctx)
   
@@ -968,9 +1073,15 @@ watch([
   () => props.showGrid,
   () => props.showLabels,
   () => props.showShuttle,
-  () => props.showTrails
+  () => props.showTrails,
+  () => props.isKeypointSelectionMode,
+  () => props.keypointSelectionCount,
+  () => props.height,
+  () => props.width
 ], () => {
-  render()
+  // Reset cached context when dimensions change
+  cachedCtx = null
+  render(true) // Force render when props change
 }, { deep: true })
 
 // Initial render
@@ -998,19 +1109,21 @@ defineExpose({
 </script>
 
 <template>
-  <div class="mini-court-container">
+  <div class="mini-court-container" :style="{ height: `${height}px` }">
     <div class="mini-court-header">
       <span class="title">🏸 Court View</span>
       <span v-if="effectiveCourtCorners && keypointCount === 12" class="status active precision">12pt ✓</span>
       <span v-else-if="effectiveCourtCorners" class="status active">4pt</span>
       <span v-else class="status inactive">No Data</span>
     </div>
-    <canvas
-      ref="canvasRef"
-      :width="width"
-      :height="height"
-      class="mini-court-canvas"
-    />
+    <div class="canvas-wrapper">
+      <canvas
+        ref="canvasRef"
+        :width="width"
+        :height="canvasHeight"
+        class="mini-court-canvas"
+      />
+    </div>
     <div v-if="players && players.length > 0" class="player-legend">
       <div
         v-for="(player, index) in players"
@@ -1031,10 +1144,10 @@ defineExpose({
 .mini-court-container {
   display: flex;
   flex-direction: column;
-  background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
-  border-radius: 12px;
+  background: #141414;
+  border-radius: 0;
   padding: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  border: 1px solid #222;
 }
 
 .mini-court-header {
@@ -1048,33 +1161,44 @@ defineExpose({
 .title {
   font-size: 14px;
   font-weight: 600;
-  color: #ffffff;
+  color: #fff;
 }
 
 .status {
   font-size: 11px;
   font-weight: 500;
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: 0;
 }
 
 .status.active {
-  background-color: rgba(72, 187, 120, 0.2);
-  color: #48bb78;
+  background-color: #1a1a1a;
+  color: #22c55e;
+  border: 1px solid #333;
 }
 
 .status.active.precision {
-  background-color: rgba(102, 126, 234, 0.2);
-  color: #667eea;
+  background-color: #1a1a1a;
+  color: #3b82f6;
+  border: 1px solid #333;
 }
 
 .status.inactive {
-  background-color: rgba(160, 174, 192, 0.2);
-  color: #a0aec0;
+  background-color: #1a1a1a;
+  color: #666;
+  border: 1px solid #333;
+}
+
+.canvas-wrapper {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
 }
 
 .mini-court-canvas {
-  border-radius: 8px;
+  border-radius: 0;
   background: #1a472a;
 }
 
@@ -1084,7 +1208,7 @@ defineExpose({
   justify-content: center;
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid #222;
 }
 
 .legend-item {
@@ -1097,12 +1221,12 @@ defineExpose({
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.5);
+  border: 1px solid #444;
 }
 
 .legend-label {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.7);
+  color: #888;
   font-weight: 500;
 }
 </style>

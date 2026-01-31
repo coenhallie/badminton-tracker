@@ -9,6 +9,8 @@ Models supported:
 4. Pose Model: player pose estimation (17-keypoint skeleton)
 
 Each model's detections are stored separately and can be toggled on/off in the UI.
+
+Includes static detection filtering to remove false positives like scoring card points.
 """
 
 import os
@@ -19,6 +21,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
+
+# Import static detection filter
+try:
+    from detection_smoothing import StaticDetectionFilter
+    HAS_STATIC_FILTER = True
+except ImportError:
+    HAS_STATIC_FILTER = False
+    StaticDetectionFilter = None
 
 try:
     import torch
@@ -161,7 +171,8 @@ class MultiModelDetector:
         shuttle_model_path: Optional[str] = None,
         pose_model_path: Optional[str] = None,
         confidence_threshold: float = 0.5,
-        enable_pose: bool = True
+        enable_pose: bool = True,
+        enable_static_filter: bool = True
     ):
         """
         Initialize multi-model detector.
@@ -172,6 +183,7 @@ class MultiModelDetector:
             pose_model_path: Path to pose estimation model (default: yolo26n-pose.pt)
             confidence_threshold: Minimum confidence for detections
             enable_pose: Whether to enable pose detection
+            enable_static_filter: Enable filtering of static false positives (e.g., scoring cards)
         """
         self.models: Dict[str, YOLO] = {}
         self.model_classes: Dict[str, Dict[int, str]] = {}
@@ -189,6 +201,17 @@ class MultiModelDetector:
             DetectionType.RACKET: True,
             DetectionType.POSE: True,
         }
+        
+        # Static detection filter for shuttle (removes false positives like scoring cards)
+        self.enable_static_filter = enable_static_filter
+        self.static_filter: Optional[Any] = None
+        if enable_static_filter and HAS_STATIC_FILTER and StaticDetectionFilter:
+            self.static_filter = StaticDetectionFilter(
+                static_threshold_frames=30,  # 1 second at 30fps to confirm static
+                position_tolerance=25.0,  # 25px tolerance
+                min_detections_for_static=15  # Need 15 detections to mark as static
+            )
+            print("Static detection filter enabled for shuttle false positive removal")
         
         # PERFORMANCE OPTIMIZATION: Thread pool for parallel model execution
         self._executor: Optional[ThreadPoolExecutor] = None
@@ -370,6 +393,10 @@ class MultiModelDetector:
             if len(result.shuttlecocks) > 1:
                 result.shuttlecocks = self._deduplicate_detections(result.shuttlecocks)
             
+            # Apply static detection filter to remove false positives (e.g., scoring card points)
+            if self.enable_static_filter and self.static_filter and len(result.shuttlecocks) > 0:
+                result.shuttlecocks = self._apply_static_filter(result.shuttlecocks, frame_number)
+            
             # Filter players to keep only the N largest (main players, not spectators)
             if len(result.players) > max_players:
                 result.players = self._filter_main_players(result.players, max_players)
@@ -462,6 +489,10 @@ class MultiModelDetector:
         # Remove duplicate shuttles (keep highest confidence from any model)
         if len(result.shuttlecocks) > 1:
             result.shuttlecocks = self._deduplicate_detections(result.shuttlecocks)
+        
+        # Apply static detection filter to remove false positives (e.g., scoring card points)
+        if self.enable_static_filter and self.static_filter and len(result.shuttlecocks) > 0:
+            result.shuttlecocks = self._apply_static_filter(result.shuttlecocks, frame_number)
         
         # Filter players to keep only the N largest (main players, not spectators)
         if len(result.players) > max_players:
@@ -570,6 +601,68 @@ class MultiModelDetector:
             reverse=True
         )
         return sorted_players[:max_players]
+    
+    def _apply_static_filter(self, detections: List[Detection], frame_number: int) -> List[Detection]:
+        """
+        Apply static detection filter to remove false positives.
+        Static detections (like scoring card points) remain in the same position
+        across many frames, while real shuttles are always moving.
+        
+        Args:
+            detections: List of Detection objects
+            frame_number: Current frame number
+            
+        Returns:
+            Filtered list of detections with static false positives removed
+        """
+        if not self.static_filter:
+            return detections
+        
+        # Convert Detection objects to dicts for the filter
+        detection_dicts = [
+            {"x": d.bbox.x, "y": d.bbox.y, "confidence": d.confidence, "detection": d}
+            for d in detections
+        ]
+        
+        # Apply filter
+        valid_dicts, filtered_dicts = self.static_filter.filter_detections(
+            detection_dicts, frame_number
+        )
+        
+        # Return only the valid Detection objects
+        return [d["detection"] for d in valid_dicts]
+    
+    def add_exclusion_zone(self, x: float, y: float, radius: float = 50.0):
+        """
+        Add a manual exclusion zone for shuttle detection.
+        Use this to exclude areas with known false positives like scoring cards.
+        
+        Args:
+            x: Center x coordinate in pixels
+            y: Center y coordinate in pixels
+            radius: Exclusion radius in pixels (default: 50)
+        """
+        if self.static_filter:
+            self.static_filter.add_manual_exclusion_zone(x, y, radius)
+            print(f"Added exclusion zone at ({x}, {y}) with radius {radius}px")
+    
+    def get_static_filter_stats(self) -> Dict[str, Any]:
+        """Get statistics about filtered detections"""
+        if self.static_filter:
+            return self.static_filter.get_stats()
+        return {"enabled": False}
+    
+    def get_static_zones(self) -> List[Dict]:
+        """Get list of identified static zones (false positive areas)"""
+        if self.static_filter:
+            return self.static_filter.get_static_zones()
+        return []
+    
+    def reset_static_filter(self):
+        """Reset the static detection filter (clears all learned zones)"""
+        if self.static_filter:
+            self.static_filter.reset()
+            print("Static detection filter reset")
     
     def _run_model(self, model: YOLO, model_name: str, frame: np.ndarray) -> ModelDetections:
         """Run a single model and extract detections"""
@@ -821,6 +914,14 @@ class MultiModelDetector:
                 "enabled": False,
                 "status": None
             }
+        
+        # Add static filter status
+        status["static_filter"] = {
+            "enabled": self.enable_static_filter,
+            "available": self.static_filter is not None,
+            "stats": self.get_static_filter_stats() if self.static_filter else None,
+            "zones_count": len(self.get_static_zones()) if self.static_filter else 0
+        }
         
         return status
     

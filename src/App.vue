@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import VideoUpload from '@/components/VideoUpload.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import ResultsDashboard from '@/components/ResultsDashboard.vue'
@@ -25,6 +25,8 @@ const isApiConnected = ref(false)
 const showSkeleton = ref(true)
 const showBoundingBoxes = ref(true)
 const showPoseOverlay = ref(true)
+// Pose source: 'skeleton' (YOLO-pose keypoints), 'trained' (custom AI model), 'both'
+const poseSource = ref<'skeleton' | 'trained' | 'both'>('both')
 // NOTE: Court overlay removed - automatic court detection disabled, using manual keypoints only
 const showHeatmap = ref(false)  // Heatmap off by default - toggle to show player position heatmap
 
@@ -45,6 +47,15 @@ const showSpeedGraph = ref(false)
 
 // Settings panel visibility toggle
 const showSettingsPanel = ref(false)
+
+// Video container height tracking for MiniCourt sync
+const videoSectionRef = ref<HTMLElement | null>(null)
+const videoContainerHeight = ref(440) // Default fallback
+let resizeObserver: ResizeObserver | null = null
+
+// Keypoint selection state (from VideoPlayer)
+const isKeypointSelectionActive = ref(false)
+const keypointSelectionCount = ref(0)
 
 // Court model selection removed - using manual keypoints only
 // Note: The CourtModelType is kept for backwards compatibility but not used in UI
@@ -193,6 +204,12 @@ function handleVideoPlay() {
     console.log('[App] Video playback initiated')
     videoPlaybackStarted.value = true
   }
+}
+
+// Handle keypoint selection mode changes from VideoPlayer
+function handleKeypointSelectionChange(isActive: boolean, count: number) {
+  isKeypointSelectionActive.value = isActive
+  keypointSelectionCount.value = count
 }
 
 // Trigger speed recalculation when both conditions are met
@@ -466,8 +483,39 @@ watch(canCalculateSpeed, (canCalculate) => {
   }
 })
 
+// Setup ResizeObserver for video container height tracking
+function setupResizeObserver() {
+  if (videoSectionRef.value && !resizeObserver) {
+    resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        // Get the height of the video container
+        const height = entry.contentRect.height
+        if (height > 0) {
+          videoContainerHeight.value = Math.round(height)
+        }
+      }
+    })
+    resizeObserver.observe(videoSectionRef.value)
+  }
+}
+
 onMounted(async () => {
   isApiConnected.value = await checkApiHealth()
+  // Setup resize observer after mount
+  setupResizeObserver()
+})
+
+onUnmounted(() => {
+  // Cleanup resize observer
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+})
+
+// Watch for video section ref changes (e.g., when results view is shown)
+watch(videoSectionRef, () => {
+  setupResizeObserver()
 })
 </script>
 
@@ -477,7 +525,7 @@ onMounted(async () => {
     <header class="header">
       <div class="header-content">
         <div class="logo">
-          <h1>Badminton Tracker</h1>
+          <h1>SHUTTL.</h1>
         </div>
 
         <nav class="nav">
@@ -640,6 +688,15 @@ onMounted(async () => {
                       </label>
                       <span>Pose Info</span>
                     </div>
+                    <!-- Pose Source Selector (only visible when Pose Info is enabled) -->
+                    <div class="toggle-item pose-source-selector" v-if="showPoseOverlay">
+                      <span class="source-label">Source:</span>
+                      <select v-model="poseSource" class="pose-source-select">
+                        <option value="both">Both (Skeleton + AI)</option>
+                        <option value="skeleton">Skeleton Only</option>
+                        <option value="trained">AI Model Only</option>
+                      </select>
+                    </div>
                     <!-- Court Lines toggle removed - automatic detection disabled, using manual keypoints only -->
                     <div class="toggle-item" :class="{ loading: isHeatmapLoading }">
                       <label class="toggle">
@@ -725,7 +782,7 @@ onMounted(async () => {
 
           <div class="results-content" :class="{ 'with-minicourt': showMiniCourt }">
             <div class="video-with-minicourt">
-              <div class="video-section">
+              <div ref="videoSectionRef" class="video-section">
                 <VideoPlayer
                   :video-url="videoUrl"
                   :skeleton-data="analysisResult.skeleton_data"
@@ -736,27 +793,31 @@ onMounted(async () => {
                   :show-shuttles="showShuttles"
                   :show-rackets="showRackets"
                   :show-pose-overlay="showPoseOverlay"
+                  :pose-source="poseSource"
                   :show-heatmap="showHeatmap"
                   @court-keypoints-set="handleCourtKeypointsSet"
                   @time-update="handleTimeUpdate"
                   @frame-update="handleFrameUpdate"
                   @play="handleVideoPlay"
+                  @keypoint-selection-change="handleKeypointSelectionChange"
                 />
               </div>
               
               <!-- Mini Court Panel -->
               <Transition name="slide-fade">
-                <div v-if="showMiniCourt" class="minicourt-section">
+                <div v-if="showMiniCourt || isKeypointSelectionActive" class="minicourt-section">
                   <MiniCourt
                     :court-corners="courtCornersForMiniCourt"
                     :players="currentPlayers"
                     :shuttle-position="currentShuttlePosition"
                     :width="240"
-                    :height="440"
+                    :height="videoContainerHeight"
                     :show-grid="true"
                     :show-labels="true"
                     :show-shuttle="showShuttles"
                     :show-trails="false"
+                    :is-keypoint-selection-mode="isKeypointSelectionActive"
+                    :keypoint-selection-count="keypointSelectionCount"
                   />
                 </div>
               </Transition>
@@ -780,7 +841,10 @@ onMounted(async () => {
             </Transition>
 
             <div class="dashboard-section">
-              <ResultsDashboard :result="analysisResult" />
+              <ResultsDashboard
+                :result="analysisResult"
+                :manual-keypoints-set="manualCourtKeypoints !== null"
+              />
             </div>
           </div>
         </div>
@@ -794,7 +858,7 @@ onMounted(async () => {
 </template>
 
 <style>
-/* Global Styles */
+/* Global Styles - Minimalist Theme */
 *,
 *::before,
 *::after {
@@ -811,19 +875,19 @@ html {
 
 body {
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+  background: #0d0d0d;
   color: #e2e8f0;
   min-height: 100vh;
 }
 
 a {
-  color: #667eea;
+  color: #22c55e;
   text-decoration: none;
   transition: color 0.2s ease;
 }
 
 a:hover {
-  color: #764ba2;
+  color: #4ade80;
 }
 
 /* Transitions */
@@ -863,12 +927,11 @@ a:hover {
 /* Header */
 .header {
   padding: 16px 24px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
+  border-bottom: 1px solid #222;
   position: sticky;
   top: 0;
   z-index: 100;
-  background: rgba(15, 15, 26, 0.8);
+  background: #0d0d0d;
 }
 
 .header-content {
@@ -888,16 +951,13 @@ a:hover {
 .logo svg {
   width: 32px;
   height: 32px;
-  color: #667eea;
+  color: #22c55e;
 }
 
 .logo h1 {
   font-size: 1.25rem;
   font-weight: 700;
-  background: linear-gradient(135deg, #667eea, #764ba2);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: #ffffff;
 }
 
 .nav {
@@ -911,15 +971,17 @@ a:hover {
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  background: rgba(239, 68, 68, 0.1);
-  border-radius: 20px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0;
   font-size: 0.75rem;
   color: #ef4444;
 }
 
 .api-status.connected {
-  background: rgba(72, 187, 120, 0.1);
-  color: #48bb78;
+  background: #1a1a1a;
+  border-color: #22c55e;
+  color: #22c55e;
 }
 
 .status-dot {
@@ -935,14 +997,14 @@ a:hover {
   justify-content: center;
   width: 36px;
   height: 36px;
-  border-radius: 8px;
-  color: #a0aec0;
+  border-radius: 0;
+  color: #888;
   transition: all 0.2s ease;
 }
 
 .nav-link:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #e2e8f0;
+  background: #1a1a1a;
+  color: #fff;
 }
 
 .nav-link svg {
@@ -952,8 +1014,8 @@ a:hover {
 
 /* Error Banner */
 .error-banner {
-  background: rgba(239, 68, 68, 0.1);
-  border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+  background: #1a0000;
+  border-bottom: 1px solid #ef4444;
 }
 
 .error-content {
@@ -985,14 +1047,14 @@ a:hover {
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: 0;
   color: #ef4444;
   cursor: pointer;
   transition: background 0.2s ease;
 }
 
 .dismiss-btn:hover {
-  background: rgba(239, 68, 68, 0.2);
+  background: #2a0000;
 }
 
 .dismiss-btn svg {
@@ -1034,16 +1096,13 @@ a:hover {
   font-size: 2.5rem;
   font-weight: 700;
   margin-bottom: 16px;
-  background: linear-gradient(135deg, #e2e8f0, #a0aec0);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: #ffffff;
 }
 
 .hero p {
   max-width: 600px;
   margin: 0 auto;
-  color: #a0aec0;
+  color: #888;
   font-size: 1.125rem;
   line-height: 1.7;
 }
@@ -1058,16 +1117,15 @@ a:hover {
 
 .feature {
   padding: 24px;
-  background: linear-gradient(145deg, rgba(26, 31, 46, 0.5), rgba(36, 43, 61, 0.5));
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 16px;
+  background: #141414;
+  border: 1px solid #222;
+  border-radius: 0;
   text-align: center;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
 }
 
 .feature:hover {
-  transform: translateY(-4px);
-  border-color: rgba(102, 126, 234, 0.3);
+  border-color: #22c55e;
 }
 
 .feature-icon {
@@ -1075,9 +1133,10 @@ a:hover {
   height: 56px;
   margin: 0 auto 16px;
   padding: 14px;
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.2), rgba(118, 75, 162, 0.2));
-  border-radius: 12px;
-  color: #667eea;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0;
+  color: #22c55e;
 }
 
 .feature-icon svg {
@@ -1086,14 +1145,14 @@ a:hover {
 }
 
 .feature h3 {
-  color: #e2e8f0;
+  color: #fff;
   font-size: 1.125rem;
   font-weight: 600;
   margin-bottom: 8px;
 }
 
 .feature p {
-  color: #718096;
+  color: #666;
   font-size: 0.875rem;
   line-height: 1.6;
 }
@@ -1117,18 +1176,19 @@ a:hover {
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  color: #a0aec0;
+  background: #141414;
+  border: 1px solid #333;
+  border-radius: 0;
+  color: #888;
   font-size: 0.875rem;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .back-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #e2e8f0;
+  background: #1a1a1a;
+  border-color: #22c55e;
+  color: #fff;
 }
 
 .back-btn svg {
@@ -1142,10 +1202,10 @@ a:hover {
   align-items: center;
   gap: 10px;
   padding: 10px 18px;
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.15), rgba(118, 75, 162, 0.15));
-  border: 1px solid rgba(102, 126, 234, 0.3);
-  border-radius: 10px;
-  color: #e2e8f0;
+  background: #141414;
+  border: 1px solid #333;
+  border-radius: 0;
+  color: #fff;
   font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
@@ -1153,25 +1213,25 @@ a:hover {
 }
 
 .settings-toggle-btn:hover {
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.25), rgba(118, 75, 162, 0.25));
-  border-color: rgba(102, 126, 234, 0.5);
+  background: #1a1a1a;
+  border-color: #22c55e;
 }
 
 .settings-toggle-btn.active {
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.3), rgba(118, 75, 162, 0.3));
-  border-color: #667eea;
+  background: #1a1a1a;
+  border-color: #22c55e;
 }
 
 .settings-toggle-btn svg:first-child {
   width: 18px;
   height: 18px;
-  color: #667eea;
+  color: #22c55e;
 }
 
 .settings-toggle-btn .chevron {
   width: 16px;
   height: 16px;
-  color: #a0aec0;
+  color: #888;
   transition: transform 0.3s ease;
 }
 
@@ -1181,12 +1241,11 @@ a:hover {
 
 /* Settings Panel */
 .settings-panel {
-  background: linear-gradient(145deg, rgba(26, 31, 46, 0.95), rgba(36, 43, 61, 0.95));
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
+  background: #141414;
+  border: 1px solid #222;
+  border-radius: 0;
   margin-bottom: 24px;
   overflow: hidden;
-  backdrop-filter: blur(10px);
 }
 
 .settings-panel-content {
@@ -1206,21 +1265,21 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 10px;
-  color: #e2e8f0;
+  color: #fff;
   font-size: 0.9rem;
   font-weight: 600;
   padding-bottom: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid #222;
 }
 
 .settings-section-title svg {
   width: 18px;
   height: 18px;
-  color: #667eea;
+  color: #22c55e;
 }
 
 .settings-section-hint {
-  color: #718096;
+  color: #666;
   font-size: 0.75rem;
   font-style: italic;
 }
@@ -1267,7 +1326,7 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #a0aec0;
+  color: #888;
   font-size: 0.875rem;
   transition: opacity 0.2s ease;
 }
@@ -1297,8 +1356,9 @@ a:hover {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(255, 255, 255, 0.1);
-  border-radius: 13px;
+  background-color: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0;
   transition: 0.3s;
 }
 
@@ -1307,41 +1367,86 @@ a:hover {
   content: "";
   height: 20px;
   width: 20px;
-  left: 3px;
-  bottom: 3px;
-  background-color: white;
-  border-radius: 50%;
+  left: 2px;
+  bottom: 2px;
+  background-color: #444;
+  border-radius: 0;
   transition: 0.3s;
 }
 
 .toggle input:checked + .toggle-slider {
-  background: linear-gradient(135deg, #667eea, #764ba2);
+  background: #22c55e;
+  border-color: #22c55e;
 }
 
 .toggle input:checked + .toggle-slider.player-toggle {
-  background: linear-gradient(135deg, #22c55e, #16a34a);
+  background: #22c55e;
+  border-color: #22c55e;
 }
 
 .toggle input:checked + .toggle-slider.shuttle-toggle {
-  background: linear-gradient(135deg, #f97316, #ea580c);
+  background: #f97316;
+  border-color: #f97316;
 }
 
 .toggle input:checked + .toggle-slider.racket-toggle {
-  background: linear-gradient(135deg, #d946ef, #a855f7);
+  background: #d946ef;
+  border-color: #d946ef;
 }
 
 .toggle input:checked + .toggle-slider.pose-toggle {
-  background: linear-gradient(135deg, #f687b3, #ec4899);
+  background: #ec4899;
+  border-color: #ec4899;
+}
+
+/* Pose source selector */
+.pose-source-selector {
+  padding-left: 16px;
+  border-left: 2px solid rgba(236, 72, 153, 0.3);
+  margin-left: 4px;
+}
+
+.pose-source-selector .source-label {
+  color: #888;
+  font-size: 0.8rem;
+  margin-right: 8px;
+}
+
+.pose-source-select {
+  padding: 6px 12px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0;
+  color: #fff;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: border-color 0.2s ease;
+}
+
+.pose-source-select:hover {
+  border-color: #ec4899;
+}
+
+.pose-source-select:focus {
+  outline: none;
+  border-color: #ec4899;
+}
+
+.pose-source-select option {
+  background: #1a1a1a;
+  color: #fff;
 }
 
 /* Court toggle removed - automatic detection disabled, using manual keypoints only */
 
 .toggle input:checked + .toggle-slider.heatmap-toggle {
-  background: linear-gradient(135deg, #f97316, #ef4444);
+  background: #f97316;
+  border-color: #f97316;
 }
 
 .toggle input:checked + .toggle-slider::before {
   transform: translateX(22px);
+  background-color: #fff;
 }
 
 /* Loading state for smoothing toggle */
@@ -1359,7 +1464,7 @@ a:hover {
   width: 14px;
   height: 14px;
   animation: spin 1s linear infinite;
-  color: #38bdf8;
+  color: #22c55e;
 }
 
 @keyframes spin {
@@ -1403,12 +1508,14 @@ a:hover {
 
 /* Mini court toggle style */
 .toggle input:checked + .toggle-slider.minicourt-toggle {
-  background: linear-gradient(135deg, #1a472a, #2d8a4e);
+  background: #22c55e;
+  border-color: #22c55e;
 }
 
 /* Speed graph toggle style */
 .toggle input:checked + .toggle-slider.speedgraph-toggle {
-  background: linear-gradient(135deg, #3B82F6, #60A5FA);
+  background: #3B82F6;
+  border-color: #3B82F6;
 }
 
 /* Speed graph section */
@@ -1441,8 +1548,8 @@ a:hover {
 .footer {
   padding: 24px;
   text-align: center;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
-  color: #718096;
+  border-top: 1px solid #222;
+  color: #666;
   font-size: 0.875rem;
 }
 
@@ -1493,4 +1600,5 @@ a:hover {
     justify-content: center;
   }
 }
+
 </style>

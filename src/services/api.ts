@@ -817,3 +817,377 @@ export async function getSpeedTimeline(
   
   return response.json()
 }
+
+// ============================================================================
+// PDF Export API
+// ============================================================================
+
+/**
+ * PDF export configuration options
+ */
+export interface PDFExportConfig {
+  frame_number?: number | null  // Frame to use for heatmap visualization
+  include_heatmap?: boolean
+  heatmap_colormap?: string  // turbo, parula, inferno, viridis, plasma, hot
+  heatmap_alpha?: number  // 0.0 - 1.0
+  include_player_stats?: boolean
+  include_shuttle_stats?: boolean
+  include_court_info?: boolean
+  include_speed_stats?: boolean
+  title?: string
+}
+
+// PDF export with frontend data - includes analysis result for accurate display
+export interface PDFExportWithDataConfig {
+  frame_number?: number | null
+  include_heatmap?: boolean
+  heatmap_colormap?: string
+  heatmap_alpha?: number
+  title?: string
+  // Data from frontend AnalysisResult
+  duration: number
+  fps: number
+  total_frames: number
+  processed_frames: number
+  video_width: number
+  video_height: number
+  players: Array<{
+    player_id: number
+    total_distance: number
+    avg_speed: number
+    max_speed: number
+    positions: Array<{ frame: number; x: number; y: number }>
+  }>
+  shuttle?: {
+    avg_speed: number
+    max_speed: number
+    shots_detected: number
+    shot_speeds: number[]
+  } | null
+  court_detection?: {
+    detected: boolean
+    confidence: number
+    court_dimensions?: { width_meters: number; length_meters: number }
+  } | null
+  shuttle_analytics?: Record<string, unknown> | null
+  player_zone_analytics?: Record<string, unknown> | null
+}
+
+/**
+ * PDF export preview response
+ */
+export interface PDFExportPreview {
+  video_id: string
+  preview: {
+    video_summary: {
+      duration_seconds: number
+      total_frames: number
+      processed_frames: number
+      fps: number
+      video_dimensions: string
+    }
+    players_detected: number
+    movement_summary: {
+      total_distance_m: number
+      avg_speed_kmh: number
+      max_speed_kmh: number
+    }
+    shuttle_data_available: boolean
+    shuttle_analytics_available: boolean
+    court_detected: boolean
+    zone_analytics_available: boolean
+    skeleton_frames_available: boolean
+  }
+  export_options: {
+    colormaps: string[]
+    recommended_colormap: string
+    default_heatmap_alpha: number
+  }
+  status: string
+}
+
+/**
+ * Get PDF export URL for direct download
+ * Use this to create a download link or trigger browser download
+ *
+ * @param videoId - Video ID to export
+ * @param options - Optional configuration (appended as query params)
+ */
+export function getPDFExportUrl(
+  videoId: string,
+  options?: {
+    frame_number?: number
+    include_heatmap?: boolean
+    heatmap_colormap?: string
+    heatmap_alpha?: number
+  }
+): string {
+  let url = `${API_BASE_URL}/api/export/pdf/${videoId}`
+  
+  const params = new URLSearchParams()
+  if (options?.frame_number !== undefined) {
+    params.append('frame_number', options.frame_number.toString())
+  }
+  if (options?.include_heatmap !== undefined) {
+    params.append('include_heatmap', options.include_heatmap.toString())
+  }
+  if (options?.heatmap_colormap !== undefined) {
+    params.append('heatmap_colormap', options.heatmap_colormap)
+  }
+  if (options?.heatmap_alpha !== undefined) {
+    params.append('heatmap_alpha', options.heatmap_alpha.toString())
+  }
+  
+  const queryString = params.toString()
+  if (queryString) {
+    url += `?${queryString}`
+  }
+  
+  return url
+}
+
+/**
+ * Download PDF export directly
+ * This triggers an immediate download of the PDF file
+ *
+ * @param videoId - Video ID to export
+ * @param options - Optional configuration
+ */
+export async function downloadPDFExport(
+  videoId: string,
+  options?: {
+    frame_number?: number
+    include_heatmap?: boolean
+    heatmap_colormap?: string
+    heatmap_alpha?: number
+  }
+): Promise<void> {
+  const url = getPDFExportUrl(videoId, options)
+  
+  try {
+    const response = await fetch(url)
+    
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.detail || 'Failed to generate PDF')
+    }
+    
+    // Get the blob and create download link
+    const blob = await response.blob()
+    const downloadUrl = window.URL.createObjectURL(blob)
+    
+    // Create temporary link and trigger download
+    const link = document.createElement('a')
+    link.href = downloadUrl
+    link.download = `badminton_analysis_${videoId.slice(0, 8)}.pdf`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    
+    // Clean up object URL
+    window.URL.revokeObjectURL(downloadUrl)
+  } catch (error) {
+    console.error('[PDF Export] Download failed:', error)
+    throw error
+  }
+}
+
+/**
+ * Export PDF with custom configuration (POST endpoint)
+ * Provides more configuration options than the GET endpoint
+ *
+ * @param videoId - Video ID to export
+ * @param config - Full configuration options
+ */
+export async function exportPDFWithConfig(
+  videoId: string,
+  config: PDFExportConfig
+): Promise<void> {
+  const url = `${API_BASE_URL}/api/export/pdf/${videoId}`
+  
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(config)
+    })
+    
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.detail || 'Failed to generate PDF')
+    }
+    
+    // Get the blob and create download link
+    const blob = await response.blob()
+    const downloadUrl = window.URL.createObjectURL(blob)
+    
+    // Create temporary link and trigger download
+    const link = document.createElement('a')
+    link.href = downloadUrl
+    link.download = `badminton_analysis_${videoId.slice(0, 8)}.pdf`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    
+    // Clean up object URL
+    window.URL.revokeObjectURL(downloadUrl)
+  } catch (error) {
+    console.error('[PDF Export] Download failed:', error)
+    throw error
+  }
+}
+
+/**
+ * Get preview of PDF export data
+ * Shows what will be included in the PDF before generating
+ *
+ * @param videoId - Video ID to preview
+ */
+export async function getPDFExportPreview(videoId: string): Promise<PDFExportPreview> {
+  const url = `${API_BASE_URL}/api/export/pdf/preview/${videoId}`
+  
+  const response = await fetch(url)
+  
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.detail || 'Failed to get PDF preview')
+  }
+  
+  return response.json()
+}
+
+/**
+ * Export PDF with frontend data
+ * This sends the analysis result data directly from the frontend to ensure
+ * the PDF contains exactly what the user sees on screen.
+ *
+ * @param videoId - Video ID (used to find video file for heatmap)
+ * @param data - Full configuration with frontend data
+ */
+export async function exportPDFWithFrontendData(
+  videoId: string,
+  data: PDFExportWithDataConfig
+): Promise<void> {
+  const url = `${API_BASE_URL}/api/export/pdf/${videoId}/with-data`
+  
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(data)
+    })
+    
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.detail || 'Failed to generate PDF')
+    }
+    
+    // Get the blob and create download link
+    const blob = await response.blob()
+    const downloadUrl = window.URL.createObjectURL(blob)
+    
+    // Create temporary link and trigger download
+    const link = document.createElement('a')
+    link.href = downloadUrl
+    link.download = `badminton_analysis_${videoId.slice(0, 8)}.pdf`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    
+    // Clean up object URL
+    window.URL.revokeObjectURL(downloadUrl)
+    
+    console.log('[PDF Export] Successfully exported PDF with frontend data')
+  } catch (error) {
+    console.error('[PDF Export] Export with frontend data failed:', error)
+    throw error
+  }
+}
+
+// ============================================================================
+// Zone Analytics API
+// ============================================================================
+
+/**
+ * Zone coverage data for a single player
+ */
+export interface PlayerZoneData {
+  zone_coverage: {
+    front: number
+    mid: number
+    back: number
+    left: number
+    center: number
+    right: number
+  }
+  avg_distance_to_net_m: number
+  position_count: number
+}
+
+/**
+ * Response from recalculate zone analytics endpoint
+ */
+export interface RecalculatedZoneAnalyticsResponse {
+  video_id: string
+  player_zone_analytics: Record<string, PlayerZoneData>
+  recalculated: boolean
+  manual_keypoints_used: boolean
+  total_skeleton_frames: number
+  status: string
+  message: string
+}
+
+// Zone analytics cache
+const zoneAnalyticsCache = new SimpleCache<RecalculatedZoneAnalyticsResponse>(120000) // 2 minute TTL
+
+/**
+ * Get recalculated player zone analytics
+ * This endpoint recalculates zone coverage using manual court keypoints
+ * if they have been set, even after video processing is complete.
+ *
+ * @param videoId - Video ID to get zone analytics for
+ * @param forceRefresh - If true, bypasses cache and fetches fresh data
+ */
+export async function getRecalculatedZoneAnalytics(
+  videoId: string,
+  forceRefresh: boolean = false
+): Promise<RecalculatedZoneAnalyticsResponse> {
+  // Check cache first (unless force refresh)
+  const cacheKey = `zone-analytics:${videoId}`
+  if (!forceRefresh) {
+    const cached = zoneAnalyticsCache.get(cacheKey)
+    if (cached) {
+      return cached
+    }
+  }
+
+  const url = `${API_BASE_URL}/api/player-zone-analytics/${videoId}/recalculate`
+  const response = await fetch(url)
+
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.detail || 'Failed to get zone analytics')
+  }
+
+  const data: RecalculatedZoneAnalyticsResponse = await response.json()
+  
+  // Cache the result
+  zoneAnalyticsCache.set(cacheKey, data)
+  
+  return data
+}
+
+/**
+ * Clear zone analytics cache (call when keypoints change)
+ */
+export function clearZoneAnalyticsCache(videoId?: string): void {
+  if (videoId) {
+    zoneAnalyticsCache.delete(`zone-analytics:${videoId}`)
+  } else {
+    zoneAnalyticsCache.clear()
+  }
+}

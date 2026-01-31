@@ -14,3 +14,6 @@ python-dotenv>=1.0.0
 # Modal.com remote GPU inference (optional)
 httpx>=0.26.0  # Async HTTP client for Modal API calls
 modal>=0.64.0  # Modal SDK (only needed for deployment, not runtime)
+
+# PDF export
+reportlab>=4.0.0  # PDF generation library for analysis reports

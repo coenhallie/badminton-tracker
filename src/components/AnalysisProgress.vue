@@ -376,8 +376,9 @@ onUnmounted(() => {
   max-width: 600px;
   margin: 0 auto;
   padding: 24px;
-  background: linear-gradient(145deg, #1a1f2e, #242b3d);
-  border-radius: 16px;
+  background: #141414;
+  border-radius: 0;
+  border: 1px solid #222;
 }
 
 .progress-header {
@@ -391,13 +392,13 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  color: #e2e8f0;
+  color: #fff;
 }
 
 .file-info svg {
   width: 24px;
   height: 24px;
-  color: #667eea;
+  color: #22c55e;
 }
 
 .filename {
@@ -410,9 +411,9 @@ onUnmounted(() => {
 
 .cancel-btn {
   padding: 8px 16px;
-  background: rgba(239, 68, 68, 0.2);
-  border: 1px solid rgba(239, 68, 68, 0.5);
-  border-radius: 6px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0;
   color: #ef4444;
   font-size: 0.875rem;
   cursor: pointer;
@@ -420,7 +421,8 @@ onUnmounted(() => {
 }
 
 .cancel-btn:hover {
-  background: rgba(239, 68, 68, 0.3);
+  background: #222;
+  border-color: #ef4444;
 }
 
 .progress-content {
@@ -441,12 +443,12 @@ onUnmounted(() => {
 }
 
 .progress-ring-bg {
-  stroke: rgba(255, 255, 255, 0.1);
+  stroke: #222;
 }
 
 .progress-ring-fill {
-  stroke: url(#gradient);
-  stroke-linecap: round;
+  stroke: #22c55e;
+  stroke-linecap: square;
   transition: stroke-dashoffset 0.3s ease;
 }
 
@@ -460,13 +462,13 @@ onUnmounted(() => {
 }
 
 .progress-value {
-  color: #e2e8f0;
+  color: #fff;
   font-size: 1.75rem;
   font-weight: 700;
 }
 
 .progress-label {
-  color: #718096;
+  color: #666;
   font-size: 0.75rem;
 }
 
@@ -488,22 +490,22 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: rgba(102, 126, 234, 0.2);
+  background: #1a1a1a;
 }
 
 .status-indicator.analyzing,
 .status-indicator.processing,
 .status-indicator.connecting {
-  background: rgba(102, 126, 234, 0.2);
+  background: #1a1a1a;
 }
 
 .status-indicator.complete {
-  background: rgba(72, 187, 120, 0.2);
-  color: #48bb78;
+  background: #1a1a1a;
+  color: #22c55e;
 }
 
 .status-indicator.error {
-  background: rgba(239, 68, 68, 0.2);
+  background: #1a1a1a;
   color: #ef4444;
 }
 
@@ -515,7 +517,7 @@ onUnmounted(() => {
 .pulse {
   width: 10px;
   height: 10px;
-  background: #667eea;
+  background: #22c55e;
   border-radius: 50%;
   animation: pulse 1.5s ease-in-out infinite;
 }
@@ -526,7 +528,7 @@ onUnmounted(() => {
 }
 
 .status-text {
-  color: #a0aec0;
+  color: #888;
   font-size: 0.875rem;
 }
 
@@ -542,12 +544,12 @@ onUnmounted(() => {
 }
 
 .stat-label {
-  color: #718096;
+  color: #666;
   font-size: 0.75rem;
 }
 
 .stat-value {
-  color: #e2e8f0;
+  color: #fff;
   font-size: 0.875rem;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -559,15 +561,15 @@ onUnmounted(() => {
 
 .progress-bar {
   height: 6px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 3px;
+  background: #1a1a1a;
+  border-radius: 0;
   overflow: hidden;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #667eea, #764ba2);
-  border-radius: 3px;
+  background: #22c55e;
+  border-radius: 0;
   transition: width 0.3s ease;
 }
 
@@ -600,20 +602,20 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.1);
+  background: #1a1a1a;
   border-radius: 50%;
-  color: #a0aec0;
+  color: #888;
   font-size: 0.75rem;
   font-weight: 600;
 }
 
 .step.complete .step-icon {
-  background: rgba(102, 126, 234, 0.3);
-  color: #667eea;
+  background: #1a1a1a;
+  color: #22c55e;
 }
 
 .step span {
-  color: #718096;
+  color: #666;
   font-size: 0.625rem;
   text-align: center;
 }
@@ -621,26 +623,26 @@ onUnmounted(() => {
 .step-connector {
   flex: 1;
   height: 2px;
-  background: rgba(255, 255, 255, 0.1);
+  background: #222;
   margin: 0 4px;
   margin-bottom: 18px;
   transition: background 0.3s ease;
 }
 
 .step-connector.active {
-  background: rgba(102, 126, 234, 0.5);
+  background: #22c55e;
 }
 
 .progress-footer {
   padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid #222;
 }
 
 .tip {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #718096;
+  color: #666;
   font-size: 0.75rem;
   margin: 0;
 }
@@ -655,10 +657,10 @@ onUnmounted(() => {
 .logs-section {
   margin-top: 20px;
   margin-bottom: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
+  border: 1px solid #222;
+  border-radius: 0;
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.2);
+  background: #0d0d0d;
 }
 
 .logs-header {
@@ -666,20 +668,20 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.05);
+  background: #1a1a1a;
   cursor: pointer;
   transition: background 0.2s ease;
 }
 
 .logs-header:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: #222;
 }
 
 .logs-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #a0aec0;
+  color: #888;
   font-size: 0.875rem;
   font-weight: 500;
 }
@@ -687,21 +689,22 @@ onUnmounted(() => {
 .logs-title svg {
   width: 16px;
   height: 16px;
-  color: #667eea;
+  color: #22c55e;
 }
 
 .log-count {
-  background: rgba(102, 126, 234, 0.2);
-  color: #667eea;
+  background: #1a1a1a;
+  color: #22c55e;
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: 0;
   font-size: 0.75rem;
+  border: 1px solid #333;
 }
 
 .chevron {
   width: 18px;
   height: 18px;
-  color: #718096;
+  color: #666;
   transition: transform 0.2s ease;
 }
 
@@ -722,20 +725,20 @@ onUnmounted(() => {
 }
 
 .logs-container::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.2);
+  background: #0d0d0d;
 }
 
 .logs-container::-webkit-scrollbar-thumb {
-  background: rgba(102, 126, 234, 0.3);
-  border-radius: 3px;
+  background: #333;
+  border-radius: 0;
 }
 
 .logs-container::-webkit-scrollbar-thumb:hover {
-  background: rgba(102, 126, 234, 0.5);
+  background: #444;
 }
 
 .logs-empty {
-  color: #718096;
+  color: #666;
   text-align: center;
   padding: 16px;
   font-style: italic;
@@ -746,9 +749,9 @@ onUnmounted(() => {
   align-items: flex-start;
   gap: 8px;
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: 0;
   margin-bottom: 2px;
-  background: rgba(255, 255, 255, 0.02);
+  background: #141414;
   animation: fadeIn 0.3s ease;
 }
 
@@ -781,68 +784,71 @@ onUnmounted(() => {
 
 .log-message {
   flex: 1;
-  color: #cbd5e0;
+  color: #ccc;
   word-break: break-word;
 }
 
 .log-time {
   flex-shrink: 0;
-  color: #4a5568;
+  color: #444;
   font-size: 0.625rem;
 }
 
 /* Log level colors */
 .log-info .log-icon {
-  color: #63b3ed;
+  color: #3b82f6;
 }
 
 .log-success .log-icon {
-  color: #68d391;
+  color: #22c55e;
 }
 
 .log-warning .log-icon {
-  color: #f6ad55;
+  color: #f59e0b;
 }
 
 .log-error .log-icon {
-  color: #fc8181;
+  color: #ef4444;
 }
 
 .log-debug .log-icon {
-  color: #b794f4;
+  color: #a855f7;
 }
 
 /* Log level backgrounds */
 .log-success {
-  background: rgba(104, 211, 145, 0.1);
+  background: #141414;
+  border-left: 2px solid #22c55e;
 }
 
 .log-warning {
-  background: rgba(246, 173, 85, 0.1);
+  background: #141414;
+  border-left: 2px solid #f59e0b;
 }
 
 .log-error {
-  background: rgba(252, 129, 129, 0.1);
+  background: #141414;
+  border-left: 2px solid #ef4444;
 }
 
 /* Category indicator */
 .category-modal .log-category-icon {
-  color: #b794f4;
+  color: #a855f7;
 }
 
 .category-model .log-category-icon {
-  color: #4fd1c5;
+  color: #06b6d4;
 }
 
 .category-detection .log-category-icon {
-  color: #63b3ed;
+  color: #3b82f6;
 }
 
 .category-court .log-category-icon {
-  color: #f6ad55;
+  color: #f59e0b;
 }
 
 .category-processing .log-category-icon {
-  color: #a0aec0;
+  color: #888;
 }
 </style>

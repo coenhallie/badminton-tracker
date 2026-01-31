@@ -734,3 +734,119 @@ def create_analytics_summary(
         }
     
     return summary
+
+
+def recalculate_zone_analytics_from_skeleton_data(
+    skeleton_frames: List[Dict],
+    video_width: int,
+    video_height: int
+) -> Dict:
+    """
+    Recalculate player zone analytics from skeleton data using current manual keypoints.
+    
+    This function allows zone analytics to be recalculated after manual court keypoints
+    have been set, similar to how speeds are recalculated. This is important because:
+    1. Zone analytics are initially calculated during video processing
+    2. If manual keypoints weren't set at that time, all zones are "unknown" (0%)
+    3. After user sets manual keypoints, we need to recalculate from pixel positions
+    
+    Args:
+        skeleton_frames: List of skeleton frame data from analysis results
+        video_width: Video frame width in pixels
+        video_height: Video frame height in pixels
+        
+    Returns:
+        Dictionary with recalculated zone analytics per player, using same format
+        as create_analytics_summary's player_analytics section
+    """
+    from court_detection import (
+        get_court_detector, CourtDetection, ManualCourtKeypoints,
+        COURT_WIDTH_DOUBLES, COURT_LENGTH
+    )
+    
+    court_detector = get_court_detector()
+    
+    # Check if manual keypoints are available
+    manual_kp = court_detector.get_manual_keypoints()
+    if manual_kp is None:
+        print("[ZONE ANALYTICS] No manual keypoints set - cannot recalculate zone coverage")
+        return {}
+    
+    # Create court detection from manual keypoints
+    import numpy as np
+    corners = manual_kp.to_numpy()
+    homography = court_detector._calculate_homography(corners)
+    
+    if homography is None:
+        print("[ZONE ANALYTICS] Failed to calculate homography from manual keypoints")
+        return {}
+    
+    court_detection = CourtDetection(
+        regions=[],
+        keypoints=[],
+        court_corners=corners,
+        homography_matrix=homography,
+        confidence=1.0,
+        detected=True,
+        frame_width=video_width,
+        frame_height=video_height,
+        detection_source="manual",
+        manual_keypoints=manual_kp
+    )
+    
+    print(f"[ZONE ANALYTICS] Recalculating zone coverage using manual keypoints")
+    print(f"  - Video dimensions: {video_width}x{video_height}")
+    print(f"  - Court corners: {corners.tolist()}")
+    
+    # Create a new position analyzer for recalculation
+    position_analyzer = PlayerPositionAnalyzer(court_detector)
+    
+    # Process all skeleton frames to build position history
+    for frame_data in skeleton_frames:
+        frame_number = frame_data.get("frame", 0)
+        
+        for player in frame_data.get("players", []):
+            player_id = player.get("player_id", 0)
+            center = player.get("center", {})
+            
+            pixel_x = center.get("x")
+            pixel_y = center.get("y")
+            
+            if pixel_x is not None and pixel_y is not None:
+                # Update position with court detection for zone classification
+                position_analyzer.update(
+                    frame_number=frame_number,
+                    player_id=player_id,
+                    pixel_position=(pixel_x, pixel_y),
+                    court_detection=court_detection
+                )
+    
+    # Calculate zone analytics for each player
+    player_analytics = {}
+    player_ids = list(position_analyzer.player_positions.keys())
+    
+    print(f"[ZONE ANALYTICS] Found {len(player_ids)} players with position data")
+    
+    for player_id in player_ids:
+        zone_analytics = position_analyzer.get_zone_analytics(player_id)
+        heatmap = position_analyzer.generate_heatmap_grid(player_id)
+        
+        print(f"  - Player {player_id}: {len(zone_analytics.heatmap_data)} positions, "
+              f"front={zone_analytics.time_in_front:.1f}%, mid={zone_analytics.time_in_mid:.1f}%, "
+              f"back={zone_analytics.time_in_back:.1f}%")
+        
+        player_analytics[str(player_id)] = {
+            "zone_coverage": {
+                "front": round(zone_analytics.time_in_front, 1),
+                "mid": round(zone_analytics.time_in_mid, 1),
+                "back": round(zone_analytics.time_in_back, 1),
+                "left": round(zone_analytics.time_in_left, 1),
+                "center": round(zone_analytics.time_in_center, 1),
+                "right": round(zone_analytics.time_in_right, 1)
+            },
+            "avg_distance_to_net_m": round(zone_analytics.avg_distance_to_net, 2),
+            "heatmap": heatmap.tolist(),
+            "position_count": len(zone_analytics.heatmap_data)
+        }
+    
+    return player_analytics

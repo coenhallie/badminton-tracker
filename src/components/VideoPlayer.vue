@@ -263,6 +263,7 @@ const props = defineProps<{
   showShuttles?: boolean
   showRackets?: boolean
   showPoseOverlay?: boolean
+  poseSource?: 'skeleton' | 'trained' | 'both'
   // NOTE: showCourtOverlay prop removed - no automatic court detection to display
   showHeatmap?: boolean
 }>()
@@ -301,6 +302,7 @@ const emit = defineEmits<{
   frameUpdate: [frame: number]
   courtKeypointsSet: [keypoints: ExtendedCourtKeypoints]
   play: []
+  keypointSelectionChange: [isActive: boolean, currentCount: number]
 }>()
 
 const videoRef = ref<HTMLVideoElement | null>(null)
@@ -752,43 +754,6 @@ function drawKeypointOverlay() {
     ctx.textBaseline = 'middle'
     ctx.fillText(kp.label, x, y)
   })
-  
-  // Draw instructions at top
-  if (isKeypointSelectionMode.value) {
-    const nextIdx = manualKeypoints.value.length
-    if (nextIdx < TOTAL_KEYPOINTS) {
-      const nextLabel = KEYPOINT_FULL_LABELS[nextIdx] ?? ''
-      const instruction = `Click to set: ${nextLabel} (${nextIdx + 1}/${TOTAL_KEYPOINTS})`
-      
-      ctx.font = 'bold 14px Inter, system-ui, sans-serif'
-      const textWidth = ctx.measureText(instruction).width
-      
-      // Background
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.85)'
-      ctx.fillRect(canvas.width / 2 - textWidth / 2 - 12, 8, textWidth + 24, 28)
-      
-      // Text
-      ctx.fillStyle = keypointColors[nextIdx] ?? '#00FF7F'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'top'
-      ctx.fillText(instruction, canvas.width / 2, 14)
-    } else {
-      const instruction = '✓ All 12 keypoints set! Click "Done" to apply.'
-      ctx.font = 'bold 14px Inter, system-ui, sans-serif'
-      const textWidth = ctx.measureText(instruction).width
-      
-      ctx.fillStyle = 'rgba(0, 128, 0, 0.9)'
-      ctx.fillRect(canvas.width / 2 - textWidth / 2 - 12, 8, textWidth + 24, 28)
-      
-      ctx.fillStyle = '#FFFFFF'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'top'
-      ctx.fillText(instruction, canvas.width / 2, 14)
-    }
-    
-    // Draw reference guide at bottom showing point order
-    drawKeypointGuide(ctx, canvas.width, canvas.height)
-  }
 }
 
 /**
@@ -870,110 +835,7 @@ function drawCourtGuideLines(ctx: CanvasRenderingContext2D, scaleX: number, scal
   ctx.setLineDash([])
 }
 
-/**
- * Draw a mini guide showing keypoint placement order
- */
-function drawKeypointGuide(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasHeight: number) {
-  const guideX = canvasWidth - 140
-  const guideY = canvasHeight - 200
-  const guideW = 130
-  const guideH = 190
-  
-  // Background
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.8)'
-  ctx.fillRect(guideX, guideY, guideW, guideH)
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'
-  ctx.lineWidth = 1
-  ctx.strokeRect(guideX, guideY, guideW, guideH)
-  
-  // Title
-  ctx.font = 'bold 10px Inter, system-ui, sans-serif'
-  ctx.fillStyle = '#FFFFFF'
-  ctx.textAlign = 'center'
-  ctx.fillText('Point Order', guideX + guideW / 2, guideY + 12)
-  
-  // Court diagram
-  const courtX = guideX + 10
-  const courtY = guideY + 20
-  const courtW = guideW - 20
-  const courtH = guideH - 30
-  
-  // Court outline
-  ctx.strokeStyle = '#00FF7F'
-  ctx.lineWidth = 1
-  ctx.strokeRect(courtX, courtY, courtW, courtH)
-  
-  // Net line (at center = 50%)
-  ctx.strokeStyle = '#FF00FF'
-  ctx.beginPath()
-  ctx.moveTo(courtX, courtY + courtH / 2)
-  ctx.lineTo(courtX + courtW, courtY + courtH / 2)
-  ctx.stroke()
-  
-  // Service lines - use correct proportions matching actual court
-  // SERVICE_LINE = 1.98m from net, COURT_LENGTH = 13.4m
-  // Near service line: (6.7 - 1.98) / 13.4 = 35.2%
-  // Far service line: (6.7 + 1.98) / 13.4 = 64.8%
-  const serviceY1 = courtY + courtH * 0.352  // Near service line (top half)
-  const serviceY2 = courtY + courtH * 0.648  // Far service line (bottom half)
-  ctx.strokeStyle = '#FF8800'
-  ctx.beginPath()
-  ctx.moveTo(courtX, serviceY1)
-  ctx.lineTo(courtX + courtW, serviceY1)
-  ctx.stroke()
-  ctx.strokeStyle = '#0088FF'
-  ctx.beginPath()
-  ctx.moveTo(courtX, serviceY2)
-  ctx.lineTo(courtX + courtW, serviceY2)
-  ctx.stroke()
-  
-  // Center line
-  ctx.strokeStyle = '#FFFFFF'
-  ctx.beginPath()
-  ctx.moveTo(courtX + courtW / 2, serviceY1)
-  ctx.lineTo(courtX + courtW / 2, serviceY2)
-  ctx.stroke()
-  
-  // Draw point numbers
-  const pointPositions = [
-    [courtX, courtY],                           // 1. TL
-    [courtX + courtW, courtY],                  // 2. TR
-    [courtX + courtW, courtY + courtH],         // 3. BR
-    [courtX, courtY + courtH],                  // 4. BL
-    [courtX, courtY + courtH / 2],              // 5. NL
-    [courtX + courtW, courtY + courtH / 2],     // 6. NR
-    [courtX, serviceY1],                        // 7. SNL
-    [courtX + courtW, serviceY1],               // 8. SNR
-    [courtX, serviceY2],                        // 9. SFL
-    [courtX + courtW, serviceY2],               // 10. SFR
-    [courtX + courtW / 2, serviceY1],           // 11. CTN
-    [courtX + courtW / 2, serviceY2]            // 12. CTF
-  ]
-  
-  ctx.font = 'bold 8px Inter, system-ui, sans-serif'
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  
-  pointPositions.forEach((pos, idx) => {
-    const x = pos[0] ?? 0
-    const y = pos[1] ?? 0
-    const color = keypointColors[idx] ?? '#FFFFFF'
-    const isSet = idx < manualKeypoints.value.length
-    
-    // Circle
-    ctx.beginPath()
-    ctx.arc(x, y, 6, 0, Math.PI * 2)
-    ctx.fillStyle = isSet ? color : color + '40'
-    ctx.fill()
-    ctx.strokeStyle = isSet ? '#FFFFFF' : '#666666'
-    ctx.lineWidth = 1
-    ctx.stroke()
-    
-    // Number
-    ctx.fillStyle = isSet ? '#000000' : '#FFFFFF'
-    ctx.fillText(String(idx + 1), x, y)
-  })
-}
+// NOTE: drawKeypointGuide function removed - point order guide now rendered in App.vue as a fixed modal
 
 function skipTime(seconds: number) {
   if (!videoRef.value) return
@@ -1578,6 +1440,11 @@ watch(currentSkeletonFrame, () => {
     drawOverlay()
   }
 })
+
+// Emit keypoint selection state changes to parent
+watch([isKeypointSelectionMode, () => manualKeypoints.value.length], ([isActive, count]) => {
+  emit('keypointSelectionChange', isActive as boolean, count as number)
+})
 </script>
 
 <template>
@@ -1591,6 +1458,7 @@ watch(currentSkeletonFrame, () => {
       <video
         ref="videoRef"
         :src="videoUrl"
+        :class="{ 'video-dimmed': showHeatmap }"
         @play="handlePlay"
         @pause="handlePause"
         @timeupdate="handleTimeUpdate"
@@ -1612,6 +1480,7 @@ watch(currentSkeletonFrame, () => {
       <PoseOverlay
         :skeleton-frame="currentSkeletonFrame"
         :visible="showPoseOverlay ?? false"
+        :pose-source="poseSource ?? 'both'"
       />
       <div v-if="!isPlaying && !isKeypointSelectionMode" class="play-overlay" @click="togglePlay">
         <div class="play-button">
@@ -1653,9 +1522,10 @@ watch(currentSkeletonFrame, () => {
           </button>
         </div>
       </div>
+      
     </div>
 
-    <div class="controls" :class="{ visible: showControls || !isPlaying }">
+    <div class="controls" :class="{ visible: (showControls || !isPlaying) && !isKeypointSelectionMode }">
       <div class="progress-bar" @click="handleSeek">
         <div class="progress-bg">
           <div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div>
@@ -1777,7 +1647,8 @@ watch(currentSkeletonFrame, () => {
   max-width: 1200px;
   margin: 0 auto;
   background: #000;
-  border-radius: 12px;
+  border: 1px solid #222;
+  border-radius: 0;
   overflow: hidden;
 }
 
@@ -1791,6 +1662,11 @@ video {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  transition: filter 0.3s ease;
+}
+
+video.video-dimmed {
+  filter: brightness(0.4);
 }
 
 .skeleton-canvas {
@@ -1818,15 +1694,15 @@ video {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(102, 126, 234, 0.9);
-  border-radius: 50%;
+  background: #22c55e;
+  border-radius: 0;
   color: white;
-  transition: transform 0.3s ease, background 0.3s ease;
+  transition: transform 0.2s ease, background 0.2s ease;
 }
 
 .play-button:hover {
-  transform: scale(1.1);
-  background: rgba(118, 75, 162, 0.9);
+  transform: scale(1.05);
+  background: #16a34a;
 }
 
 .play-button svg {
@@ -1841,7 +1717,7 @@ video {
   left: 0;
   right: 0;
   padding: 16px;
-  background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+  background: rgba(0, 0, 0, 0.85);
   opacity: 0;
   transition: opacity 0.3s ease;
 }
@@ -1862,8 +1738,8 @@ video {
 .progress-bg {
   width: 100%;
   height: 4px;
-  background: rgba(255, 255, 255, 0.3);
-  border-radius: 2px;
+  background: #333;
+  border-radius: 0;
   overflow: hidden;
   transition: height 0.2s ease;
 }
@@ -1874,8 +1750,8 @@ video {
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #667eea, #764ba2);
-  border-radius: 2px;
+  background: #22c55e;
+  border-radius: 0;
 }
 
 .controls-row {
@@ -1899,14 +1775,14 @@ video {
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: 0;
   color: white;
   cursor: pointer;
   transition: background 0.2s ease;
 }
 
 .control-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: #222;
 }
 
 .control-btn svg {
@@ -1924,8 +1800,8 @@ video {
   width: 80px;
   height: 4px;
   appearance: none;
-  background: rgba(255, 255, 255, 0.3);
-  border-radius: 2px;
+  background: #333;
+  border-radius: 0;
   cursor: pointer;
 }
 
@@ -1934,7 +1810,7 @@ video {
   width: 14px;
   height: 14px;
   background: white;
-  border-radius: 50%;
+  border-radius: 0;
   cursor: pointer;
 }
 
@@ -1953,22 +1829,23 @@ video {
 .rate-btn {
   padding: 4px 8px;
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 4px;
-  color: rgba(255, 255, 255, 0.7);
+  border: 1px solid #333;
+  border-radius: 0;
+  color: #888;
   font-size: 0.75rem;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .rate-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: #222;
+  border-color: #22c55e;
   color: white;
 }
 
 .rate-btn.active {
-  background: rgba(102, 126, 234, 0.8);
-  border-color: transparent;
+  background: #22c55e;
+  border-color: #22c55e;
   color: white;
 }
 
@@ -2001,9 +1878,9 @@ video {
   align-items: center;
   gap: 12px;
   padding: 16px 24px;
-  background: rgba(0, 0, 0, 0.85);
-  border-radius: 12px;
-  border: 2px solid rgba(0, 255, 127, 0.5);
+  background: #0d0d0d;
+  border: 2px solid #22c55e;
+  border-radius: 0;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   z-index: 20;
 }
@@ -2016,7 +1893,7 @@ video {
 }
 
 .keypoint-title {
-  color: #00FF7F;
+  color: #22c55e;
   font-weight: bold;
   font-size: 1rem;
 }
@@ -2033,8 +1910,8 @@ video {
 
 .keypoint-btn {
   padding: 8px 16px;
-  border: none;
-  border-radius: 6px;
+  border: 1px solid #333;
+  border-radius: 0;
   font-weight: bold;
   font-size: 0.875rem;
   cursor: pointer;
@@ -2047,38 +1924,43 @@ video {
 }
 
 .keypoint-btn.undo {
-  background: rgba(255, 255, 255, 0.2);
+  background: #1a1a1a;
+  border-color: #333;
   color: white;
 }
 
 .keypoint-btn.undo:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.3);
+  background: #222;
+  border-color: #22c55e;
 }
 
 .keypoint-btn.cancel {
-  background: rgba(255, 68, 68, 0.8);
-  color: white;
+  background: #1a0000;
+  border-color: #ef4444;
+  color: #ef4444;
 }
 
 .keypoint-btn.cancel:hover {
-  background: rgba(255, 68, 68, 1);
+  background: #2a0000;
 }
 
 .keypoint-btn.apply {
-  background: rgba(0, 255, 127, 0.8);
-  color: black;
+  background: #001a00;
+  border-color: #22c55e;
+  color: #22c55e;
 }
 
 .keypoint-btn.apply:hover {
-  background: rgba(0, 255, 127, 1);
+  background: #002a00;
 }
 
 .control-btn.keypoint-toggle.active {
-  background: rgba(0, 255, 127, 0.3);
-  color: #00FF7F;
+  background: #001a00;
+  border: 1px solid #22c55e;
+  color: #22c55e;
 }
 
 .control-btn.keypoint-toggle.active:hover {
-  background: rgba(0, 255, 127, 0.4);
+  background: #002a00;
 }
 </style>

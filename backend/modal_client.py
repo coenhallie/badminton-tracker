@@ -109,6 +109,7 @@ class InferenceResult:
     frame_number: int
     poses: List[Dict[str, Any]]
     detections: List[Dict[str, Any]]
+    pose_classifications: List[Dict[str, Any]]  # Custom trained pose/action classification
     court_regions: List[Dict[str, Any]]  # DEPRECATED - always empty
     court_keypoints: Optional[Dict[str, Any]]  # DEPRECATED - always None
     court_corners: Optional[List[List[float]]]  # DEPRECATED - always None
@@ -123,6 +124,7 @@ class InferenceResult:
             frame_number=data.get("frame_number", 0),
             poses=data.get("poses", []),
             detections=data.get("detections", []),
+            pose_classifications=data.get("pose_classifications", []),
             court_regions=[],  # Court detection removed - always empty
             court_keypoints=None,  # Court detection removed - always None
             court_corners=None,  # Court detection removed - always None
@@ -237,6 +239,32 @@ class InferenceResult:
             )
             shuttle_pos = (best_shuttle["x"], best_shuttle["y"])
         
+        # Convert pose classifications to output format with scaling
+        pose_classification_results = []
+        for pc in self.pose_classifications:
+            bbox = pc.get("bbox", {})
+            x = bbox.get("x", 0)
+            y = bbox.get("y", 0)
+            w = bbox.get("width", 0)
+            h = bbox.get("height", 0)
+            if inv_scale != 1.0:
+                x = x * inv_scale
+                y = y * inv_scale
+                w = w * inv_scale
+                h = h * inv_scale
+            
+            pose_classification_results.append({
+                "pose_class": pc.get("pose_class", "unknown"),
+                "confidence": pc.get("confidence", 0.0),
+                "class_id": pc.get("class_id", -1),
+                "bbox": {
+                    "x": x,
+                    "y": y,
+                    "width": w,
+                    "height": h,
+                }
+            })
+        
         # Court detection removed from Modal - use manual keypoints locally
         return {
             "frame": self.frame_number,
@@ -246,6 +274,7 @@ class InferenceResult:
             "court_keypoints": None,  # Court detection removed from Modal
             "court_model_used": "none",  # Court detection removed from Modal
             "badminton_detections": badminton_detections,
+            "pose_classifications": pose_classification_results,  # Custom trained pose/action classifications
             "shuttle_position": shuttle_pos,
             "shuttle_speed_kmh": None,
             "inference_time_ms": self.inference_time_ms,
@@ -425,6 +454,7 @@ class ModalInferenceClient:
         frame_number: int = 0,
         run_pose: bool = True,
         run_detection: bool = True,
+        run_pose_classification: bool = True,  # Custom trained pose/action classification
         run_court: bool = False,  # DEPRECATED - court detection removed from Modal
         confidence_threshold: float = 0.5,
         resize_frame: bool = True,
@@ -445,15 +475,16 @@ class ModalInferenceClient:
         Args:
             frame: BGR image (numpy array from cv2)
             frame_number: Frame number in video
-            run_pose: Whether to run pose estimation
-            run_detection: Whether to run object detection
+            run_pose: Whether to run pose estimation (skeleton keypoints)
+            run_detection: Whether to run object detection (shuttle, racket, etc.)
+            run_pose_classification: Whether to run custom pose/action classification
             run_court: DEPRECATED - ignored, court detection removed from Modal
             confidence_threshold: Minimum detection confidence
             resize_frame: Whether to resize large frames (default: True)
             court_model: DEPRECATED - ignored, court detection removed from Modal
             
         Returns:
-            InferenceResult with pose and detection results (coordinates in original frame space)
+            InferenceResult with pose, detection, and pose classification results
         """
         if not self.is_enabled:
             raise RuntimeError("Modal inference is not enabled")
@@ -467,6 +498,7 @@ class ModalInferenceClient:
             "frame_number": frame_number,
             "run_pose": run_pose,
             "run_detection": run_detection,
+            "run_pose_classification": run_pose_classification,
             "run_court": False,  # Court detection removed from Modal
             "confidence_threshold": confidence_threshold,
             "court_model": "none"  # Court detection removed from Modal
@@ -555,6 +587,7 @@ class ModalInferenceClient:
                         frame_number=batch_start + j,
                         poses=[],
                         detections=[],
+                        pose_classifications=[],  # Empty for failed frames
                         court_regions=[],  # Always empty (court detection removed)
                         court_keypoints=None,  # Always None (court detection removed)
                         court_corners=None,  # Always None (court detection removed)
@@ -605,8 +638,18 @@ async def initialize_modal_client() -> bool:
     if health.get("status") == "healthy":
         logger.info("Modal inference is healthy and ready")
         logger.info(f"  GPU: {health.get('gpu_name', 'Unknown')}")
-        logger.info(f"  Pose model: {'loaded' if health.get('pose_model_loaded') else 'not loaded'}")
+        logger.info(f"  Pose model (skeleton): {'loaded' if health.get('pose_model_loaded') else 'not loaded'}")
         logger.info(f"  Detection model: {'loaded' if health.get('detection_model_loaded') else 'not loaded'}")
+        
+        # Log pose classification model status
+        pose_class_loaded = health.get('pose_classification_model_loaded', False)
+        pose_classes = health.get('pose_classification_classes', [])
+        if pose_class_loaded:
+            logger.info(f"  Pose classification model: loaded")
+            logger.info(f"    Classes: {', '.join(pose_classes)}")
+        else:
+            logger.info(f"  Pose classification model: not loaded (upload model to enable)")
+        
         logger.info(f"  Note: Court detection handled locally via manual keypoints")
         return True
     else:

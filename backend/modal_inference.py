@@ -104,6 +104,7 @@ class FrameRequest(BaseModel):
     frame_number: int = 0
     run_pose: bool = True
     run_detection: bool = True
+    run_pose_classification: bool = True  # Run custom pose/action classification model
     run_court: bool = False  # DEPRECATED - court detection removed from Modal, use manual keypoints
     confidence_threshold: float = 0.5
     court_model: str = "region"  # DEPRECATED - kept for backwards compatibility
@@ -138,6 +139,18 @@ class PersonPoseResult(BaseModel):
     center_y: float
 
 
+class PoseClassificationResult(BaseModel):
+    """
+    Result for pose/action classification on a detected player.
+    Uses custom trained model to classify badminton actions.
+    Classes: backhand-general, defense, lift, offense, serve, smash
+    """
+    bbox: BoundingBoxResult
+    pose_class: str
+    confidence: float
+    class_id: int
+
+
 class CourtRegionResult(BaseModel):
     """
     Court region detection result.
@@ -169,6 +182,7 @@ class FrameResult(BaseModel):
     frame_number: int
     poses: list[PersonPoseResult]
     detections: list[BoundingBoxResult]
+    pose_classifications: list[PoseClassificationResult] = []  # Custom pose/action classification
     court_regions: list[CourtRegionResult]  # DEPRECATED - always empty
     court_keypoints: Optional[CourtKeypointResult]  # DEPRECATED - always None
     court_corners: Optional[list[list[float]]]  # DEPRECATED - always None
@@ -259,13 +273,15 @@ class BadmintonInference:
             print(f"GPU: {torch.cuda.get_device_name(0)}")
             print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
             
-            # Create CUDA streams for parallel execution (pose + detection)
+            # Create CUDA streams for parallel execution (pose + detection + pose_classification)
             self.pose_stream = torch.cuda.Stream()
             self.detection_stream = torch.cuda.Stream()
-            print("Created 2 CUDA streams for parallel model execution")
+            self.pose_classification_stream = torch.cuda.Stream()
+            print("Created 3 CUDA streams for parallel model execution")
         else:
             self.pose_stream = None
             self.detection_stream = None
+            self.pose_classification_stream = None
         
         # Thread pool for CPU-bound operations (decoding, encoding)
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
@@ -286,6 +302,20 @@ class BadmintonInference:
             self.detection_model = YOLO("yolov8n.pt")  # Fallback to COCO
             self.detection_model.to(self.device)
         
+        # Load custom pose/action classification model if available
+        # Classes: backhand-general, defense, lift, offense, serve, smash
+        pose_classification_model_path = VOLUME_PATH / "pose" / "best.pt"
+        if pose_classification_model_path.exists():
+            print(f"Loading custom pose classification model from {pose_classification_model_path}...")
+            self.pose_classification_model = YOLO(str(pose_classification_model_path))
+            self.pose_classification_model.to(self.device)
+            self.pose_classification_available = True
+            print(f"Pose classification classes: {self.pose_classification_model.names}")
+        else:
+            print("Custom pose classification model not found - pose classification disabled")
+            self.pose_classification_model = None
+            self.pose_classification_available = False
+        
         # Warmup models with dummy inference (compiles CUDA kernels)
         print("Warming up models (compiling CUDA kernels)...")
         import numpy as np
@@ -295,6 +325,8 @@ class BadmintonInference:
         for i in range(3):
             _ = self.pose_model(dummy, verbose=False, half=True)
             _ = self.detection_model(dummy, verbose=False, half=True)
+            if self.pose_classification_available:
+                _ = self.pose_classification_model(dummy, verbose=False, half=True)
         
         load_time = time.time() - start
         print(f"All models loaded and optimized in {load_time:.2f}s")
@@ -458,16 +490,67 @@ class BadmintonInference:
         
         return detections
     
+    def _run_pose_classification(self, frame, confidence_threshold: float) -> list[PoseClassificationResult]:
+        """
+        Run pose/action classification on a frame.
+        
+        Uses custom trained YOLO model to detect and classify badminton actions.
+        Classes: backhand-general, defense, lift, offense, serve, smash
+        
+        Returns list of detected player actions with bounding boxes.
+        """
+        if not self.pose_classification_available or self.pose_classification_model is None:
+            return []
+        
+        results = self.pose_classification_model(
+            frame,
+            verbose=False,
+            conf=confidence_threshold,
+            half=True
+        )
+        
+        classifications = []
+        if results and len(results) > 0:
+            result = results[0]
+            if result.boxes is not None:
+                for box in result.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    cls_id = int(box.cls[0].cpu().numpy())
+                    conf = float(box.conf[0].cpu().numpy())
+                    
+                    # Get class name from model
+                    class_name = self.pose_classification_model.names.get(cls_id, f"class_{cls_id}")
+                    
+                    bbox = BoundingBoxResult(
+                        x=float((x1 + x2) / 2),
+                        y=float((y1 + y2) / 2),
+                        width=float(x2 - x1),
+                        height=float(y2 - y1),
+                        class_name=class_name,
+                        class_id=cls_id,
+                        confidence=conf,
+                        detection_type="pose_classification"
+                    )
+                    
+                    classifications.append(PoseClassificationResult(
+                        bbox=bbox,
+                        pose_class=class_name,
+                        confidence=conf,
+                        class_id=cls_id
+                    ))
+        
+        return classifications
+    
     @modal.method()
     def process_frame(self, request: FrameRequest) -> FrameResult:
         """
-        Process a single frame with pose and detection models.
+        Process a single frame with pose, detection, and pose classification models.
         
         NOTE: Court detection has been REMOVED from Modal inference.
         Use manual keypoints locally for more accurate court calibration.
         
         OPTIMIZED: Uses CUDA streams to run models in parallel when possible.
-        This provides ~2x speedup over sequential execution.
+        This provides ~2-3x speedup over sequential execution.
         """
         import time
         import torch
@@ -477,9 +560,14 @@ class BadmintonInference:
         
         poses = []
         detections = []
+        pose_classifications = []
         
         # Check if we can use parallel execution (GPU available + multiple models requested)
-        num_models_to_run = sum([request.run_pose, request.run_detection])
+        num_models_to_run = sum([
+            request.run_pose,
+            request.run_detection,
+            request.run_pose_classification and self.pose_classification_available
+        ])
         use_parallel = (
             self.device == "cuda" and
             num_models_to_run >= 2 and
@@ -491,6 +579,7 @@ class BadmintonInference:
             # Each model runs on its own stream for true GPU parallelism
             pose_future = None
             detection_future = None
+            pose_classification_future = None
             
             # Launch all models concurrently using thread pool + CUDA streams
             if request.run_pose:
@@ -505,6 +594,12 @@ class BadmintonInference:
                         return self._run_object_detection(frame, request.confidence_threshold)
                 detection_future = self.thread_pool.submit(run_detection)
             
+            if request.run_pose_classification and self.pose_classification_available:
+                def run_pose_classification():
+                    with torch.cuda.stream(self.pose_classification_stream):
+                        return self._run_pose_classification(frame, request.confidence_threshold)
+                pose_classification_future = self.thread_pool.submit(run_pose_classification)
+            
             # Synchronize CUDA streams and collect results
             torch.cuda.synchronize()  # Wait for all GPU work to complete
             
@@ -512,6 +607,8 @@ class BadmintonInference:
                 poses = pose_future.result()
             if detection_future:
                 detections = detection_future.result()
+            if pose_classification_future:
+                pose_classifications = pose_classification_future.result()
         else:
             # SEQUENTIAL EXECUTION (fallback for CPU or single model)
             if request.run_pose:
@@ -519,6 +616,9 @@ class BadmintonInference:
             
             if request.run_detection:
                 detections = self._run_object_detection(frame, request.confidence_threshold)
+            
+            if request.run_pose_classification and self.pose_classification_available:
+                pose_classifications = self._run_pose_classification(frame, request.confidence_threshold)
         
         inference_time = (time.time() - start) * 1000
         
@@ -526,6 +626,7 @@ class BadmintonInference:
             frame_number=request.frame_number,
             poses=poses,
             detections=detections,
+            pose_classifications=pose_classifications,
             court_regions=[],  # DEPRECATED - always empty
             court_keypoints=None,  # DEPRECATED - always None
             court_corners=None,  # DEPRECATED - always None
@@ -594,6 +695,12 @@ class BadmintonInference:
     def health_check(self) -> dict:
         """Check if models are loaded and ready"""
         import torch
+        
+        # Get pose classification model info
+        pose_classification_classes = []
+        if self.pose_classification_available and self.pose_classification_model is not None:
+            pose_classification_classes = list(self.pose_classification_model.names.values())
+        
         return {
             "status": "healthy",
             "device": self.device,
@@ -601,6 +708,8 @@ class BadmintonInference:
             "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
             "pose_model_loaded": self.pose_model is not None,
             "detection_model_loaded": self.detection_model is not None,
+            "pose_classification_model_loaded": self.pose_classification_available,
+            "pose_classification_classes": pose_classification_classes,
             # Court detection removed - use manual keypoints locally
             "court_model_loaded": False,
             "court_region_model_loaded": False,
@@ -687,7 +796,7 @@ def upload_model(model_type: str, model_data: bytes):
     Upload a custom trained model to Modal Volume.
     
     Args:
-        model_type: One of "court", "court_keypoint", "badminton", "shuttle"
+        model_type: One of "court", "court_keypoint", "badminton", "shuttle", "pose"
         model_data: Raw bytes of the model .pt file
     
     Usage from Python:
@@ -695,8 +804,12 @@ def upload_model(model_type: str, model_data: bytes):
         upload_fn = modal.Function.from_name('badminton-tracker-inference', 'upload_model')
         with open('models/court_keypoint/weights/best.pt', 'rb') as f:
             result = upload_fn.remote(model_type='court_keypoint', model_data=f.read())
+        
+        # For pose classification model:
+        with open('backend/models/badminton_pose/weights/best.pt', 'rb') as f:
+            result = upload_fn.remote(model_type='pose', model_data=f.read())
     """
-    valid_types = ["court", "court_keypoint", "badminton", "shuttle"]
+    valid_types = ["court", "court_keypoint", "badminton", "shuttle", "pose"]
     if model_type not in valid_types:
         raise ValueError(f"Invalid model type: {model_type}. Must be one of: {', '.join(valid_types)}")
     

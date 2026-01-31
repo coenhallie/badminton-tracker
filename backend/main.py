@@ -58,7 +58,7 @@ from pose_detection import (
 # Import shuttle analytics module for advanced speed and trajectory analysis
 from shuttle_analytics import (
     ShuttleTracker, PlayerPositionAnalyzer, create_analytics_summary,
-    MatchAnalytics, ShotType
+    MatchAnalytics, ShotType, recalculate_zone_analytics_from_skeleton_data
 )
 
 # Import detection smoothing module for lag reduction
@@ -72,6 +72,11 @@ from heatmap_generator import (
     HeatmapGenerator, HeatmapConfig, HeatmapData,
     generate_heatmap_from_skeleton_data, get_or_create_generator,
     clear_generator_cache, HeatmapColormap
+)
+
+# Import PDF export module for analysis report generation
+from pdf_export import (
+    PDFReportGenerator, PDFExportConfig, generate_pdf_report
 )
 
 # Import speed analytics module for real-time speed graph visualization
@@ -1048,6 +1053,7 @@ async def process_video(video_path: Path, video_id: str, config: AnalysisConfig)
                         run_pose=True,
                         run_detection=config.use_badminton_detector,
                         run_court=False,  # Court detection removed from Modal - always False
+                        run_pose_classification=True,  # Run trained pose classification model
                         confidence_threshold=config.confidence_threshold,
                         court_model="none"  # Court detection removed from Modal
                     )
@@ -1272,6 +1278,25 @@ async def process_video(video_path: Path, video_id: str, config: AnalysisConfig)
                         # Also add to frame data for frontend access
                         frame_skeleton_data["court_keypoints"] = modal_court_keypoints
                         frame_skeleton_data["court_model_used"] = modal_result.court_model_used
+                    
+                    # Add trained pose classifications from Modal inference
+                    if modal_result.pose_classifications:
+                        # Scale pose classification bounding boxes to original frame size
+                        scaled_pose_classifications = []
+                        for pc in modal_result.pose_classifications:
+                            scaled_pc = {
+                                # Modal sends "pose_class", frontend expects "class_name"
+                                "class_name": pc.get("pose_class"),
+                                "confidence": pc.get("confidence"),
+                                "bbox": {
+                                    "x": pc.get("bbox", {}).get("x", 0) * inv_scale,
+                                    "y": pc.get("bbox", {}).get("y", 0) * inv_scale,
+                                    "width": pc.get("bbox", {}).get("width", 0) * inv_scale,
+                                    "height": pc.get("bbox", {}).get("height", 0) * inv_scale,
+                                } if pc.get("bbox") else None
+                            }
+                            scaled_pose_classifications.append(scaled_pc)
+                        frame_skeleton_data["pose_classifications"] = scaled_pose_classifications
                     
                 except Exception as e:
                     print(f"  ⚠️ Modal inference failed on frame {frame_count}: {e}")
@@ -2336,6 +2361,101 @@ async def get_player_zone_analytics(video_id: str):
         "video_id": video_id,
         "player_zone_analytics": player_analytics
     }
+
+
+@app.get("/api/player-zone-analytics/{video_id}/recalculate")
+async def get_recalculated_player_zone_analytics(video_id: str):
+    """
+    Get RECALCULATED player court zone coverage analytics using current manual keypoints.
+    
+    IMPORTANT: This endpoint recalculates zone coverage from skeleton data using
+    the currently set manual court keypoints. This is critical because:
+    1. Zone analytics are initially calculated during video processing
+    2. If manual keypoints weren't set at that time, all zones show as 0%
+    3. After user sets manual keypoints, this endpoint returns accurate zones
+    
+    Returns zone coverage percentages and heatmap data for each player:
+    - Time distribution across front/mid/back court
+    - Time distribution across left/center/right sides
+    - Average distance to net
+    - Position heatmap grid
+    - manual_keypoints_used: Whether manual keypoints were used for calculation
+    """
+    if video_id not in analysis_results:
+        raise HTTPException(status_code=404, detail="Results not found")
+    
+    result = analysis_results[video_id]
+    skeleton_data = result.get("skeleton_data", [])
+    video_width = result.get("video_width", 1920)
+    video_height = result.get("video_height", 1080)
+    
+    if not skeleton_data:
+        return {
+            "video_id": video_id,
+            "player_zone_analytics": None,
+            "message": "No skeleton data available for zone recalculation"
+        }
+    
+    # Check if stored analytics already have valid data
+    stored_analytics = result.get("player_zone_analytics", {})
+    has_valid_stored = False
+    if stored_analytics:
+        for player_id, analytics in stored_analytics.items():
+            zone_coverage = analytics.get("zone_coverage", {})
+            total = sum(zone_coverage.get(k, 0) for k in ["front", "mid", "back"])
+            if total > 0:
+                has_valid_stored = True
+                break
+    
+    # Check if manual keypoints are set
+    manual_kp_status = get_manual_keypoints_status()
+    has_manual_keypoints = manual_kp_status.get("has_manual_keypoints", False)
+    
+    if has_valid_stored and not has_manual_keypoints:
+        # Return stored analytics if they're valid and no manual keypoints to recalculate with
+        return {
+            "video_id": video_id,
+            "player_zone_analytics": stored_analytics,
+            "manual_keypoints_used": False,
+            "recalculated": False,
+            "message": "Using stored zone analytics (manual keypoints not set)"
+        }
+    
+    # Recalculate zone analytics using manual keypoints
+    try:
+        recalculated = recalculate_zone_analytics_from_skeleton_data(
+            skeleton_frames=skeleton_data,
+            video_width=video_width,
+            video_height=video_height
+        )
+        
+        if recalculated:
+            return {
+                "video_id": video_id,
+                "player_zone_analytics": recalculated,
+                "manual_keypoints_used": has_manual_keypoints,
+                "recalculated": True,
+                "message": "Zone analytics recalculated using manual court keypoints"
+            }
+        else:
+            # Recalculation returned empty - fall back to stored
+            return {
+                "video_id": video_id,
+                "player_zone_analytics": stored_analytics or None,
+                "manual_keypoints_used": False,
+                "recalculated": False,
+                "message": "Zone recalculation failed - manual keypoints may not be set"
+            }
+    except Exception as e:
+        print(f"[ZONE ANALYTICS] Recalculation failed: {e}")
+        return {
+            "video_id": video_id,
+            "player_zone_analytics": stored_analytics or None,
+            "manual_keypoints_used": False,
+            "recalculated": False,
+            "error": str(e),
+            "message": "Zone recalculation failed - using stored analytics"
+        }
 
 
 @app.get("/api/court-keypoints/info")
@@ -3857,6 +3977,331 @@ async def get_speed_timeline(
         "manual_keypoints_used": speed_data.get("manual_keypoints_used", False),
         "detection_source": speed_data.get("detection_source", "unknown"),
         "status": "success"
+    }
+
+
+# =============================================================================
+# PDF EXPORT API ENDPOINTS
+# =============================================================================
+
+class PDFExportRequest(BaseModel):
+    """Request body for PDF export configuration"""
+    frame_number: Optional[int] = None  # Frame to use for heatmap visualization (None = middle frame)
+    include_heatmap: bool = True
+    heatmap_colormap: str = "turbo"  # turbo, parula, inferno, viridis, plasma, hot
+    heatmap_alpha: float = 0.6  # Heatmap overlay opacity (0-1)
+    include_player_stats: bool = True
+    include_shuttle_stats: bool = True
+    include_court_info: bool = True
+    include_speed_stats: bool = True
+    title: str = "Badminton Video Analysis Report"
+
+
+class PDFExportWithDataRequest(BaseModel):
+    """Request body for PDF export with frontend data included"""
+    # Configuration options
+    frame_number: Optional[int] = None
+    include_heatmap: bool = True
+    heatmap_colormap: str = "turbo"
+    heatmap_alpha: float = 0.6
+    title: str = "Badminton Video Analysis Report"
+    
+    # Data from frontend (same structure as AnalysisResult)
+    duration: float = 0
+    fps: float = 30
+    total_frames: int = 0
+    processed_frames: int = 0
+    video_width: int = 1920
+    video_height: int = 1080
+    players: List[Dict[str, Any]] = []
+    shuttle: Optional[Dict[str, Any]] = None
+    court_detection: Optional[Dict[str, Any]] = None
+    shuttle_analytics: Optional[Dict[str, Any]] = None
+    player_zone_analytics: Optional[Dict[str, Any]] = None
+
+
+@app.get("/api/export/pdf/{video_id}")
+async def export_pdf_report(
+    video_id: str,
+    frame_number: Optional[int] = None,
+    include_heatmap: bool = True,
+    heatmap_colormap: str = "turbo",
+    heatmap_alpha: float = 0.6
+):
+    """
+    Generate and download a PDF report for the video analysis.
+    
+    This endpoint creates a professional PDF report containing:
+    - Video frame with heatmap overlay showing player positions
+    - Video summary (duration, frames, players detected, FPS)
+    - Movement analysis (total distance, average/max speed)
+    - Per-player statistics
+    - Shuttle/shot analytics (if available)
+    - Court detection information (if available)
+    - Player zone coverage analytics (if available)
+    
+    Args:
+        video_id: The video ID to generate report for
+        frame_number: Specific frame to use for heatmap visualization (default: middle frame)
+        include_heatmap: Whether to include the heatmap visualization
+        heatmap_colormap: Colormap for heatmap (turbo, parula, inferno, viridis, plasma, hot)
+        heatmap_alpha: Opacity of heatmap overlay (0.0-1.0)
+    
+    Returns:
+        PDF file download
+    """
+    if video_id not in analysis_results:
+        raise HTTPException(status_code=404, detail="Video results not found. Run analysis first.")
+    
+    # Find the video file
+    video_files = list(UPLOAD_DIR.glob(f"{video_id}.*"))
+    if not video_files:
+        raise HTTPException(status_code=404, detail="Original video file not found")
+    
+    video_path = video_files[0]
+    
+    # Get analysis result
+    result = analysis_results[video_id]
+    
+    # Create PDF export configuration
+    config = PDFExportConfig(
+        include_heatmap=include_heatmap,
+        heatmap_colormap=heatmap_colormap,
+        heatmap_alpha=heatmap_alpha,
+        frame_number=frame_number,
+        include_player_stats=True,
+        include_shuttle_stats=True,
+        include_court_info=True,
+        include_speed_stats=True,
+        title="Badminton Video Analysis Report"
+    )
+    
+    try:
+        # Generate PDF
+        print(f"[PDF EXPORT] Generating PDF report for video {video_id}")
+        pdf_bytes = generate_pdf_report(result, video_path, config)
+        print(f"[PDF EXPORT] PDF generated successfully ({len(pdf_bytes)} bytes)")
+        
+        # Return as file download
+        from fastapi.responses import Response
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=badminton_analysis_{video_id[:8]}.pdf"
+            }
+        )
+    except Exception as e:
+        print(f"[PDF EXPORT] Failed to generate PDF: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF report: {str(e)}")
+
+
+@app.post("/api/export/pdf/{video_id}")
+async def export_pdf_report_with_config(video_id: str, request: PDFExportRequest):
+    """
+    Generate and download a PDF report with custom configuration.
+    
+    This endpoint accepts a JSON body with detailed configuration options
+    for PDF generation. Use GET /api/export/pdf/{video_id} for quick export
+    with default settings.
+    
+    Args:
+        video_id: The video ID to generate report for
+        request: PDF export configuration
+    
+    Returns:
+        PDF file download
+    """
+    if video_id not in analysis_results:
+        raise HTTPException(status_code=404, detail="Video results not found. Run analysis first.")
+    
+    # Find the video file
+    video_files = list(UPLOAD_DIR.glob(f"{video_id}.*"))
+    if not video_files:
+        raise HTTPException(status_code=404, detail="Original video file not found")
+    
+    video_path = video_files[0]
+    
+    # Get analysis result
+    result = analysis_results[video_id]
+    
+    # Create PDF export configuration from request
+    config = PDFExportConfig(
+        include_heatmap=request.include_heatmap,
+        heatmap_colormap=request.heatmap_colormap,
+        heatmap_alpha=request.heatmap_alpha,
+        frame_number=request.frame_number,
+        include_player_stats=request.include_player_stats,
+        include_shuttle_stats=request.include_shuttle_stats,
+        include_court_info=request.include_court_info,
+        include_speed_stats=request.include_speed_stats,
+        title=request.title
+    )
+    
+    try:
+        # Generate PDF
+        print(f"[PDF EXPORT] Generating PDF report for video {video_id} (custom config)")
+        pdf_bytes = generate_pdf_report(result, video_path, config)
+        print(f"[PDF EXPORT] PDF generated successfully ({len(pdf_bytes)} bytes)")
+        
+        # Return as file download
+        from fastapi.responses import Response
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=badminton_analysis_{video_id[:8]}.pdf"
+            }
+        )
+    except Exception as e:
+        print(f"[PDF EXPORT] Failed to generate PDF: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF report: {str(e)}")
+
+
+@app.post("/api/export/pdf/{video_id}/with-data")
+async def export_pdf_report_with_frontend_data(video_id: str, request: PDFExportWithDataRequest):
+    """
+    Generate PDF report using data provided by the frontend.
+    
+    This endpoint is designed to export exactly what the frontend is displaying,
+    which may include recalculated speeds that are more accurate than the
+    initially stored values.
+    
+    Args:
+        video_id: The video ID (used to find the video file for heatmap)
+        request: PDF export configuration with frontend data
+    
+    Returns:
+        PDF file download
+    """
+    # Find the video file (still needed for heatmap frame extraction)
+    video_files = list(UPLOAD_DIR.glob(f"{video_id}.*"))
+    if not video_files:
+        raise HTTPException(status_code=404, detail="Original video file not found")
+    
+    video_path = video_files[0]
+    
+    # Build result dictionary from frontend data
+    # This overrides stored data with what the frontend is showing
+    result = {
+        "video_id": video_id,
+        "duration": request.duration,
+        "fps": request.fps,
+        "total_frames": request.total_frames,
+        "processed_frames": request.processed_frames,
+        "video_width": request.video_width,
+        "video_height": request.video_height,
+        "players": request.players,
+        "shuttle": request.shuttle,
+        "court_detection": request.court_detection,
+        "shuttle_analytics": request.shuttle_analytics,
+        "player_zone_analytics": request.player_zone_analytics,
+        # Get skeleton_data from stored results for heatmap (frontend doesn't have this)
+        "skeleton_data": analysis_results.get(video_id, {}).get("skeleton_data", []) if video_id in analysis_results else []
+    }
+    
+    # Create PDF export configuration from request
+    config = PDFExportConfig(
+        include_heatmap=request.include_heatmap,
+        heatmap_colormap=request.heatmap_colormap,
+        heatmap_alpha=request.heatmap_alpha,
+        frame_number=request.frame_number,
+        include_player_stats=True,
+        include_shuttle_stats=True,
+        include_court_info=True,
+        include_speed_stats=True,
+        title=request.title
+    )
+    
+    try:
+        # Generate PDF using frontend data
+        print(f"[PDF EXPORT] Generating PDF report for video {video_id} (with frontend data)")
+        print(f"  - Duration: {request.duration}s")
+        print(f"  - Players: {len(request.players)}")
+        for i, p in enumerate(request.players):
+            print(f"    - Player {p.get('player_id', i+1)}: distance={p.get('total_distance', 0):.1f}m, avg_speed={p.get('avg_speed', 0):.1f}km/h")
+        
+        pdf_bytes = generate_pdf_report(result, video_path, config)
+        print(f"[PDF EXPORT] PDF generated successfully ({len(pdf_bytes)} bytes)")
+        
+        # Return as file download
+        from fastapi.responses import Response
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=badminton_analysis_{video_id[:8]}.pdf"
+            }
+        )
+    except Exception as e:
+        print(f"[PDF EXPORT] Failed to generate PDF: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF report: {str(e)}")
+
+
+@app.get("/api/export/pdf/preview/{video_id}")
+async def get_pdf_export_preview(video_id: str):
+    """
+    Get a preview of what data will be included in the PDF export.
+    
+    This is useful for the frontend to show a preview dialog before
+    triggering the actual PDF generation.
+    
+    Args:
+        video_id: The video ID to preview
+    
+    Returns:
+        Summary of data that will be included in the PDF
+    """
+    if video_id not in analysis_results:
+        raise HTTPException(status_code=404, detail="Video results not found")
+    
+    result = analysis_results[video_id]
+    
+    # Calculate summary stats
+    players = result.get("players", [])
+    total_distance = sum(p.get("total_distance", 0) for p in players)
+    avg_speed = sum(p.get("avg_speed", 0) for p in players) / max(len(players), 1)
+    max_speed = max((p.get("max_speed", 0) for p in players), default=0)
+    
+    shuttle = result.get("shuttle")
+    court_detection = result.get("court_detection")
+    shuttle_analytics = result.get("shuttle_analytics")
+    player_zone_analytics = result.get("player_zone_analytics")
+    
+    return {
+        "video_id": video_id,
+        "preview": {
+            "video_summary": {
+                "duration_seconds": result.get("duration", 0),
+                "total_frames": result.get("total_frames", 0),
+                "processed_frames": result.get("processed_frames", 0),
+                "fps": result.get("fps", 30),
+                "video_dimensions": f"{result.get('video_width', 0)}x{result.get('video_height', 0)}"
+            },
+            "players_detected": len(players),
+            "movement_summary": {
+                "total_distance_m": round(total_distance, 2),
+                "avg_speed_kmh": round(avg_speed, 1),
+                "max_speed_kmh": round(max_speed, 1)
+            },
+            "shuttle_data_available": shuttle is not None,
+            "shuttle_analytics_available": shuttle_analytics is not None,
+            "court_detected": court_detection is not None and court_detection.get("detected", False),
+            "zone_analytics_available": player_zone_analytics is not None,
+            "skeleton_frames_available": len(result.get("skeleton_data", [])) > 0
+        },
+        "export_options": {
+            "colormaps": ["turbo", "parula", "inferno", "viridis", "plasma", "hot"],
+            "recommended_colormap": "turbo",
+            "default_heatmap_alpha": 0.6
+        },
+        "status": "ready"
     }
 
 
