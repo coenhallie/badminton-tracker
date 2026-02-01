@@ -200,32 +200,49 @@ Raw Speed Measurement
 Filtered Speed Output (guaranteed 0-43 km/h)
 ```
 
-### 4.2 Constants Defined (UPDATED January 2026)
+### 4.2 Constants Defined (UPDATED February 2026)
 
 ```python
 # Maximum human running speed (m/s) - Usain Bolt peak was ~12.4 m/s
-MAX_HUMAN_SPEED_MPS = 12.5  # 45 km/h - absolute physical limit
+MAX_HUMAN_SPEED_MPS = 10.0  # 36 km/h - absolute physical limit for any human
 
 # Maximum expected badminton player speed (m/s)
-# Badminton players rarely exceed 8-9 m/s even in explosive movements
-MAX_BADMINTON_SPEED_MPS = 10.0  # 36 km/h - realistic for badminton
+# UNIFIED across ALL modules: 7.0 m/s = 25 km/h
+# Rationale: Badminton players rarely exceed 25 km/h even in explosive movements
+# Consistent between speed_analytics.py, modal_convex_processor.py, main.py
+MAX_BADMINTON_SPEED_MPS = 7.0  # 25 km/h - realistic max for badminton
 
 # Typical maximum sustained speed during active play
-TYPICAL_MAX_BADMINTON_SPEED_MPS = 8.0  # 29 km/h - normal "sprinting" on court
+TYPICAL_MAX_BADMINTON_SPEED_MPS = 6.0  # 22 km/h - above this is suspicious
+
+# Suspicious speed threshold - speeds above this are likely tracking errors
+SUSPICIOUS_SPEED_MPS = 6.0  # 22 km/h - flag as potential outlier
 
 # Maximum position jump per frame (meters)
-# At 30fps, 10 m/s max = 0.33m/frame realistic max
-MAX_POSITION_JUMP_M = 0.5  # 0.5 meter per frame is a tracking error
+# At 30fps, 7 m/s max = 0.23m/frame realistic max
+# Reduced from 0.5 to 0.25 for better accuracy
+MAX_POSITION_JUMP_M = 0.25  # 0.25 meter per frame is likely a tracking error
+
+# Maximum pixel jump per frame
+# REDUCED from 150px to 80px to catch judge misassignments
+MAX_PX_PER_FRAME = 80  # Catches tracking ID swaps to judges
 
 # Minimum time interval for speed calculation (seconds)
 MIN_TIME_INTERVAL = 0.001  # Avoids division by very small numbers
 
 # Median filter window size (odd number)
 MEDIAN_FILTER_WINDOW = 5  # Use median of last 5 speed readings
+
+# Court polygon margin factor (for ROI filtering)
+MARGIN_FACTOR = 1.05  # 5% margin (reduced from 10% to filter nearby judges)
 ```
 
-**Key Change**: Reduced MAX_BADMINTON_SPEED_MPS from 12.0 (43 km/h) to 10.0 (36 km/h).
-This prevents the system from allowing Usain Bolt-level speeds for badminton players.
+**Key Changes (February 2026)**:
+1. Reduced MAX_BADMINTON_SPEED_MPS from 8.3 (30 km/h) to 7.0 (25 km/h) - unified across all modules
+2. Reduced SUSPICIOUS_SPEED_MPS from 7.0 to 6.0 for earlier outlier detection
+3. Reduced MAX_PX_PER_FRAME from 150 to 80 to catch judge misassignments
+4. Reduced MARGIN_FACTOR from 1.10 to 1.05 to filter out nearby judges/officials
+5. Frontend SpeedGraph.vue MAX_VALID_SPEED_KMH reduced from 50 to 25 for consistency
 
 ---
 

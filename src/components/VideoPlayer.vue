@@ -1336,7 +1336,8 @@ function drawSkeleton(
       ctx.strokeStyle = '#000000'
       ctx.lineWidth = 3
 
-      const label = `P${player.player_id}: ${player.current_speed?.toFixed(1) ?? 0} km/h`
+      // player_id is 0-indexed, display as 1-indexed (Player 1, Player 2)
+      const label = `P${player.player_id + 1}: ${player.current_speed?.toFixed(1) ?? 0} km/h`
       const x = player.center.x * scaleX
       const y = player.center.y * scaleY - 30
 

@@ -4,23 +4,30 @@ import VideoUpload from '@/components/VideoUpload.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import ResultsDashboard from '@/components/ResultsDashboard.vue'
 import AnalysisProgress from '@/components/AnalysisProgress.vue'
+import CourtSetup from '@/components/CourtSetup.vue'
 import MiniCourt from '@/components/MiniCourt.vue'
 import SpeedGraph from '@/components/SpeedGraph.vue'
 import {
-  checkApiHealth, getOriginalVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
+  checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
   getHeatmap, preloadHeatmap, triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
-  clearZoneAnalyticsCache, getRecalculatedZoneAnalytics
+  clearZoneAnalyticsCache, getRecalculatedZoneAnalytics, setCurrentVideoId
 } from '@/services/api'
+import type { HealthCheckResponse } from '@/services/api'
 import type { UploadResponse, AnalysisResult, SkeletonFrame } from '@/types/analysis'
 import type { HeatmapData, SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
 
-type AppState = 'upload' | 'analyzing' | 'results'
+// App states: upload -> court-setup (new!) -> analyzing -> results
+type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
 
 const currentState = ref<AppState>('upload')
 const uploadedVideo = ref<UploadResponse | null>(null)
 const analysisResult = ref<AnalysisResult | null>(null)
 const errorMessage = ref('')
 const isApiConnected = ref(false)
+const healthDetails = ref<HealthCheckResponse | null>(null)
+const showHealthModal = ref(false)
+const isCheckingHealth = ref(false)
+let healthCheckInterval: ReturnType<typeof setInterval> | null = null
 
 // Overlay visibility toggles
 const showSkeleton = ref(true)
@@ -265,8 +272,13 @@ async function triggerDelayedSpeedCalculation() {
     if (analysisResult.value?.skeleton_data && timelineResponse.players) {
       console.log('[App] Updating skeleton_data with calculated speeds...')
       
+      // Maximum realistic speed threshold (km/h) - filter out tracking errors
+      // Speeds above 50 km/h are physically impossible for badminton players
+      const MAX_VALID_SPEED_KMH = 50
+      
       // Build a frame-to-speed lookup for each player
       const playerSpeedsByFrame: Record<number, Record<number, number>> = {}
+      let filteredOutCount = 0
       
       for (const [playerId, playerTimeline] of Object.entries(timelineResponse.players)) {
         const pid = parseInt(playerId)
@@ -274,8 +286,19 @@ async function triggerDelayedSpeedCalculation() {
           if (!playerSpeedsByFrame[frameNum]) {
             playerSpeedsByFrame[frameNum] = {}
           }
-          playerSpeedsByFrame[frameNum][pid] = playerTimeline.speeds_kmh[idx] ?? 0
+          // Filter out unrealistic speeds (tracking errors, ID swaps)
+          const rawSpeed = playerTimeline.speeds_kmh[idx] ?? 0
+          if (rawSpeed > MAX_VALID_SPEED_KMH) {
+            filteredOutCount++
+            playerSpeedsByFrame[frameNum][pid] = 0 // Treat as stationary
+          } else {
+            playerSpeedsByFrame[frameNum][pid] = rawSpeed
+          }
         })
+      }
+      
+      if (filteredOutCount > 0) {
+        console.log(`[App] Filtered out ${filteredOutCount} unrealistic speed values (>${MAX_VALID_SPEED_KMH} km/h)`)
       }
       
       // Debug: Check frame lookup coverage
@@ -326,14 +349,30 @@ async function triggerDelayedSpeedCalculation() {
       
       const statistics = speedResponse.speed_data.statistics
       
+      // Maximum realistic speed threshold for statistics (km/h)
+      // Cap unrealistic values to a reasonable maximum
+      const MAX_VALID_SPEED_KMH = 50
+      const REALISTIC_MAX_SPEED_KMH = 30  // Cap displayed max to realistic value
+      
       for (const player of analysisResult.value.players) {
         // Statistics are keyed by player_id as string
         const playerStats = statistics[String(player.player_id)]
         if (playerStats) {
           // Update player metrics with calculated speeds (in km/h)
           // Backend returns nested structure: { avg: { speed_kmh }, max: { speed_kmh }, total_distance_m }
-          player.avg_speed = playerStats.avg?.speed_kmh ?? 0
-          player.max_speed = playerStats.max?.speed_kmh ?? 0
+          const rawAvgSpeed = playerStats.avg?.speed_kmh ?? 0
+          const rawMaxSpeed = playerStats.max?.speed_kmh ?? 0
+          
+          // Filter out unrealistic values - if avg or max exceeds threshold,
+          // the data is corrupted by tracking errors
+          if (rawAvgSpeed > MAX_VALID_SPEED_KMH || rawMaxSpeed > MAX_VALID_SPEED_KMH) {
+            console.warn(`[App]   Player ${player.player_id}: Unrealistic speed detected (avg=${rawAvgSpeed.toFixed(1)}, max=${rawMaxSpeed.toFixed(1)}), capping to realistic values`)
+            player.avg_speed = Math.min(rawAvgSpeed, REALISTIC_MAX_SPEED_KMH)
+            player.max_speed = Math.min(rawMaxSpeed, REALISTIC_MAX_SPEED_KMH)
+          } else {
+            player.avg_speed = rawAvgSpeed
+            player.max_speed = rawMaxSpeed
+          }
           player.total_distance = playerStats.total_distance_m ?? 0
           
           console.log(`[App]   Player ${player.player_id}: avg=${player.avg_speed.toFixed(1)} km/h, max=${player.max_speed.toFixed(1)} km/h, dist=${player.total_distance.toFixed(1)}m`)
@@ -357,14 +396,23 @@ async function triggerDelayedSpeedCalculation() {
 
 // Use original video URL for playback (browser-compatible)
 // Skeleton overlay is rendered client-side via canvas
-const videoUrl = computed(() => {
-  if (!analysisResult.value) return ''
-  return getOriginalVideoUrl(analysisResult.value.video_id)
-})
+const videoUrl = ref('')
+
+// Fetch video URL asynchronously (for Convex storage support)
+async function loadVideoUrl(videoId: string) {
+  try {
+    videoUrl.value = await fetchVideoUrl(videoId)
+  } catch (error) {
+    console.error('Failed to fetch video URL:', error)
+    // Fallback to local URL format
+    videoUrl.value = getOriginalVideoUrl(videoId)
+  }
+}
 
 function handleUploadComplete(response: UploadResponse) {
   uploadedVideo.value = response
-  currentState.value = 'analyzing'
+  // Go to court setup first (for ROI filtering) instead of directly to analyzing
+  currentState.value = 'court-setup'
   errorMessage.value = ''
 }
 
@@ -372,9 +420,51 @@ function handleUploadError(message: string) {
   errorMessage.value = message
 }
 
-function handleAnalysisComplete(result: AnalysisResult) {
+// Court setup handlers - receives 12-point keypoints from CourtSetup
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function handleCourtSetupComplete(keypoints: any) {
+  console.log('[App] 12-point court keypoints saved:', keypoints)
+  // Store the keypoints mapped to the format used by mini court
+  // The CourtSetup uses Convex field names, map to our internal format
+  manualCourtKeypoints.value = {
+    top_left: keypoints.top_left || [0, 0],
+    top_right: keypoints.top_right || [0, 0],
+    bottom_right: keypoints.bottom_right || [0, 0],
+    bottom_left: keypoints.bottom_left || [0, 0],
+    net_left: keypoints.net_left || [0, 0],
+    net_right: keypoints.net_right || [0, 0],
+    service_near_left: keypoints.service_line_near_left || [0, 0],
+    service_near_right: keypoints.service_line_near_right || [0, 0],
+    service_far_left: keypoints.service_line_far_left || [0, 0],
+    service_far_right: keypoints.service_line_far_right || [0, 0],
+    center_near: keypoints.center_near || [0, 0],
+    center_far: keypoints.center_far || [0, 0]
+  }
+  // Now proceed to analysis
+  currentState.value = 'analyzing'
+}
+
+function handleCourtSetupSkip() {
+  console.log('[App] Court setup skipped - using fallback filtering')
+  // Proceed to analysis without keypoints (Modal will use rectangular fallback filter)
+  currentState.value = 'analyzing'
+}
+
+function handleCourtSetupError(message: string) {
+  console.error('[App] Court setup error:', message)
+  errorMessage.value = message
+  // Allow retry or skip
+}
+
+async function handleAnalysisComplete(result: AnalysisResult) {
   analysisResult.value = result
   currentState.value = 'results'
+  
+  // Set the current video ID for keypoints operations
+  setCurrentVideoId(result.video_id)
+  
+  // Fetch the video URL asynchronously (supports Convex storage)
+  await loadVideoUrl(result.video_id)
   
   // Preload heatmap data in background for instant toggle
   preloadHeatmapData(result.video_id)
@@ -405,6 +495,9 @@ function startNewAnalysis() {
   speedCalculationTriggered.value = false
   isSpeedCalculating.value = false
   calculatedSpeedData.value = null
+  
+  // Clear video context for keypoints operations
+  setCurrentVideoId(null)
   
   // Clear speed cache for clean start
   if (previousVideoId) {
@@ -546,13 +639,44 @@ function setupResizeObserver() {
   }
 }
 
+// Function to perform health check
+async function performHealthCheck() {
+  isCheckingHealth.value = true
+  try {
+    const details = await getApiHealthDetails()
+    healthDetails.value = details
+    isApiConnected.value = details !== null && details.status === 'healthy'
+  } catch {
+    isApiConnected.value = false
+    healthDetails.value = null
+  } finally {
+    isCheckingHealth.value = false
+  }
+}
+
+// Function to manually refresh health check
+async function refreshHealthStatus() {
+  await performHealthCheck()
+}
+
 onMounted(async () => {
-  isApiConnected.value = await checkApiHealth()
+  // Initial health check
+  await performHealthCheck()
+  
+  // Setup periodic health checks every 10 seconds
+  healthCheckInterval = setInterval(performHealthCheck, 10000)
+  
   // Setup resize observer after mount
   setupResizeObserver()
 })
 
 onUnmounted(() => {
+  // Cleanup health check interval
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval)
+    healthCheckInterval = null
+  }
+  
   // Cleanup resize observer
   if (resizeObserver) {
     resizeObserver.disconnect()
@@ -574,15 +698,20 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.0
+            alpha v1.1
           </button>
         </div>
 
         <nav class="nav">
-          <span class="api-status" :class="{ connected: isApiConnected }">
-            <span class="status-dot" />
+          <button
+            class="api-status"
+            :class="{ connected: isApiConnected, checking: isCheckingHealth }"
+            @click="showHealthModal = true"
+            :title="isApiConnected ? 'Click for details' : 'Click to see backend status'"
+          >
+            <span class="status-dot" :class="{ pulse: isCheckingHealth }" />
             {{ isApiConnected ? 'API Connected' : 'API Disconnected' }}
-          </span>
+          </button>
         </nav>
       </div>
     </header>
@@ -603,7 +732,20 @@ watch(videoSectionRef, () => {
           <div class="changelog-content">
             <div class="changelog-entry">
               <div class="changelog-version">
-                <span class="version-tag">v1.0.0-alpha</span>
+                <span class="version-tag">v1.1-alpha</span>
+                <span class="version-date">February 1, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - Added Convex backend for video storage</li>
+                <li> - Removed all local backend processing files</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.0-alpha</span>
                 <span class="version-date">January 31, 2026</span>
               </div>
               <h3>🎉 Initial Alpha Launch</h3>
@@ -621,6 +763,188 @@ watch(videoSectionRef, () => {
               <p class="changelog-note">
                 <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
               </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- Health Status Modal -->
+    <Transition name="fade">
+      <div v-if="showHealthModal" class="modal-overlay" @click.self="showHealthModal = false">
+        <div class="health-modal">
+          <div class="health-header">
+            <h2>🔌 Backend Status</h2>
+            <button class="modal-close-btn" @click="showHealthModal = false">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <div class="health-content">
+            <!-- Connection Status -->
+            <div class="health-status-banner" :class="{ connected: isApiConnected, disconnected: !isApiConnected }">
+              <span class="status-icon">{{ isApiConnected ? '✅' : '❌' }}</span>
+              <span class="status-text">{{ isApiConnected ? 'Backend is Online' : 'Backend is Offline' }}</span>
+            </div>
+
+            <!-- API URL Info -->
+            <div class="health-section">
+              <h3>📡 Connection</h3>
+              <div class="health-info-row">
+                <span class="label">API URL:</span>
+                <code class="value">{{ getApiBaseUrl() }}</code>
+              </div>
+              <div class="health-info-row">
+                <span class="label">Last Check:</span>
+                <span class="value">{{ healthDetails?.timestamp ? new Date(healthDetails.timestamp * 1000).toLocaleTimeString() : 'Never' }}</span>
+              </div>
+            </div>
+
+            <!-- If connected, show detailed info -->
+            <template v-if="isApiConnected && healthDetails">
+              <!-- Backend Type Badge -->
+              <div class="backend-badge" :class="healthDetails.backend || 'local'">
+                {{ healthDetails.backend === 'convex' ? '☁️ Convex Cloud' : '💻 Local Backend' }}
+              </div>
+
+              <!-- Components Status -->
+              <div class="health-section">
+                <h3>🧩 Components</h3>
+                <div class="components-grid">
+                  <!-- Convex-specific components -->
+                  <template v-if="healthDetails.backend === 'convex'">
+                    <div class="component-item" :class="{ active: healthDetails.components.convex === 'connected' }">
+                      <span class="component-icon">☁️</span>
+                      <span class="component-name">Convex</span>
+                      <span class="component-status">{{ healthDetails.components.convex || 'unknown' }}</span>
+                    </div>
+                    <div class="component-item" :class="{ active: healthDetails.components.database === 'connected' }">
+                      <span class="component-icon">🗃️</span>
+                      <span class="component-name">Database</span>
+                      <span class="component-status">{{ healthDetails.components.database || 'unknown' }}</span>
+                    </div>
+                    <div class="component-item" :class="{ active: healthDetails.components.modal_inference === 'configured' }">
+                      <span class="component-icon">⚡</span>
+                      <span class="component-name">Modal GPU</span>
+                      <span class="component-status">{{ healthDetails.components.modal_inference || 'unknown' }}</span>
+                    </div>
+                  </template>
+                  <!-- Local backend components -->
+                  <template v-else>
+                    <div class="component-item" :class="{ active: healthDetails.components.pose_model === 'loaded' }">
+                      <span class="component-icon">🦴</span>
+                      <span class="component-name">Pose Model</span>
+                      <span class="component-status">{{ healthDetails.components.pose_model || 'unknown' }}</span>
+                    </div>
+                    <div class="component-item" :class="{ active: healthDetails.components.court_detector === 'loaded' }">
+                      <span class="component-icon">🏸</span>
+                      <span class="component-name">Court Detector</span>
+                      <span class="component-status">{{ healthDetails.components.court_detector || 'unknown' }}</span>
+                    </div>
+                    <div class="component-item" :class="{ active: healthDetails.components.multi_model_detector === 'loaded' }">
+                      <span class="component-icon">🎯</span>
+                      <span class="component-name">Multi-Model Detector</span>
+                      <span class="component-status">{{ healthDetails.components.multi_model_detector || 'unknown' }}</span>
+                    </div>
+                    <div class="component-item" :class="{ active: healthDetails.components.modal_inference === 'enabled' }">
+                      <span class="component-icon">☁️</span>
+                      <span class="component-name">Modal GPU</span>
+                      <span class="component-status">{{ healthDetails.components.modal_inference || 'unknown' }}</span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+              <!-- System Resources (local backend only) -->
+              <div v-if="healthDetails.system" class="health-section">
+                <h3>💻 System Resources</h3>
+                <div class="resource-bars">
+                  <div class="resource-item">
+                    <span class="resource-label">CPU</span>
+                    <div class="resource-bar">
+                      <div class="resource-fill" :style="{ width: healthDetails.system.cpu_percent + '%' }" :class="{ warning: healthDetails.system.cpu_percent > 80 }"></div>
+                    </div>
+                    <span class="resource-value">{{ healthDetails.system.cpu_percent.toFixed(1) }}%</span>
+                  </div>
+                  <div class="resource-item">
+                    <span class="resource-label">Memory</span>
+                    <div class="resource-bar">
+                      <div class="resource-fill" :style="{ width: healthDetails.system.memory_percent + '%' }" :class="{ warning: healthDetails.system.memory_percent > 80 }"></div>
+                    </div>
+                    <span class="resource-value">{{ healthDetails.system.memory_percent.toFixed(1) }}%</span>
+                  </div>
+                </div>
+                <div class="health-info-row">
+                  <span class="label">Available Memory:</span>
+                  <span class="value">{{ healthDetails.system.memory_available_gb }} GB</span>
+                </div>
+              </div>
+
+              <!-- Video Stats (Convex only) -->
+              <div v-if="healthDetails.stats" class="health-section">
+                <h3>📊 Video Stats</h3>
+                <div class="health-info-row">
+                  <span class="label">Total Videos:</span>
+                  <span class="value">{{ healthDetails.stats.total_videos }}</span>
+                </div>
+                <div class="health-info-row">
+                  <span class="label">Currently Processing:</span>
+                  <span class="value">{{ healthDetails.stats.processing }}</span>
+                </div>
+              </div>
+
+              <!-- Active Analyses (local backend) -->
+              <div v-if="healthDetails.active_analyses !== undefined" class="health-section">
+                <h3>📊 Activity</h3>
+                <div class="health-info-row">
+                  <span class="label">Active Analyses:</span>
+                  <span class="value">{{ healthDetails.active_analyses }}</span>
+                </div>
+              </div>
+            </template>
+
+            <!-- If disconnected, show troubleshooting -->
+            <template v-else>
+              <div class="health-section">
+                <h3>🔧 Troubleshooting</h3>
+                <div class="troubleshoot-tips">
+                  <template v-if="isUsingConvex()">
+                    <p>The Convex backend is not responding. Try these steps:</p>
+                    <ol>
+                      <li>Check your internet connection</li>
+                      <li>Verify <code>VITE_CONVEX_URL</code> is set correctly in <code>.env</code></li>
+                      <li>Make sure Convex is deployed:
+                        <code>npx convex deploy</code>
+                      </li>
+                      <li>Check the Convex dashboard for any errors</li>
+                    </ol>
+                  </template>
+                  <template v-else>
+                    <p>The backend server is not responding. Try these steps:</p>
+                    <ol>
+                      <li>Make sure the backend is running:
+                        <code>cd backend && python main.py</code>
+                      </li>
+                      <li>Check if the API URL is correct in your <code>.env</code> file:
+                        <code>VITE_API_URL=http://localhost:8000</code>
+                      </li>
+                      <li>Verify no firewall is blocking the connection</li>
+                      <li>Check the backend terminal for any error messages</li>
+                    </ol>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <!-- Refresh Button -->
+            <div class="health-actions">
+              <button class="refresh-btn" @click="refreshHealthStatus" :disabled="isCheckingHealth">
+                <span v-if="isCheckingHealth" class="spinner"></span>
+                <span v-else>🔄</span>
+                {{ isCheckingHealth ? 'Checking...' : 'Refresh Status' }}
+              </button>
             </div>
           </div>
         </div>
@@ -701,6 +1025,17 @@ watch(videoSectionRef, () => {
               <p>Get detailed statistics on distance covered and rally patterns</p>
             </div>
           </div>
+        </div>
+
+        <!-- Court Setup State (NEW: Before analyzing) -->
+        <div v-else-if="currentState === 'court-setup' && uploadedVideo" key="court-setup" class="content-section">
+          <CourtSetup
+            :video-id="uploadedVideo.video_id"
+            :filename="uploadedVideo.filename"
+            @complete="handleCourtSetupComplete"
+            @skip="handleCourtSetupSkip"
+            @error="handleCourtSetupError"
+          />
         </div>
 
         <!-- Analyzing State -->
@@ -899,8 +1234,8 @@ watch(videoSectionRef, () => {
                 <div v-if="showMiniCourt || isKeypointSelectionActive" class="minicourt-section">
                   <MiniCourt
                     :court-corners="courtCornersForMiniCourt"
-                    :players="currentPlayers"
-                    :shuttle-position="currentShuttlePosition"
+                    :players="videoPlaybackStarted ? currentPlayers : []"
+                    :shuttle-position="videoPlaybackStarted ? currentShuttlePosition : null"
                     :width="240"
                     :height="videoContainerHeight"
                     :show-grid="true"
@@ -1068,6 +1403,13 @@ a:hover {
   border-radius: 0;
   font-size: 0.75rem;
   color: #ef4444;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.api-status:hover {
+  background: #252525;
+  border-color: #444;
 }
 
 .api-status.connected {
@@ -1076,11 +1418,319 @@ a:hover {
   color: #22c55e;
 }
 
+.api-status.connected:hover {
+  border-color: #4ade80;
+}
+
+.api-status.checking {
+  opacity: 0.8;
+}
+
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: currentColor;
+  transition: all 0.3s ease;
+}
+
+.status-dot.pulse {
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+/* Health Modal Styles */
+.health-modal {
+  background: #0a0a0a;
+  border: 1px solid #333;
+  border-radius: 0;
+  width: 90%;
+  max-width: 500px;
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.health-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px;
+  border-bottom: 1px solid #222;
+}
+
+.health-header h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.health-content {
+  padding: 20px 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.health-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 0;
+  font-weight: 500;
+}
+
+.health-status-banner.connected {
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid #22c55e;
+  color: #22c55e;
+}
+
+.health-status-banner.disconnected {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid #ef4444;
+  color: #ef4444;
+}
+
+.backend-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 0;
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+
+.backend-badge.convex {
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid #6366f1;
+  color: #818cf8;
+}
+
+.backend-badge.local {
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid #22c55e;
+  color: #22c55e;
+}
+
+.status-icon {
+  font-size: 1.5rem;
+}
+
+.status-text {
+  font-size: 1rem;
+}
+
+.health-section {
+  border: 1px solid #222;
+  border-radius: 0;
+  padding: 16px;
+}
+
+.health-section h3 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 0 0 12px 0;
+  color: #888;
+}
+
+.health-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.health-info-row:last-child {
+  border-bottom: none;
+}
+
+.health-info-row .label {
+  color: #888;
+  font-size: 0.875rem;
+}
+
+.health-info-row .value {
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.health-info-row code {
+  background: #1a1a1a;
+  padding: 4px 8px;
+  border-radius: 0;
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.components-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.component-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 8px;
+  background: #111;
+  border: 1px solid #222;
+  border-radius: 0;
+  text-align: center;
+}
+
+.component-item.active {
+  border-color: #22c55e;
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.component-icon {
+  font-size: 1.25rem;
+}
+
+.component-name {
+  font-size: 0.75rem;
+  color: #888;
+}
+
+.component-status {
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.component-item.active .component-status {
+  color: #22c55e;
+}
+
+.resource-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.resource-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.resource-label {
+  width: 60px;
+  font-size: 0.75rem;
+  color: #888;
+}
+
+.resource-bar {
+  flex: 1;
+  height: 8px;
+  background: #1a1a1a;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.resource-fill {
+  height: 100%;
+  background: #22c55e;
+  transition: width 0.3s ease;
+}
+
+.resource-fill.warning {
+  background: #f59e0b;
+}
+
+.resource-value {
+  width: 50px;
+  text-align: right;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.troubleshoot-tips {
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.troubleshoot-tips p {
+  margin: 0 0 12px 0;
+  color: #888;
+}
+
+.troubleshoot-tips ol {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.troubleshoot-tips li {
+  margin-bottom: 12px;
+}
+
+.troubleshoot-tips code {
+  display: block;
+  margin-top: 8px;
+  background: #1a1a1a;
+  padding: 8px 12px;
+  border-radius: 0;
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.health-actions {
+  display: flex;
+  justify-content: center;
+  padding-top: 8px;
+}
+
+.refresh-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0;
+  color: #fff;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  background: #252525;
+  border-color: #444;
+}
+
+.refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #333;
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .nav-link {

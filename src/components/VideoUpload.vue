@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { uploadVideo } from '@/services/api'
+import { useConvexClient } from 'convex-vue'
+import { api } from '../../convex/_generated/api'
 import type { UploadResponse } from '@/types/analysis'
+
+const client = useConvexClient()
 
 const emit = defineEmits<{
   uploaded: [response: UploadResponse]
@@ -58,10 +61,10 @@ function validateAndSetFile(file: File) {
     return
   }
 
-  // Max file size: 500MB
-  const maxSize = 500 * 1024 * 1024
+  // Max file size: 1GB (Convex limit)
+  const maxSize = 1024 * 1024 * 1024
   if (file.size > maxSize) {
-    emit('error', 'File is too large. Maximum size is 500MB.')
+    emit('error', 'File is too large. Maximum size is 1GB.')
     return
   }
 
@@ -80,19 +83,46 @@ async function startUpload() {
   uploadProgress.value = 0
 
   try {
-    // Simulate progress for UX (actual progress would require XHR)
+    // Simulate progress for UX
     const progressInterval = setInterval(() => {
       if (uploadProgress.value < 90) {
         uploadProgress.value += Math.random() * 10
       }
     }, 200)
 
-    const response = await uploadVideo(selectedFile.value)
+    // Step 1: Generate upload URL from Convex
+    const uploadUrl = await client.mutation(api.videos.generateUploadUrl, {})
+    
+    // Step 2: Upload file directly to Convex storage
+    const uploadResponse = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': selectedFile.value.type },
+      body: selectedFile.value,
+    })
+    
+    if (!uploadResponse.ok) {
+      throw new Error('Failed to upload file to storage')
+    }
+    
+    const { storageId } = await uploadResponse.json()
+    
+    // Step 3: Create video record in Convex database
+    const videoId = await client.mutation(api.videos.createVideo, {
+      storageId,
+      filename: selectedFile.value.name,
+      size: selectedFile.value.size,
+    })
 
     clearInterval(progressInterval)
     uploadProgress.value = 100
 
-    emit('uploaded', response)
+    // Emit response in the same format as before for compatibility
+    emit('uploaded', {
+      video_id: videoId,
+      filename: selectedFile.value.name,
+      size: selectedFile.value.size,
+      status: 'uploaded'
+    })
   } catch (error) {
     emit('error', error instanceof Error ? error.message : 'Upload failed')
   } finally {

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
-import { analyzeVideo, AnalysisProgressSocket } from '@/services/api'
-import type { AnalysisResult, ProgressUpdate, AnalysisConfig, ProcessingLog, LogLevel, LogCategory } from '@/types/analysis'
+import { ref, onMounted, computed, nextTick, watch } from 'vue'
+import { useConvexQuery, useConvexClient } from 'convex-vue'
+import { api } from '../../convex/_generated/api'
+import type { AnalysisResult, ProcessingLog, LogLevel, LogCategory } from '@/types/analysis'
+import type { Id } from '../../convex/_generated/dataModel'
 
 const props = defineProps<{
   videoId: string
@@ -14,28 +16,59 @@ const emit = defineEmits<{
   cancel: []
 }>()
 
-const progress = ref(0)
-const currentFrame = ref(0)
-const totalFrames = ref(0)
-const status = ref<'connecting' | 'analyzing' | 'processing' | 'complete' | 'error'>('connecting')
-const errorMessage = ref('')
+const client = useConvexClient()
+
+// Convert string videoId to Convex Id type
+const convexVideoId = computed(() => props.videoId as Id<'videos'>)
+
+// Real-time video query - automatically updates when database changes
+const { data: videoData } = useConvexQuery(
+  api.videos.getVideo,
+  computed(() => ({ videoId: convexVideoId.value }))
+)
+
+// Real-time logs query
+const { data: logsData } = useConvexQuery(
+  api.videos.getProcessingLogs,
+  computed(() => ({ videoId: convexVideoId.value }))
+)
+
+// Local state
 const startTime = ref<number>(0)
 const eta = ref<string>('')
-
-// Processing logs
-const processingLogs = ref<ProcessingLog[]>([])
-const logIdCounter = ref(0)
 const logsContainerRef = ref<HTMLElement | null>(null)
 const showLogs = ref(true)
+const analysisStarted = ref(false)
 
-let socket: AnalysisProgressSocket | null = null
+// Computed values from Convex data
+const progress = computed(() => videoData.value?.progress ?? 0)
+const currentFrame = computed(() => videoData.value?.currentFrame ?? 0)
+const totalFrames = computed(() => videoData.value?.totalFrames ?? 0)
+const videoStatus = computed(() => videoData.value?.status ?? 'uploaded')
+const errorMessage = computed(() => videoData.value?.error ?? '')
+
+// Map Convex status to component status
+const status = computed(() => {
+  switch (videoStatus.value) {
+    case 'uploaded':
+      return 'connecting'
+    case 'processing':
+      return 'analyzing'
+    case 'completed':
+      return 'complete'
+    case 'failed':
+      return 'error'
+    default:
+      return 'processing'
+  }
+})
 
 const progressPercent = computed(() => Math.min(100, Math.round(progress.value)))
 
 const statusMessage = computed(() => {
   switch (status.value) {
     case 'connecting':
-      return 'Connecting to analysis server...'
+      return 'Starting analysis...'
     case 'analyzing':
       return 'Analyzing video frames...'
     case 'processing':
@@ -47,6 +80,85 @@ const statusMessage = computed(() => {
     default:
       return 'Initializing...'
   }
+})
+
+// Convert Convex logs to ProcessingLog format
+const processingLogs = computed<ProcessingLog[]>(() => {
+  if (!logsData.value) return []
+  return logsData.value.map((log, index) => ({
+    id: index,
+    message: log.message,
+    level: log.level as LogLevel,
+    category: log.category as LogCategory,
+    timestamp: log.timestamp / 1000, // Convert to seconds
+  }))
+})
+
+// Watch for completion or error
+watch(videoStatus, async (newStatus) => {
+  if (newStatus === 'completed' && videoData.value) {
+    // Fetch results from storage URL
+    const resultsUrl = videoData.value.resultsUrl
+    if (resultsUrl) {
+      try {
+        const response = await fetch(resultsUrl)
+        const results = await response.json() as Record<string, unknown>
+        
+        const analysisResult: AnalysisResult = {
+          video_id: props.videoId,
+          duration: (results.duration as number) ?? 0,
+          fps: (results.fps as number) ?? 0,
+          total_frames: (results.total_frames as number) ?? 0,
+          processed_frames: (results.processed_frames as number) ?? 0,
+          players: (results.players as AnalysisResult['players']) ?? [],
+          shuttle: (results.shuttle as AnalysisResult['shuttle']) ?? null,
+          skeleton_data: (results.skeleton_data as AnalysisResult['skeleton_data']) ?? [],
+          court_detection: (results.court_detection as AnalysisResult['court_detection']) ?? null,
+          shuttle_analytics: (results.shuttle_analytics as AnalysisResult['shuttle_analytics']) ?? null,
+          player_zone_analytics: (results.player_zone_analytics as AnalysisResult['player_zone_analytics']) ?? null,
+        }
+        emit('complete', analysisResult)
+      } catch (err) {
+        console.error('Failed to fetch results:', err)
+        emit('error', 'Failed to load analysis results')
+      }
+    } else {
+      // Fallback: use metadata if no results URL (shouldn't happen normally)
+      const meta = videoData.value.resultsMeta
+      if (meta) {
+        const analysisResult: AnalysisResult = {
+          video_id: props.videoId,
+          duration: meta.duration ?? 0,
+          fps: meta.fps ?? 0,
+          total_frames: meta.total_frames ?? 0,
+          processed_frames: meta.processed_frames ?? 0,
+          players: [],
+          shuttle: null,
+          skeleton_data: [],
+          court_detection: null,
+          shuttle_analytics: null,
+          player_zone_analytics: null,
+        }
+        emit('complete', analysisResult)
+      }
+    }
+  } else if (newStatus === 'failed') {
+    emit('error', errorMessage.value || 'Analysis failed')
+  }
+})
+
+// Watch for progress changes to update ETA
+watch(progress, () => {
+  calculateETA()
+})
+
+// Auto-scroll logs
+watch(processingLogs, () => {
+  nextTick(() => {
+    if (logsContainerRef.value) {
+      logsContainerRef.value.scrollTop = logsContainerRef.value.scrollHeight
+    }
+  })
 })
 
 // Get icon for log level
@@ -79,30 +191,6 @@ function formatTimestamp(timestamp: number): string {
   return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-// Add a log entry
-function addLog(message: string, level: LogLevel = 'info', category: LogCategory = 'processing', timestamp?: number) {
-  const log: ProcessingLog = {
-    id: ++logIdCounter.value,
-    message,
-    level,
-    category,
-    timestamp: timestamp || Date.now() / 1000
-  }
-  processingLogs.value.push(log)
-  
-  // Auto-scroll to bottom
-  nextTick(() => {
-    if (logsContainerRef.value) {
-      logsContainerRef.value.scrollTop = logsContainerRef.value.scrollHeight
-    }
-  })
-  
-  // Keep max 50 logs to prevent memory issues
-  if (processingLogs.value.length > 50) {
-    processingLogs.value.shift()
-  }
-}
-
 function calculateETA() {
   if (progress.value === 0 || !startTime.value) {
     eta.value = 'Calculating...'
@@ -120,92 +208,28 @@ function calculateETA() {
   }
 }
 
-function handleProgress(update: ProgressUpdate) {
-  if (update.type === 'progress' && update.progress !== undefined) {
-    progress.value = update.progress
-    currentFrame.value = update.frame || 0
-    totalFrames.value = update.total_frames || 0
-    status.value = 'analyzing'
-    calculateETA()
-  } else if (update.type === 'log' && update.message) {
-    // Handle log messages from backend
-    addLog(
-      update.message,
-      update.level || 'info',
-      update.category || 'processing',
-      update.timestamp
-    )
-  }
-}
-
-function handleError(error: Error) {
-  status.value = 'error'
-  errorMessage.value = error.message
-  emit('error', error.message)
-}
-
-function handleComplete() {
-  status.value = 'complete'
-}
-
 async function startAnalysis() {
+  if (analysisStarted.value) return
+  analysisStarted.value = true
   startTime.value = Date.now()
 
-  // Connect WebSocket for progress updates
-  socket = new AnalysisProgressSocket(
-    props.videoId,
-    handleProgress,
-    handleError,
-    handleComplete
-  )
-
-  socket.connect()
-
-  // Start the analysis
   try {
-    status.value = 'processing'
-
-    const config: Partial<AnalysisConfig> = {
-      fps_sample_rate: 1,
-      confidence_threshold: 0.5,
-      track_shuttle: true,
-      calculate_speeds: true
-      // Note: Court detection model selection removed - using manual keypoints only
-    }
-    
-    // Log that manual keypoints should be used for court calibration
-    addLog('Court calibration: Use manual keypoints for accurate measurements', 'info', 'court')
-
-    const response = await analyzeVideo(props.videoId, config)
-
-    if (response.status === 'completed' && response.result) {
-      status.value = 'complete'
-      progress.value = 100
-      emit('complete', response.result)
-    }
+    // Trigger Modal processing via Convex action
+    await client.action(api.videos.processVideo, {
+      videoId: convexVideoId.value,
+    })
   } catch (error) {
-    status.value = 'error'
-    errorMessage.value = error instanceof Error ? error.message : 'Analysis failed'
-    emit('error', errorMessage.value)
+    // Error handling is done via the real-time status updates
+    console.error('Failed to start analysis:', error)
   }
 }
 
 function cancelAnalysis() {
-  if (socket) {
-    socket.disconnect()
-    socket = null
-  }
   emit('cancel')
 }
 
 onMounted(() => {
   startAnalysis()
-})
-
-onUnmounted(() => {
-  if (socket) {
-    socket.disconnect()
-  }
 })
 </script>
 

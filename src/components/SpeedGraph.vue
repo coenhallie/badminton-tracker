@@ -115,7 +115,14 @@ const speedTimeline = computed(() => {
       }
       
       // Use current_speed from skeleton data (already in km/h)
-      const speedKmh = player.current_speed ?? 0
+      // Filter out unrealistic speeds based on badminton-specific research:
+      // - Typical footwork: 4-15 km/h
+      // - Quick lunges/recoveries: 15-25 km/h
+      // - Maximum explosive bursts (rare): up to 25-30 km/h
+      // - Anything above 25 km/h sustained is likely a tracking error
+      const MAX_VALID_SPEED_KMH = 25  // Aligned with backend MAX_VALID_SPEED_MPS = 7.0 (25 km/h)
+      const rawSpeedKmh = player.current_speed ?? 0
+      const speedKmh = rawSpeedKmh > MAX_VALID_SPEED_KMH ? 0 : rawSpeedKmh
       const speedMps = speedKmh / 3.6
       
       // Debug tracking
@@ -196,7 +203,10 @@ const playerStats = computed(() => {
     }
     
     const currentMps = speeds[closestIdx] ?? 0
-    const maxMps = Math.max(...speeds)
+    // Filter out zero values when calculating max (zeros are often filtered tracking errors)
+    const validSpeeds = speeds.filter(s => s > 0)
+    const maxMps = validSpeeds.length > 0 ? Math.max(...validSpeeds) : 0
+    // Use all speeds for average to get accurate overall movement picture
     const avgMps = speeds.reduce((a, b) => a + b, 0) / speeds.length
     
     stats[playerId] = {

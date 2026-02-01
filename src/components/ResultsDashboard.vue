@@ -64,12 +64,12 @@ async function handleExportPDF() {
       processed_frames: props.result.processed_frames,
       video_width: result.video_width ?? 1920,
       video_height: result.video_height ?? 1080,
-      players: props.result.players.map(p => ({
+      players: filteredPlayers.value.map(p => ({
         player_id: p.player_id,
         total_distance: p.total_distance,
         avg_speed: p.avg_speed,
         max_speed: p.max_speed,
-        positions: p.positions
+        positions: p.positions ?? []
       })),
       shuttle: props.result.shuttle ?? null,
       court_detection: props.result.court_detection ? {
@@ -100,17 +100,40 @@ const formattedDuration = computed(() => {
   return `${mins}:${secs.toString().padStart(2, '0')}`
 })
 
+// Maximum realistic speed thresholds (km/h) - matches App.vue filtering
+// Speeds above these are likely tracking errors (e.g., ID swap to judge)
+// Note: App.vue already filters out speeds > 50 km/h from the raw data
+const MAX_REALISTIC_SPEED_KMH = 50  // Absolute cap for display - tracking errors filtered in App.vue
+const TYPICAL_MAX_SPEED_KMH = 30   // Realistic average max for badminton
+const SUSPICIOUS_SPEED_KMH = 40     // Above this is flagged as suspicious
+
+// Helper to cap speed to realistic values
+function capSpeed(speed: number, isMax: boolean = false): number {
+  const threshold = isMax ? MAX_REALISTIC_SPEED_KMH : TYPICAL_MAX_SPEED_KMH
+  return Math.min(speed, threshold)
+}
+
+// Filter and cap player data for display
+const filteredPlayers = computed(() => {
+  return props.result.players.map(p => ({
+    ...p,
+    avg_speed: capSpeed(p.avg_speed, false),
+    max_speed: capSpeed(p.max_speed, true)
+  }))
+})
+
 const totalDistance = computed(() => {
   return props.result.players.reduce((sum, p) => sum + p.total_distance, 0)
 })
 
 const avgSpeed = computed(() => {
-  if (props.result.players.length === 0) return 0
-  return props.result.players.reduce((sum, p) => sum + p.avg_speed, 0) / props.result.players.length
+  if (filteredPlayers.value.length === 0) return 0
+  const sum = filteredPlayers.value.reduce((sum, p) => sum + p.avg_speed, 0)
+  return sum / filteredPlayers.value.length
 })
 
 const maxSpeed = computed(() => {
-  return Math.max(...props.result.players.map(p => p.max_speed), 0)
+  return Math.max(...filteredPlayers.value.map(p => p.max_speed), 0)
 })
 
 function getPlayerColor(index: number): string {
@@ -340,16 +363,16 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
       <h3>Player Statistics</h3>
       <div class="players-grid">
         <div
-          v-for="(player, index) in result.players"
+          v-for="(player, index) in filteredPlayers"
           :key="player.player_id"
           class="player-card"
           :style="{ '--player-color': getPlayerColor(index) }"
         >
           <div class="player-header">
             <div class="player-avatar" :style="{ background: getPlayerColor(index) }">
-              P{{ player.player_id }}
+              P{{ player.player_id + 1 }}
             </div>
-            <h4>Player {{ player.player_id }}</h4>
+            <h4>Player {{ player.player_id + 1 }}</h4>
           </div>
           <div class="player-stats">
             <div class="player-stat">
@@ -366,7 +389,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
             </div>
             <div class="player-stat">
               <span class="label">Tracked Frames</span>
-              <span class="value">{{ player.positions.length }}</span>
+              <span class="value">{{ player.positions?.length || 0 }}</span>
             </div>
           </div>
         </div>

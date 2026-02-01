@@ -16,6 +16,15 @@ import type {
   SkeletonFrame
 } from '@/types/analysis'
 
+// Detect if we're using Convex backend (serverless) or local Flask backend
+const CONVEX_URL = import.meta.env.VITE_CONVEX_URL as string | undefined
+const USE_CONVEX = !!CONVEX_URL
+
+// Extract Convex deployment from URL for HTTP endpoints
+// VITE_CONVEX_URL format: https://xxx.convex.cloud
+// HTTP endpoint format: https://xxx.convex.site
+const CONVEX_SITE_URL = CONVEX_URL?.replace('.convex.cloud', '.convex.site') || ''
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const WS_BASE_URL = API_BASE_URL.replace('http', 'ws')
 
@@ -173,8 +182,30 @@ export async function getResults(videoId: string): Promise<AnalysisResult> {
 
 /**
  * Get original uploaded video URL (browser-compatible streaming)
+ * For local backend only - use fetchVideoUrl for Convex
  */
 export function getOriginalVideoUrl(videoId: string): string {
+  return `${API_BASE_URL}/api/original/${videoId}`
+}
+
+/**
+ * Fetch video URL asynchronously (works with both local and Convex)
+ */
+export async function fetchVideoUrl(videoId: string): Promise<string> {
+  if (USE_CONVEX) {
+    try {
+      const response = await fetch(`${CONVEX_SITE_URL}/api/video-url?videoId=${videoId}`)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch video URL: ${response.statusText}`)
+      }
+      const data = await response.json()
+      return data.url
+    } catch (error) {
+      console.error('Error fetching video URL from Convex:', error)
+      throw error
+    }
+  }
+  // Fall back to local backend URL
   return `${API_BASE_URL}/api/original/${videoId}`
 }
 
@@ -258,15 +289,88 @@ export class AnalysisProgressSocket {
 }
 
 /**
- * Check API health
+ * Health check response interface (for local backend)
+ */
+export interface HealthCheckResponse {
+  status: 'healthy' | 'unhealthy'
+  timestamp: number
+  version: string
+  backend: 'local' | 'convex'
+  components: {
+    pose_model?: string
+    court_detector?: string
+    multi_model_detector?: string
+    modal_inference?: string
+    convex?: string
+    database?: string
+  }
+  system?: {
+    cpu_percent: number
+    memory_percent: number
+    memory_available_gb: number
+  }
+  stats?: {
+    total_videos: number
+    processing: number
+    videos_by_status: Record<string, number>
+  }
+  active_analyses?: number
+  error?: string
+}
+
+/**
+ * Check API health - returns detailed status info
+ * Automatically detects whether to use Convex or local backend
  */
 export async function checkApiHealth(): Promise<boolean> {
   try {
-    const response = await fetch(`${API_BASE_URL}/`)
+    const healthUrl = USE_CONVEX
+      ? `${CONVEX_SITE_URL}/health`
+      : `${API_BASE_URL}/health`
+    
+    const response = await fetch(healthUrl, {
+      signal: AbortSignal.timeout(5000) // 5 second timeout
+    })
     return response.ok
   } catch {
     return false
   }
+}
+
+/**
+ * Get detailed API health status
+ * Automatically detects whether to use Convex or local backend
+ */
+export async function getApiHealthDetails(): Promise<HealthCheckResponse | null> {
+  try {
+    const healthUrl = USE_CONVEX
+      ? `${CONVEX_SITE_URL}/health`
+      : `${API_BASE_URL}/health`
+    
+    const response = await fetch(healthUrl, {
+      signal: AbortSignal.timeout(5000) // 5 second timeout
+    })
+    if (!response.ok) {
+      return null
+    }
+    return await response.json()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Get the API base URL for display purposes
+ */
+export function getApiBaseUrl(): string {
+  return USE_CONVEX ? CONVEX_SITE_URL : API_BASE_URL
+}
+
+/**
+ * Check if using Convex backend
+ */
+export function isUsingConvex(): boolean {
+  return USE_CONVEX
 }
 
 // ============================================================================
@@ -278,6 +382,14 @@ export interface ManualKeypointsRequest {
   top_right: number[]
   bottom_right: number[]
   bottom_left: number[]
+  net_left?: number[]
+  net_right?: number[]
+  service_line_near_left?: number[]
+  service_line_near_right?: number[]
+  service_line_far_left?: number[]
+  service_line_far_right?: number[]
+  doubles_left_near?: number[]
+  doubles_right_near?: number[]
 }
 
 export interface ManualKeypointsStatus {
@@ -291,10 +403,41 @@ export interface ManualKeypointsResponse {
   keypoints: ManualKeypointsRequest
 }
 
+// Store current video ID for keypoints operations (set by App.vue)
+let currentVideoId: string | null = null
+
+/**
+ * Set the current video ID for keypoints operations
+ * Called when video analysis is complete
+ */
+export function setCurrentVideoId(videoId: string | null) {
+  currentVideoId = videoId
+}
+
 /**
  * Get manual court keypoints status
+ * @param videoId - Optional video ID (uses current video if not provided)
  */
-export async function getManualKeypointsStatus(): Promise<ManualKeypointsStatus> {
+export async function getManualKeypointsStatus(videoId?: string): Promise<ManualKeypointsStatus> {
+  const vid = videoId || currentVideoId
+  
+  if (USE_CONVEX) {
+    if (!vid) {
+      // Return false if no video context
+      return { has_manual_keypoints: false, keypoints: null }
+    }
+    
+    const response = await fetch(`${CONVEX_SITE_URL}/api/court-keypoints/manual/status?videoId=${encodeURIComponent(vid)}`)
+    
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.error || 'Failed to get manual keypoints status')
+    }
+    
+    return response.json()
+  }
+  
+  // Fallback to local backend
   const response = await fetch(`${API_BASE_URL}/api/court-keypoints/manual/status`)
 
   if (!response.ok) {
@@ -307,8 +450,37 @@ export async function getManualKeypointsStatus(): Promise<ManualKeypointsStatus>
 
 /**
  * Set manual court keypoints
+ * @param keypoints - Court keypoints to set
+ * @param videoId - Optional video ID (uses current video if not provided)
  */
-export async function setManualCourtKeypoints(keypoints: ManualKeypointsRequest): Promise<ManualKeypointsResponse> {
+export async function setManualCourtKeypoints(
+  keypoints: ManualKeypointsRequest,
+  videoId?: string
+): Promise<ManualKeypointsResponse> {
+  const vid = videoId || currentVideoId
+  
+  if (USE_CONVEX) {
+    if (!vid) {
+      throw new Error('No video context for setting keypoints')
+    }
+    
+    const response = await fetch(`${CONVEX_SITE_URL}/api/court-keypoints/manual/set`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ videoId: vid, keypoints })
+    })
+    
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.error || 'Failed to set manual keypoints')
+    }
+    
+    return response.json()
+  }
+  
+  // Fallback to local backend
   const response = await fetch(`${API_BASE_URL}/api/court-keypoints/manual/set`, {
     method: 'POST',
     headers: {
@@ -376,27 +548,45 @@ export async function getHeatmap(
     }
   }
   
-  // Build URL with optional player_id
-  let url = `${API_BASE_URL}/api/heatmap/${videoId}`
-  if (playerId !== undefined) {
-    url += `?player_id=${playerId}`
+  // Build URL with optional player_id - use Convex or local backend
+  let url: string
+  if (USE_CONVEX) {
+    // Convex HTTP endpoint
+    url = `${CONVEX_SITE_URL}/api/heatmap?videoId=${videoId}`
+    if (playerId !== undefined) {
+      url += `&player_id=${playerId}`
+    }
+  } else {
+    // Local Flask backend
+    url = `${API_BASE_URL}/api/heatmap/${videoId}`
+    if (playerId !== undefined) {
+      url += `?player_id=${playerId}`
+    }
   }
 
   const response = await fetch(url)
 
   if (!response.ok) {
     const error = await response.json()
-    throw new Error(error.detail || 'Failed to get heatmap data')
+    throw new Error(error.detail || error.error || 'Failed to get heatmap data')
   }
 
-  const data: HeatmapResponse = await response.json()
+  const data = await response.json()
+  
+  // Convex returns heatmap data directly, Flask returns nested structure
+  const heatmapData: HeatmapData = USE_CONVEX ? data : data.heatmap
   
   // Cache the result
-  if (data.heatmap) {
-    heatmapCache.set(cacheKey, data.heatmap)
+  if (heatmapData) {
+    heatmapCache.set(cacheKey, heatmapData)
   }
   
-  return data
+  return {
+    video_id: videoId,
+    player_id: playerId ?? null,
+    heatmap: heatmapData,
+    status: 'success'
+  }
 }
 
 /**
@@ -507,12 +697,19 @@ export async function getSpeedData(
     }
   }
 
-  const url = `${API_BASE_URL}/api/speed/${videoId}?window_seconds=${windowSeconds}`
+  // Use Convex or local backend
+  let url: string
+  if (USE_CONVEX) {
+    url = `${CONVEX_SITE_URL}/api/speed?videoId=${videoId}`
+  } else {
+    url = `${API_BASE_URL}/api/speed/${videoId}?window_seconds=${windowSeconds}`
+  }
+  
   const response = await fetch(url)
 
   if (!response.ok) {
     const error = await response.json()
-    throw new Error(error.detail || 'Failed to get speed data')
+    throw new Error(error.detail || error.error || 'Failed to get speed data')
   }
 
   const data: SpeedDataResponse = await response.json()
@@ -560,6 +757,92 @@ export async function triggerSpeedRecalculation(videoId: string): Promise<SpeedD
   return data
 }
 
+/**
+ * Manual court keypoints for speed calculation
+ */
+export interface ManualCourtKeypoints {
+  top_left: { x: number; y: number }
+  top_right: { x: number; y: number }
+  bottom_left: { x: number; y: number }
+  bottom_right: { x: number; y: number }
+}
+
+/**
+ * Request body for recalculating speeds from skeleton data
+ */
+export interface RecalculateSpeedsRequest {
+  skeleton_data: SkeletonFrame[]
+  fps: number
+  video_width: number
+  video_height: number
+  manual_court_keypoints?: ManualCourtKeypoints
+}
+
+/**
+ * Response from speed recalculation endpoint
+ */
+export interface RecalculateSpeedsResponse {
+  status: string
+  players: Array<{
+    player_id: number
+    avg_speed: number
+    max_speed: number
+    total_distance: number
+    current_speed: number
+    zone_distribution: Record<string, number>
+  }>
+  speed_data: SpeedDataResponse['speed_data']
+  frames_processed: number
+  fps: number
+  manual_keypoints_used: boolean
+  detection_source: string
+  methodology: {
+    description: string
+    max_speed_cap_kmh: number
+    uses_homography: boolean
+  }
+}
+
+/**
+ * Recalculate speeds from external skeleton data (for Convex/Modal integration)
+ *
+ * This allows the Convex frontend to send skeleton_data stored in Convex
+ * and get accurate speed calculations using the main backend's full
+ * speed analytics module, including:
+ * - Court-based homography for pixel-to-meter conversion
+ * - Kalman filtering for smooth velocity estimation
+ * - Median filtering for outlier rejection
+ * - Physiological speed limits (max ~43 km/h)
+ *
+ * @param request - The skeleton data and optional court keypoints
+ * @returns Recalculated player metrics with accurate speeds
+ */
+export async function recalculateSpeedsFromSkeleton(
+  request: RecalculateSpeedsRequest
+): Promise<RecalculateSpeedsResponse> {
+  console.log(`[Speed] Recalculating speeds from ${request.skeleton_data.length} frames`)
+  
+  const response = await fetch(`${API_BASE_URL}/api/speed/recalculate`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  })
+  
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.detail || error.error || 'Failed to recalculate speeds')
+  }
+  
+  const data: RecalculateSpeedsResponse = await response.json()
+  
+  console.log(`[Speed] Recalculation complete - ${data.players.length} players, ` +
+    `manual_keypoints_used: ${data.manual_keypoints_used}`)
+  
+  return data
+}
+
 // Speed timeline response type for per-frame speed data
 export interface SpeedTimelineResponse {
   video_id: string
@@ -601,15 +884,64 @@ export async function getSpeedTimeline(
   videoId: string,
   sampleRate: number = 1
 ): Promise<SpeedTimelineResponse> {
-  const url = `${API_BASE_URL}/api/speed/${videoId}/timeline?sample_rate=${sampleRate}`
+  // Use Convex or local backend
+  let url: string
+  if (USE_CONVEX) {
+    // Convex uses the same /api/speed endpoint, frame_data provides timeline
+    url = `${CONVEX_SITE_URL}/api/speed?videoId=${videoId}`
+  } else {
+    url = `${API_BASE_URL}/api/speed/${videoId}/timeline?sample_rate=${sampleRate}`
+  }
+  
   const response = await fetch(url)
   
   if (!response.ok) {
     const error = await response.json()
-    throw new Error(error.detail || 'Failed to get speed timeline')
+    throw new Error(error.detail || error.error || 'Failed to get speed timeline')
   }
   
-  return response.json()
+  const data = await response.json()
+  
+  // Convex returns different format, normalize it
+  if (USE_CONVEX && data.speed_data) {
+    // Convert Convex speed_data format to SpeedTimelineResponse
+    const speedData = data.speed_data
+    const players: Record<string, { frames: number[]; timestamps: number[]; speeds_mps: number[]; speeds_kmh: number[]; zones: string[] }> = {}
+    
+    // Build player timelines from frame_data
+    for (const frame of speedData.frame_data || []) {
+      for (const player of frame.players) {
+        const pid = player.player_id.toString()
+        if (!players[pid]) {
+          players[pid] = { frames: [], timestamps: [], speeds_mps: [], speeds_kmh: [], zones: [] }
+        }
+        players[pid].frames.push(frame.frame)
+        players[pid].timestamps.push(frame.frame / 30) // Approximate
+        players[pid].speeds_kmh.push(player.speed_kmh)
+        players[pid].speeds_mps.push(player.speed_kmh / 3.6)
+        players[pid].zones.push(player.speed_kmh > 15 ? 'sprint' : player.speed_kmh > 8 ? 'run' : 'walk')
+      }
+    }
+    
+    // Read manual_keypoints_used and detection_source from Convex response
+    // These are now properly set by the Convex /api/speed endpoint
+    const manualKeypointsUsed = data.manual_keypoints_used ?? speedData.manual_keypoints_used ?? false
+    const detectionSource = data.detection_source ?? 'convex'
+    
+    return {
+      video_id: videoId,
+      frame_range: { start: 0, end: null, total_frames: speedData.frame_data?.length || 0 },
+      sample_rate: sampleRate,
+      fps: 30,
+      players,
+      zone_colors: { walk: '#4CAF50', run: '#FFC107', sprint: '#F44336' },
+      manual_keypoints_used: manualKeypointsUsed,
+      detection_source: detectionSource,
+      status: 'success'
+    }
+  }
+  
+  return data
 }
 
 // ============================================================================
@@ -744,6 +1076,9 @@ export function getPDFExportUrl(
  * Download PDF export directly
  * This triggers an immediate download of the PDF file
  *
+ * Uses Convex + Modal for serverless PDF generation when available,
+ * falls back to local backend otherwise.
+ *
  * @param videoId - Video ID to export
  * @param options - Optional configuration
  */
@@ -756,24 +1091,70 @@ export async function downloadPDFExport(
     heatmap_alpha?: number
   }
 ): Promise<void> {
-  const url = getPDFExportUrl(videoId, options)
-  
   try {
-    const response = await fetch(url)
+    let blob: Blob
+    let filename: string = `badminton_analysis_${videoId.slice(0, 8)}.pdf`
     
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.detail || 'Failed to generate PDF')
+    if (USE_CONVEX) {
+      // Use Convex + Modal for PDF generation
+      console.log('[PDF Export] Using Convex + Modal PDF service...')
+      const response = await fetch(`${CONVEX_SITE_URL}/api/export/pdf`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          videoId,
+          config: {
+            frame_number: options?.frame_number,
+            include_heatmap: options?.include_heatmap ?? true,
+            heatmap_colormap: options?.heatmap_colormap ?? 'turbo',
+            heatmap_alpha: options?.heatmap_alpha ?? 0.6,
+          }
+        })
+      })
+      
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || 'Failed to generate PDF')
+      }
+      
+      const result = await response.json()
+      
+      if (!result.success || !result.pdfBase64) {
+        throw new Error(result.error || 'PDF generation failed')
+      }
+      
+      // Convert base64 to blob
+      const binaryString = atob(result.pdfBase64)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      blob = new Blob([bytes], { type: 'application/pdf' })
+      filename = result.filename || filename
+      
+      console.log(`[PDF Export] PDF generated via Modal (${result.size} bytes)`)
+    } else {
+      // Fallback to local backend
+      const url = getPDFExportUrl(videoId, options)
+      const response = await fetch(url)
+      
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.detail || 'Failed to generate PDF')
+      }
+      
+      blob = await response.blob()
     }
     
-    // Get the blob and create download link
-    const blob = await response.blob()
+    // Create download link
     const downloadUrl = window.URL.createObjectURL(blob)
     
     // Create temporary link and trigger download
     const link = document.createElement('a')
     link.href = downloadUrl
-    link.download = `badminton_analysis_${videoId.slice(0, 8)}.pdf`
+    link.download = filename
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -959,12 +1340,19 @@ export async function getRecalculatedZoneAnalytics(
     }
   }
 
-  const url = `${API_BASE_URL}/api/player-zone-analytics/${videoId}/recalculate`
+  // Use Convex or local backend
+  let url: string
+  if (USE_CONVEX) {
+    url = `${CONVEX_SITE_URL}/api/zone-analytics?videoId=${videoId}`
+  } else {
+    url = `${API_BASE_URL}/api/player-zone-analytics/${videoId}/recalculate`
+  }
+  
   const response = await fetch(url)
 
   if (!response.ok) {
     const error = await response.json()
-    throw new Error(error.detail || 'Failed to get zone analytics')
+    throw new Error(error.detail || error.error || 'Failed to get zone analytics')
   }
 
   const data: RecalculatedZoneAnalyticsResponse = await response.json()

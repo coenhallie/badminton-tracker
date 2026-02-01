@@ -472,7 +472,16 @@ class BadmintonInference:
         return poses
     
     def _run_object_detection(self, frame, confidence_threshold: float) -> list[BoundingBoxResult]:
-        """Run object detection on a frame"""
+        """
+        Run object detection on a frame.
+        
+        Only returns detections for:
+        - person/player/human
+        - shuttle/shuttlecock/birdie/ball
+        - racket/racquet
+        
+        All other objects (chairs, tables, etc.) are filtered out.
+        """
         results = self.detection_model(
             frame,
             verbose=False,
@@ -492,7 +501,7 @@ class BadmintonInference:
                     # Get class name from model
                     class_name = self.detection_model.names.get(cls_id, f"class_{cls_id}")
                     
-                    # Determine detection type
+                    # Determine detection type - ONLY allow person, shuttle, racket
                     class_lower = class_name.lower()
                     if any(p in class_lower for p in ["player", "person", "human"]):
                         det_type = "player"
@@ -501,7 +510,8 @@ class BadmintonInference:
                     elif any(r in class_lower for r in ["racket", "racquet"]):
                         det_type = "racket"
                     else:
-                        det_type = "other"
+                        # Skip all other objects (chairs, tables, sports ball, etc.)
+                        continue
                     
                     detections.append(BoundingBoxResult(
                         x=float((x1 + x2) / 2),

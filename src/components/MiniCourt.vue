@@ -938,7 +938,7 @@ function getFeetPosition(player: FramePlayer): { x: number; y: number } | null {
 function drawPlayers(ctx: CanvasRenderingContext2D) {
   if (!props.players || props.players.length === 0) return
   
-  props.players.forEach((player, index) => {
+  props.players.forEach((player) => {
     // Get feet position (or fallback to center)
     const feetPos = getFeetPosition(player)
     if (!feetPos) return
@@ -981,8 +981,8 @@ function drawPlayers(ctx: CanvasRenderingContext2D) {
     // Convert to canvas coordinates
     const canvasPos = courtToCanvas(courtPos.x, courtPos.y)
     
-    // Player color
-    const color = PLAYER_COLORS[index % PLAYER_COLORS.length] ?? '#FF6B6B'
+    // Player color - use player_id for consistent coloring across frames
+    const color = PLAYER_COLORS[player.player_id % PLAYER_COLORS.length] ?? '#FF6B6B'
     
     // Draw player circle with glow effect
     ctx.shadowColor = color
@@ -1005,12 +1005,12 @@ function drawPlayers(ctx: CanvasRenderingContext2D) {
     
     ctx.shadowBlur = 0
     
-    // Player label
+    // Player label (player_id is 0-indexed, display as 1-indexed: Player 1, Player 2)
     ctx.font = 'bold 11px Inter, sans-serif'
     ctx.fillStyle = '#FFFFFF'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(`P${player.player_id}`, canvasPos.x, canvasPos.y)
+    ctx.fillText(`P${player.player_id + 1}`, canvasPos.x, canvasPos.y)
     
     // Speed indicator below player
     if (player.current_speed !== undefined && player.current_speed > 0) {
@@ -1214,8 +1214,9 @@ function render(force = false) {
   const ctx = cachedCtx
   if (!ctx) return
   
-  // Clear canvas
-  ctx.clearRect(0, 0, props.width, canvasHeight.value)
+  // Clear canvas with dark background (ensures no transparent gaps)
+  ctx.fillStyle = '#111111'
+  ctx.fillRect(0, 0, props.width, canvasHeight.value)
   
   // Always draw the court first (even without court corner data)
   drawCourt(ctx)
@@ -1322,7 +1323,7 @@ defineExpose({
           class="legend-dot"
           :style="{ backgroundColor: PLAYER_COLORS[index % PLAYER_COLORS.length] }"
         />
-        <span class="legend-label">P{{ player.player_id }}</span>
+        <span class="legend-label">P{{ player.player_id + 1 }}</span>
       </div>
     </div>
   </div>
@@ -1387,7 +1388,7 @@ defineExpose({
 
 .mini-court-canvas {
   border-radius: 0;
-  background: #1a472a;
+  /* Background is drawn programmatically on the canvas to avoid transparency issues */
 }
 
 .player-legend {
