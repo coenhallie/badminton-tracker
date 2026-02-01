@@ -383,7 +383,7 @@ watch(videoDimensions, () => {
 <template>
   <div class="court-setup">
     <div class="setup-header">
-      <h2>🎯 12-Point Court Mapping</h2>
+      <h2>Court Mapping</h2>
       <p class="subtitle">{{ props.filename }}</p>
     </div>
 
