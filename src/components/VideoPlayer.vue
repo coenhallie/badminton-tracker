@@ -60,9 +60,11 @@ interface ProgressiveHeatmapState {
 }
 
 // Progressive heatmap constants
-const PROGRESSIVE_HEATMAP_WIDTH = 64  // Low resolution for performance
-const PROGRESSIVE_HEATMAP_HEIGHT = 48
-const PROGRESSIVE_HEATMAP_RADIUS = 3  // Gaussian radius in heatmap cells
+// High resolution for maximum accuracy (near PDF export quality)
+// Modern browsers handle these sizes easily (~3.5MB memory for Float32 array)
+const PROGRESSIVE_HEATMAP_WIDTH = 960   // Half of 1080p width - excellent quality
+const PROGRESSIVE_HEATMAP_HEIGHT = 540  // Half of 1080p height - 16:9 aspect
+const PROGRESSIVE_HEATMAP_RADIUS = 25   // Matches PDF's sigma=25 for smooth Gaussian blending
 
 // Progressive heatmap state - persists across frames
 let progressiveHeatmapState: ProgressiveHeatmapState | null = null

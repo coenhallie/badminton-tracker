@@ -1245,36 +1245,93 @@ export async function exportPDFWithFrontendData(
   videoId: string,
   data: PDFExportWithDataConfig
 ): Promise<void> {
-  const url = `${API_BASE_URL}/api/export/pdf/${videoId}/with-data`
+  // Use Convex backend if configured, otherwise fall back to local Flask
+  const url = USE_CONVEX
+    ? `${CONVEX_SITE_URL}/api/export/pdf`
+    : `${API_BASE_URL}/api/export/pdf/${videoId}/with-data`
   
   try {
+    // Build request body based on backend type
+    const requestBody = USE_CONVEX
+      ? {
+          videoId,
+          config: {
+            title: data.title || 'Badminton Video Analysis Report',
+            include_heatmap: data.include_heatmap ?? true,
+            heatmap_colormap: data.heatmap_colormap || 'turbo',
+            heatmap_alpha: data.heatmap_alpha ?? 0.6,
+            // Pass frontend data for accurate rendering
+            duration: data.duration,
+            fps: data.fps,
+            total_frames: data.total_frames,
+            processed_frames: data.processed_frames,
+            video_width: data.video_width,
+            video_height: data.video_height,
+            players: data.players,
+            shuttle: data.shuttle,
+            court_detection: data.court_detection,
+            shuttle_analytics: data.shuttle_analytics,
+            player_zone_analytics: data.player_zone_analytics,
+          }
+        }
+      : data
+    
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(data)
+      body: JSON.stringify(requestBody)
     })
     
     if (!response.ok) {
       const error = await response.json()
-      throw new Error(error.detail || 'Failed to generate PDF')
+      throw new Error(error.detail || error.error || 'Failed to generate PDF')
     }
     
-    // Get the blob and create download link
-    const blob = await response.blob()
-    const downloadUrl = window.URL.createObjectURL(blob)
-    
-    // Create temporary link and trigger download
-    const link = document.createElement('a')
-    link.href = downloadUrl
-    link.download = `badminton_analysis_${videoId.slice(0, 8)}.pdf`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    
-    // Clean up object URL
-    window.URL.revokeObjectURL(downloadUrl)
+    if (USE_CONVEX) {
+      // Convex returns base64 encoded PDF
+      const result = await response.json()
+      
+      if (!result.success || !result.pdfBase64) {
+        throw new Error(result.error || 'PDF generation failed')
+      }
+      
+      // Convert base64 to blob
+      const binaryString = atob(result.pdfBase64)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+      const blob = new Blob([bytes], { type: 'application/pdf' })
+      const downloadUrl = window.URL.createObjectURL(blob)
+      
+      // Create temporary link and trigger download
+      const link = document.createElement('a')
+      link.href = downloadUrl
+      link.download = result.filename || `badminton_analysis_${videoId.slice(0, 8)}.pdf`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      
+      // Clean up object URL
+      window.URL.revokeObjectURL(downloadUrl)
+    } else {
+      // Local Flask returns blob directly
+      const blob = await response.blob()
+      const downloadUrl = window.URL.createObjectURL(blob)
+      
+      // Create temporary link and trigger download
+      const link = document.createElement('a')
+      link.href = downloadUrl
+      link.download = `badminton_analysis_${videoId.slice(0, 8)}.pdf`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      
+      // Clean up object URL
+      window.URL.revokeObjectURL(downloadUrl)
+    }
     
     console.log('[PDF Export] Successfully exported PDF with frontend data')
   } catch (error) {
