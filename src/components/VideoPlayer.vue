@@ -373,12 +373,8 @@ const playerSmoothState = shallowRef<Map<number, SmoothState>>(new Map())
 const shuttleSmoothState = ref<SmoothState | null>(null)
 
 let animationFrameId: number | null = null
+let videoFrameCallbackId: number | null = null
 let controlsTimeout: number | null = null
-let lastRenderTime = 0
-
-// PERFORMANCE OPTIMIZATION: Frame rate limiting for canvas rendering
-const TARGET_OVERLAY_FPS = 30  // Limit overlay rendering to 30fps (reduces CPU usage)
-const MIN_FRAME_TIME = 1000 / TARGET_OVERLAY_FPS
 
 // PERFORMANCE OPTIMIZATION: Cached canvas context and pre-computed values
 let cachedCtx: CanvasRenderingContext2D | null = null
@@ -469,20 +465,64 @@ function binarySearchTimestamp(targetTime: number): number {
 }
 
 /**
- * Get skeleton frame for current video time
- * Uses binary search for O(log n) lookup performance
+ * Find the skeleton frame at or just before the given timestamp.
+ * Uses floor semantics to ensure we never show skeleton data from
+ * a future video frame, preventing the overlay from leading the video.
+ * O(log n) binary search.
  */
-const currentSkeletonFrame = computed(() => {
+function findFrameAtOrBefore(targetTime: number): SkeletonFrame | null {
   if (!props.skeletonData || props.skeletonData.length === 0) return null
 
-  const targetTime = currentTime.value
-  
-  // Use binary search for fast lookup
-  const closestIdx = binarySearchTimestamp(targetTime)
-  if (closestIdx < 0) return null
-  
-  return props.skeletonData[closestIdx] ?? null
+  const timestamps = timestampIndex.value
+  if (timestamps.length === 0) return null
+
+  // Binary search for the last frame with timestamp <= targetTime
+  let left = 0
+  let right = timestamps.length - 1
+  let result = -1
+
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2)
+    const midVal = timestamps[mid]
+    if (midVal !== undefined && midVal <= targetTime) {
+      result = mid
+      left = mid + 1
+    } else {
+      right = mid - 1
+    }
+  }
+
+  if (result < 0) {
+    // All frames are after targetTime; return the very first frame
+    // only if targetTime is extremely close (within half a frame period)
+    const firstTimestamp = timestamps[0]
+    if (firstTimestamp !== undefined && firstTimestamp - targetTime < 0.02) {
+      return props.skeletonData[0] ?? null
+    }
+    return null
+  }
+
+  return props.skeletonData[result] ?? null
+}
+
+/**
+ * Get skeleton frame for current video time
+ * Uses floor-semantic binary search so we never return a future frame.
+ */
+const currentSkeletonFrame = computed(() => {
+  return findFrameAtOrBefore(currentTime.value)
 })
+
+// NOTE: Interpolation functions (getInterpolatedFrame, interpolateBoundingBoxes)
+// have been intentionally removed. Interpolating skeleton/bounding box positions
+// between keyframes causes the overlay to lead the video because:
+// 1. Video displays discrete frames, but interpolation creates continuous positions
+// 2. The interpolated position at time T may predict where the player will be in
+//    the NEXT video frame, causing the skeleton to appear to anticipate movement
+// 3. requestAnimationFrame fires independently of video frame presentation
+//
+// Instead, we now use exact frame lookup with floor semantics (findFrameAtOrBefore)
+// combined with requestVideoFrameCallback for frame-accurate synchronization.
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60)
@@ -909,7 +949,7 @@ function resizeCanvas() {
   canvasRef.value.height = videoRef.value.videoHeight || videoRef.value.clientHeight
 }
 
-function drawOverlay() {
+function drawOverlay(exactFrame?: SkeletonFrame | null) {
   if (!canvasRef.value) {
     if (DEBUG_MODE) console.log('[Overlay Debug] No canvas ref')
     return
@@ -919,7 +959,10 @@ function drawOverlay() {
     return
   }
 
-  const frame = currentSkeletonFrame.value
+  // Use the exact frame when provided (during playback animation loop via
+  // requestVideoFrameCallback or rAF with floor-semantic lookup).
+  // Fall back to computed frame (when called from watchers while paused).
+  const frame = exactFrame !== undefined ? exactFrame : currentSkeletonFrame.value
   
   // Allow heatmap rendering even without skeleton frame
   // Progressive heatmap uses skeleton data, static heatmap uses pre-computed data
@@ -947,8 +990,10 @@ function drawOverlay() {
     cachedCtx = null
   }
 
-  // PERFORMANCE OPTIMIZATION: Skip rendering if same frame (only when frame exists)
-  // Always render if we have heatmap to show
+  // PERFORMANCE OPTIMIZATION: Skip rendering if nothing has changed.
+  // When called from animation loop (exactFrame provided), skip if same frame
+  // since there's no interpolation — the same skeleton frame means identical output.
+  // When called from watchers (no exactFrame), also skip if same frame number.
   if (frame && !hasHeatmapToRender) {
     if (frame.frame === lastFrameNumber) return
     lastFrameNumber = frame.frame
@@ -969,10 +1014,13 @@ function drawOverlay() {
   }
 
   // PERFORMANCE OPTIMIZATION: Cache and reuse canvas context
+  // NOTE: desynchronized is intentionally NOT used here. While it reduces latency,
+  // it also causes the canvas to composite independently of the page, which can
+  // desynchronize the overlay from the video element. For frame-accurate overlay
+  // alignment, we need synchronized compositing.
   if (!cachedCtx) {
     cachedCtx = canvasRef.value.getContext('2d', {
       alpha: true,
-      desynchronized: true,  // Reduces latency on supported browsers
     })
   }
   const ctx = cachedCtx
@@ -1275,9 +1323,16 @@ function drawSkeleton(
     return
   }
   
+  // Sort players by player_id for consistent rendering order
+  // This ensures Player 0 always gets the first color, Player 1 the second,
+  // regardless of what order the backend returns them in the array
+  const sortedPlayers = [...frame.players].sort((a, b) => a.player_id - b.player_id)
+  
   // Draw each player's skeleton
-  frame.players.forEach((player, playerIndex) => {
-    const color = PLAYER_COLORS[playerIndex % PLAYER_COLORS.length] ?? '#FF6B6B'
+  sortedPlayers.forEach((player) => {
+    // Use player_id (not array index) for color assignment
+    // Player 0 (far/top) always gets color[0], Player 1 (near/bottom) always gets color[1]
+    const color = PLAYER_COLORS[player.player_id % PLAYER_COLORS.length] ?? '#FF6B6B'
     const keypoints = player.keypoints
     
     // Skip if no keypoints
@@ -1350,21 +1405,55 @@ function drawSkeleton(
 }
 
 function startSkeletonAnimation() {
-  const animate = (timestamp: number) => {
-    // PERFORMANCE OPTIMIZATION: Frame rate limiting
-    // Only render at TARGET_OVERLAY_FPS to reduce CPU usage
-    const elapsed = timestamp - lastRenderTime
-    
-    if (elapsed >= MIN_FRAME_TIME) {
-      lastRenderTime = timestamp - (elapsed % MIN_FRAME_TIME)
-      drawOverlay()
+  // =============================================================================
+  // FRAME-ACCURATE SYNC STRATEGY
+  // =============================================================================
+  // We use HTMLVideoElement.requestVideoFrameCallback() when available.
+  // This callback fires exactly when a new video frame is presented to the
+  // compositor, and provides the precise mediaTime of that frame. This
+  // guarantees the skeleton overlay is drawn for the exact frame being displayed.
+  //
+  // When not available, we fall back to requestAnimationFrame but still use
+  // floor-semantic frame lookup (findFrameAtOrBefore) instead of interpolation,
+  // ensuring we never show skeleton data from a future video frame.
+  // =============================================================================
+
+  const video = videoRef.value
+  if (!video) return
+
+  if ('requestVideoFrameCallback' in video) {
+    // Use requestVideoFrameCallback for frame-perfect sync
+    const onVideoFrame = (_now: DOMHighResTimeStamp, metadata: { mediaTime: number }) => {
+      if (!videoRef.value || !isPlaying.value) return
+
+      // Use the exact media time from the video frame just presented
+      currentTime.value = metadata.mediaTime
+
+      // Find the skeleton frame at or just before this exact video frame time
+      // No interpolation — this ensures pixel-perfect alignment with the video
+      const frame = findFrameAtOrBefore(metadata.mediaTime)
+      drawOverlay(frame)
+
+      // Request callback for the next video frame
+      videoFrameCallbackId = videoRef.value.requestVideoFrameCallback(onVideoFrame)
     }
-    
+    videoFrameCallbackId = video.requestVideoFrameCallback(onVideoFrame)
+  } else {
+    // Fallback: requestAnimationFrame loop without interpolation
+    const animate = () => {
+      if (videoRef.value) {
+        currentTime.value = videoRef.value.currentTime
+      }
+
+      // Floor-semantic lookup: find the skeleton frame at or just before
+      // the current video time. Never returns a future frame.
+      const frame = findFrameAtOrBefore(currentTime.value)
+      drawOverlay(frame)
+
+      animationFrameId = requestAnimationFrame(animate)
+    }
     animationFrameId = requestAnimationFrame(animate)
   }
-  // Reset timing on start
-  lastRenderTime = performance.now()
-  animationFrameId = requestAnimationFrame(animate)
 }
 
 function stopSkeletonAnimation() {
@@ -1372,7 +1461,12 @@ function stopSkeletonAnimation() {
     cancelAnimationFrame(animationFrameId)
     animationFrameId = null
   }
-  // Draw one final frame
+  if (videoFrameCallbackId !== null && videoRef.value &&
+      'cancelVideoFrameCallback' in videoRef.value) {
+    ;(videoRef.value as any).cancelVideoFrameCallback(videoFrameCallbackId)
+    videoFrameCallbackId = null
+  }
+  // Draw one final frame at the exact current position
   drawOverlay()
 }
 
@@ -1492,6 +1586,45 @@ watch(currentSkeletonFrame, () => {
 // Emit keypoint selection state changes to parent
 watch([isKeypointSelectionMode, () => manualKeypoints.value.length], ([isActive, count]) => {
   emit('keypointSelectionChange', isActive as boolean, count as number)
+})
+
+// =============================================================================
+// EXPOSE: Methods accessible by parent components via template ref
+// =============================================================================
+
+/**
+ * Seek the video to a specific time (in seconds)
+ */
+function seekTo(timeInSeconds: number) {
+  if (videoRef.value) {
+    videoRef.value.currentTime = timeInSeconds
+    currentTime.value = timeInSeconds
+  }
+}
+
+/**
+ * Seek the video to a specific frame number
+ */
+function seekToFrame(frameNumber: number) {
+  if (videoRef.value && props.skeletonData && props.skeletonData.length > 0) {
+    // Find the skeleton frame to get its timestamp
+    const skFrame = props.skeletonData.find(f => f.frame === frameNumber)
+    if (skFrame) {
+      seekTo(skFrame.timestamp)
+    } else {
+      // Fallback: estimate from fps
+      const fps = props.skeletonData.length > 1
+        ? 1 / ((props.skeletonData[1]?.timestamp ?? 0) - (props.skeletonData[0]?.timestamp ?? 0))
+        : 30 // default
+      seekTo(frameNumber / fps)
+    }
+  }
+}
+
+defineExpose({
+  seekTo,
+  seekToFrame,
+  setPlaybackRate,
 })
 </script>
 
@@ -1642,7 +1775,7 @@ watch([isKeypointSelectionMode, () => manualKeypoints.value.length], ([isActive,
         <div class="controls-right">
           <div class="playback-rates">
             <button
-              v-for="rate in [0.5, 1, 1.5, 2]"
+              v-for="rate in [0.1, 0.25, 0.5, 1, 1.5, 2]"
               :key="rate"
               class="rate-btn"
               :class="{ active: playbackRate === rate }"
@@ -1724,6 +1857,7 @@ video.video-dimmed {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  object-fit: contain;
 }
 
 .play-overlay {
@@ -1871,16 +2005,16 @@ video.video-dimmed {
 
 .playback-rates {
   display: flex;
-  gap: 4px;
+  gap: 2px;
 }
 
 .rate-btn {
-  padding: 4px 8px;
+  padding: 4px 6px;
   background: transparent;
   border: 1px solid #333;
   border-radius: 0;
   color: #888;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   cursor: pointer;
   transition: all 0.2s ease;
 }
@@ -1908,6 +2042,7 @@ video.video-dimmed {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  object-fit: contain;
   z-index: 10;
 }
 

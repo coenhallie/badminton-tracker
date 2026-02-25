@@ -7,6 +7,7 @@ import AnalysisProgress from '@/components/AnalysisProgress.vue'
 import CourtSetup from '@/components/CourtSetup.vue'
 import MiniCourt from '@/components/MiniCourt.vue'
 import SpeedGraph from '@/components/SpeedGraph.vue'
+import ShotSpeedList from '@/components/ShotSpeedList.vue'
 import {
   checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
   getHeatmap, preloadHeatmap, triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
@@ -50,8 +51,17 @@ const showRackets = ref(true)
 // Mini court visibility toggle
 const showMiniCourt = ref(true)
 
+// Player trail visibility toggle (movement path lines on mini court)
+const showPlayerTrails = ref(true)
+
+// Hit marker visibility toggle (shuttlecock strike locations on mini court)
+const showHitMarkers = ref(true)
+
 // Speed graph visibility toggle
 const showSpeedGraph = ref(false)
+
+// Shot speed list visibility toggle
+const showShotSpeedList = ref(false)
 
 // Settings panel visibility toggle
 const showSettingsPanel = ref(false)
@@ -63,6 +73,9 @@ const showChangelogModal = ref(false)
 const videoSectionRef = ref<HTMLElement | null>(null)
 const videoContainerHeight = ref(440) // Default fallback
 let resizeObserver: ResizeObserver | null = null
+
+// VideoPlayer template ref for seeking
+const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 
 // Keypoint selection state (from VideoPlayer)
 const isKeypointSelectionActive = ref(false)
@@ -221,6 +234,15 @@ function handleVideoPlay() {
   }
 }
 
+// Handle seek-to-segment from ShotSpeedList (click to replay a shot segment)
+function handleSeekToSegment(startTime: number, _endTime: number) {
+  if (videoPlayerRef.value) {
+    videoPlayerRef.value.seekTo(startTime)
+    // Optionally set a slower playback rate for detailed analysis
+    videoPlayerRef.value.setPlaybackRate(0.5)
+  }
+}
+
 // Handle keypoint selection mode changes from VideoPlayer
 function handleKeypointSelectionChange(isActive: boolean, count: number) {
   isKeypointSelectionActive.value = isActive
@@ -273,8 +295,8 @@ async function triggerDelayedSpeedCalculation() {
       console.log('[App] Updating skeleton_data with calculated speeds...')
       
       // Maximum realistic speed threshold (km/h) - filter out tracking errors
-      // Speeds above 50 km/h are physically impossible for badminton players
-      const MAX_VALID_SPEED_KMH = 50
+      // UNIFIED: Badminton players rarely exceed 25 km/h even in explosive movements
+      const MAX_VALID_SPEED_KMH = 25
       
       // Build a frame-to-speed lookup for each player
       const playerSpeedsByFrame: Record<number, Record<number, number>> = {}
@@ -350,9 +372,9 @@ async function triggerDelayedSpeedCalculation() {
       const statistics = speedResponse.speed_data.statistics
       
       // Maximum realistic speed threshold for statistics (km/h)
-      // Cap unrealistic values to a reasonable maximum
-      const MAX_VALID_SPEED_KMH = 50
-      const REALISTIC_MAX_SPEED_KMH = 30  // Cap displayed max to realistic value
+      // UNIFIED with backend and Convex speed calculator
+      const MAX_VALID_SPEED_KMH = 25
+      const REALISTIC_MAX_SPEED_KMH = 25  // Cap displayed max to realistic value
       
       for (const player of analysisResult.value.players) {
         // Statistics are keyed by player_id as string
@@ -698,7 +720,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.1
+            alpha v1.2
           </button>
         </div>
 
@@ -730,6 +752,21 @@ watch(videoSectionRef, () => {
             </button>
           </div>
           <div class="changelog-content">
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.2-alpha</span>
+                <span class="version-date">February 7, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - Skeleton overlay movement smoothening</li>
+                <li> - Minicourt circle movement smoothening</li>
+                <li> - Added indicator when no player assignement made</li>
+                <li> - Added previous coordinates path in minicourt</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
             <div class="changelog-entry">
               <div class="changelog-version">
                 <span class="version-tag">v1.1-alpha</span>
@@ -1194,10 +1231,31 @@ watch(videoSectionRef, () => {
                     </div>
                     <div class="toggle-item">
                       <label class="toggle">
+                        <input type="checkbox" v-model="showPlayerTrails" :disabled="!showMiniCourt" />
+                        <span class="toggle-slider trails-toggle" />
+                      </label>
+                      <span>Player Trails</span>
+                    </div>
+                    <div class="toggle-item">
+                      <label class="toggle">
+                        <input type="checkbox" v-model="showHitMarkers" :disabled="!showMiniCourt" />
+                        <span class="toggle-slider hitmarkers-toggle" />
+                      </label>
+                      <span>Hit Markers</span>
+                    </div>
+                    <div class="toggle-item">
+                      <label class="toggle">
                         <input type="checkbox" v-model="showSpeedGraph" />
                         <span class="toggle-slider speedgraph-toggle" />
                       </label>
                       <span>Speed Graph</span>
+                    </div>
+                    <div class="toggle-item">
+                      <label class="toggle">
+                        <input type="checkbox" v-model="showShotSpeedList" />
+                        <span class="toggle-slider shotspeed-toggle" />
+                      </label>
+                      <span>Shot Speed</span>
                     </div>
                   </div>
                 </div>
@@ -1209,6 +1267,7 @@ watch(videoSectionRef, () => {
             <div class="video-with-minicourt">
               <div ref="videoSectionRef" class="video-section">
                 <VideoPlayer
+                  ref="videoPlayerRef"
                   :video-url="videoUrl"
                   :skeleton-data="analysisResult.skeleton_data"
                   :heatmap-data="heatmapData"
@@ -1241,7 +1300,11 @@ watch(videoSectionRef, () => {
                     :show-grid="true"
                     :show-labels="true"
                     :show-shuttle="showShuttles"
-                    :show-trails="false"
+                    :show-trails="showPlayerTrails"
+                    :show-hit-markers="showHitMarkers"
+                    :skeleton-data="analysisResult?.skeleton_data"
+                    :current-frame="currentFrame"
+                    :max-trail-length="150"
                     :is-keypoint-selection-mode="isKeypointSelectionActive"
                     :keypoint-selection-count="keypointSelectionCount"
                   />
@@ -1262,6 +1325,21 @@ watch(videoSectionRef, () => {
                   :court-keypoints-set="manualCourtKeypoints !== null"
                   :video-started="videoPlaybackStarted"
                   @close="showSpeedGraph = false"
+                />
+              </div>
+            </Transition>
+
+            <!-- Shot Speed Analysis Panel -->
+            <Transition name="slide-fade">
+              <div v-if="showShotSpeedList && analysisResult" class="shotspeed-section">
+                <ShotSpeedList
+                  :skeleton-data="analysisResult.skeleton_data"
+                  :fps="analysisResult.fps"
+                  :visible="showShotSpeedList"
+                  :court-keypoints-set="manualCourtKeypoints !== null"
+                  :speed-calculated="speedCalculationTriggered && !isSpeedCalculating"
+                  @seek-to-segment="handleSeekToSegment"
+                  @close="showShotSpeedList = false"
                 />
               </div>
             </Transition>
@@ -2254,6 +2332,18 @@ a:hover {
   border-color: #22c55e;
 }
 
+/* Player trails toggle style */
+.toggle input:checked + .toggle-slider.trails-toggle {
+  background: #f59e0b;
+  border-color: #f59e0b;
+}
+
+/* Hit markers toggle style */
+.toggle input:checked + .toggle-slider.hitmarkers-toggle {
+  background: #FF2952;
+  border-color: #FF2952;
+}
+
 /* Speed graph toggle style */
 .toggle input:checked + .toggle-slider.speedgraph-toggle {
   background: #3B82F6;
@@ -2265,6 +2355,19 @@ a:hover {
   width: 100%;
   margin-top: 16px;
   max-height: 380px;
+}
+
+/* Shot speed toggle style */
+.toggle input:checked + .toggle-slider.shotspeed-toggle {
+  background: #F59E0B;
+  border-color: #F59E0B;
+}
+
+/* Shot speed analysis section */
+.shotspeed-section {
+  width: 100%;
+  margin-top: 16px;
+  max-height: 500px;
 }
 
 /* Slide-fade transition for mini court */

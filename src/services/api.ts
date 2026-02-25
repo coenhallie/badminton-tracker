@@ -994,6 +994,7 @@ export interface PDFExportWithDataConfig {
     detected: boolean
     confidence: number
     court_dimensions?: { width_meters: number; length_meters: number }
+    court_corners?: number[][] | null
   } | null
   shuttle_analytics?: Record<string, unknown> | null
   player_zone_analytics?: Record<string, unknown> | null

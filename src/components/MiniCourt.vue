@@ -35,6 +35,23 @@ interface ShuttlePosition {
   y: number
 }
 
+// Hit marker representing a detected shuttlecock strike location
+interface HitMarker {
+  playerId: number
+  hitNumber: number  // Sequential per player, starting from 1
+  courtX: number     // Court coordinates in meters
+  courtY: number     // Court coordinates in meters
+  frame: number      // Frame number when hit was detected
+}
+
+// Per-player wrist tracking state for hit detection
+interface PlayerWristState {
+  prevLeft: { x: number; y: number; frame: number } | null
+  prevRight: { x: number; y: number; frame: number } | null
+  speeds: number[]   // Recent max wrist speeds (for peak detection)
+  lastHitFrame: number
+}
+
 // Import SkeletonFrame type for trail computation
 import type { SkeletonFrame } from '@/types/analysis'
 
@@ -56,6 +73,7 @@ const props = withDefaults(defineProps<{
   showLabels?: boolean
   showShuttle?: boolean
   showTrails?: boolean
+  showHitMarkers?: boolean
   // Keypoint selection mode
   isKeypointSelectionMode?: boolean
   keypointSelectionCount?: number
@@ -73,6 +91,7 @@ const props = withDefaults(defineProps<{
   showLabels: true,
   showShuttle: true,
   showTrails: true, // Enable trails by default
+  showHitMarkers: true, // Enable hit markers by default
   isKeypointSelectionMode: false,
   keypointSelectionCount: 0,
   maxTrailLength: 100 // Show last 100 positions (~3.3 seconds at 30fps)
@@ -83,148 +102,363 @@ const canvasRef = ref<HTMLCanvasElement | null>(null)
 // PERFORMANCE OPTIMIZATION: Cache the canvas 2D context
 let cachedCtx: CanvasRenderingContext2D | null = null
 
-// PERFORMANCE OPTIMIZATION: Throttle render calls
-let lastRenderTime = 0
-let pendingRenderFrame: number | null = null
-const RENDER_THROTTLE_MS = 33 // ~30fps max
+// =============================================================================
+// SMOOTH ANIMATION: Interpolated player/shuttle positions for fluid rendering
+// =============================================================================
+// The video overlay renders interpolated skeleton data at 60fps via rAF, but
+// MiniCourt receives discrete position updates at ~20-30fps from the parent.
+// To match the video's fluidity, we use exponential smoothing (EMA) to
+// interpolate between position updates, producing buttery-smooth court motion.
+// =============================================================================
 
-// PERFORMANCE OPTIMIZATION: Track last player positions to skip redundant renders
-let lastPlayerHash = ''
+interface SmoothedPlayerPos {
+  courtX: number
+  courtY: number
+  targetCourtX: number
+  targetCourtY: number
+  speed: number
+  targetSpeed: number
+  /** Whether this player is currently recognized (skeleton/bbox detected) */
+  isRecognized: boolean
+  /** Number of consecutive frames the player has NOT been recognized */
+  unrecognizedFrames: number
+}
 
-// Store position history for trails (legacy - only used when skeletonData is not provided)
+interface SmoothedShuttlePos {
+  courtX: number
+  courtY: number
+  targetCourtX: number
+  targetCourtY: number
+}
+
+const smoothedPlayerPositions = new Map<number, SmoothedPlayerPos>()
+let smoothedShuttle: SmoothedShuttlePos | null = null
+let animFrameId: number | null = null
+let lastAnimTime = 0
+// Exponential smoothing speed (higher = faster convergence to target)
+// At 60fps with speed=18, positions converge ~95% within ~165ms
+const SMOOTHING_SPEED = 18
+let isAnimating = false
+
+// =============================================================================
+// PLAYER TRAIL ACCUMULATION from smoothed positions
+// =============================================================================
+// Trails record the actual smoothed court positions used by the player circles,
+// following YOLO26's track_history pattern: append the tracked position each frame.
+// This ensures trails exactly follow the displayed player dots.
+// =============================================================================
 const playerTrails = ref<Map<number, { x: number; y: number }[]>>(new Map())
-const MAX_TRAIL_LENGTH = 30
+let lastTrailFrame = -1
 
 // =============================================================================
-// DYNAMIC TRAIL COMPUTATION from skeleton data
+// HIT DETECTION: Detect shuttlecock strikes from wrist acceleration patterns
 // =============================================================================
-// When skeletonData and currentFrame are provided, compute trails dynamically
-// by looking back through the history of frames up to the current frame.
-// This gives a smooth trail that shows where each player has been.
+// Analyzes wrist keypoint velocity across frames to identify the precise moment
+// each player strikes the shuttlecock. A hit is detected when wrist speed reaches
+// a local maximum (peak) that exceeds a minimum threshold, with a cooldown to
+// prevent double-counting. At each detected contact point, the player's court
+// position is recorded for cumulative marker overlay.
+//
+// COCO keypoint indices: 9 = left_wrist, 10 = right_wrist
 // =============================================================================
+
+const LEFT_WRIST_IDX = 9
+const RIGHT_WRIST_IDX = 10
+
+// Hit detection tuning constants — calibrated to reduce false positives.
+// A genuine badminton stroke produces a wrist speed of 30-80+ px/frame at 30fps/1080p,
+// while normal ready-position arm sway is typically 3-12 px/frame.
+const HIT_DETECTION_CONFIG = {
+  MIN_WRIST_SPEED: 30,       // Minimum pixels/frame for wrist speed peak (raised from 15)
+  PEAK_PROMINENCE: 2.0,      // Peak must be ≥ 2× the baseline (median of window) to qualify
+  DECEL_RATIO: 0.6,          // Speed after peak must drop to ≤ 60% of peak (i.e., ≥40% deceleration)
+  COOLDOWN_FRAMES: 25,       // Min frames between consecutive hits (~0.8s at 30fps)
+  CONFIDENCE_THRESHOLD: 0.3, // Min keypoint confidence to use wrist position
+  MAX_SPEED_HISTORY: 10,     // Number of recent speeds to keep for baseline & peak detection
+} as const
+
+// Pose types that indicate an active stroke (used for cross-referencing)
+const OFFENSIVE_POSE_TYPES = new Set([
+  'smash', 'overhead', 'forehand', 'backhand', 'serving', // skeleton-based
+  'offense', 'smash', 'serve', 'lift', 'backhand-general'  // trained model
+])
+
+// Hit marker colors - vivid, distinct per player (slightly different from trail colors)
+const HIT_MARKER_COLORS = [
+  '#FF2952', // Player 1 - Bright magenta-red
+  '#00E5CC', // Player 2 - Bright cyan-green
+  '#2196F3', // Player 3 - Bright blue
+  '#FFD700', // Player 4 - Gold
+]
+
+// Cumulative hit markers per player
+const hitMarkers = ref<Map<number, HitMarker[]>>(new Map())
+// Per-player sequential hit counter
+const playerHitCounters = new Map<number, number>()
+// Per-player wrist tracking state
+const playerWristStates = new Map<number, PlayerWristState>()
+// Last skeleton frame processed for hit detection
+let lastHitDetectionFrame = -1
 
 /**
- * Compute dynamic player trails from skeleton data up to the current frame
- * Returns a Map of player_id -> array of court positions (in meters)
+ * Record current smoothed player positions into trails.
+ * Called from updateTargetPositions() so trails accumulate at the prop-update rate
+ * (typically ~30fps), matching the pace of the player circle movement.
+ * Like YOLO26's track_history[track_id].append((x, y)), this appends the
+ * actual displayed position for each recognized player.
  */
-const dynamicPlayerTrails = computed((): Map<number, { x: number; y: number }[]> => {
-  const trails = new Map<number, { x: number; y: number }[]>()
+function recordTrailPositions() {
+  if (!props.showTrails) return
   
-  // If no skeleton data or no homography matrix, return empty trails
-  if (!props.skeletonData || props.skeletonData.length === 0 || !homographyMatrix.value) {
-    return trails
-  }
+  // Only record once per frame to avoid duplicates from re-renders
+  const frame = props.currentFrame ?? 0
+  if (frame === lastTrailFrame) return
+  lastTrailFrame = frame
   
-  const currentFrameNum = props.currentFrame ?? 0
   const maxLength = props.maxTrailLength ?? 100
   
-  // Look back through frames to build trails
-  // Start from the frame that gives us maxTrailLength points back
-  const startIdx = Math.max(0, currentFrameNum - maxLength)
-  const endIdx = Math.min(props.skeletonData.length - 1, currentFrameNum)
-  
-  for (let i = startIdx; i <= endIdx; i++) {
-    const frame = props.skeletonData[i]
-    if (!frame?.players) continue
+  for (const [playerId, smoothed] of smoothedPlayerPositions) {
+    // Only record positions for recognized (actively tracked) players
+    if (!smoothed.isRecognized) continue
     
-    for (const player of frame.players) {
-      // Get feet position for accurate court positioning
-      const feetPos = getPlayerFeetPosition(player)
-      if (!feetPos) continue
-      
-      // Transform to court coordinates
-      const courtPos = applyHomography(homographyMatrix.value!, feetPos.x, feetPos.y)
-      if (!courtPos) continue
-      
-      // Check bounds
-      const margin = 1
-      if (courtPos.x < -margin || courtPos.x > COURT_WIDTH + margin ||
-          courtPos.y < -margin || courtPos.y > COURT_LENGTH + margin) {
-        continue
-      }
-      
-      // Add to player's trail
-      let trail = trails.get(player.player_id)
-      if (!trail) {
-        trail = []
-        trails.set(player.player_id, trail)
-      }
-      trail.push({ x: courtPos.x, y: courtPos.y })
+    let trail = playerTrails.value.get(playerId)
+    if (!trail) {
+      trail = []
+      playerTrails.value.set(playerId, trail)
+    }
+    
+    // Append current smoothed court position (same as what drawPlayers renders)
+    trail.push({ x: smoothed.courtX, y: smoothed.courtY })
+    
+    // Keep trail length bounded (like YOLO26's `if len(track) > 30: track.pop(0)`)
+    if (trail.length > maxLength) {
+      trail.splice(0, trail.length - maxLength)
     }
   }
-  
-  return trails
-})
+}
 
 /**
- * Get feet position from player (similar to getFeetPosition but works with FramePlayer type)
+ * Get wrist positions from a player's keypoints.
+ * Returns both left and right wrist positions if available and confident.
  */
-function getPlayerFeetPosition(player: FramePlayer): { x: number; y: number } | null {
-  const LEFT_ANKLE_IDX = 15
-  const RIGHT_ANKLE_IDX = 16
-  const LEFT_KNEE_IDX = 13
-  const RIGHT_KNEE_IDX = 14
-  const LEFT_HIP_IDX = 11
-  const RIGHT_HIP_IDX = 12
-  const CONFIDENCE_THRESHOLD = 0.3
-  
+function getWristPositions(player: import('@/types/analysis').FramePlayer): {
+  left: { x: number; y: number } | null
+  right: { x: number; y: number } | null
+} {
   const keypoints = player.keypoints
+  if (!keypoints || keypoints.length < 11) return { left: null, right: null }
   
-  if (keypoints && keypoints.length >= 17) {
-    const leftAnkle = keypoints[LEFT_ANKLE_IDX]
-    const rightAnkle = keypoints[RIGHT_ANKLE_IDX]
-    
-    // Primary: use ankle midpoint
-    if (leftAnkle && rightAnkle &&
-        leftAnkle.x !== null && leftAnkle.y !== null &&
-        rightAnkle.x !== null && rightAnkle.y !== null &&
-        leftAnkle.confidence > CONFIDENCE_THRESHOLD &&
-        rightAnkle.confidence > CONFIDENCE_THRESHOLD) {
-      return {
-        x: (leftAnkle.x + rightAnkle.x) / 2,
-        y: (leftAnkle.y + rightAnkle.y) / 2
-      }
-    }
-    
-    // Fallback: single ankle
-    if (leftAnkle?.x !== null && leftAnkle?.y !== null && (leftAnkle?.confidence ?? 0) > CONFIDENCE_THRESHOLD) {
-      return { x: leftAnkle!.x!, y: leftAnkle!.y! }
-    }
-    if (rightAnkle?.x !== null && rightAnkle?.y !== null && (rightAnkle?.confidence ?? 0) > CONFIDENCE_THRESHOLD) {
-      return { x: rightAnkle!.x!, y: rightAnkle!.y! }
-    }
-    
-    // Fallback: knees
-    const leftKnee = keypoints[LEFT_KNEE_IDX]
-    const rightKnee = keypoints[RIGHT_KNEE_IDX]
-    if (leftKnee && rightKnee &&
-        leftKnee.x !== null && leftKnee.y !== null &&
-        rightKnee.x !== null && rightKnee.y !== null &&
-        leftKnee.confidence > CONFIDENCE_THRESHOLD &&
-        rightKnee.confidence > CONFIDENCE_THRESHOLD) {
-      return {
-        x: (leftKnee.x + rightKnee.x) / 2,
-        y: (leftKnee.y + rightKnee.y) / 2
-      }
-    }
-    
-    // Fallback: hips
-    const leftHip = keypoints[LEFT_HIP_IDX]
-    const rightHip = keypoints[RIGHT_HIP_IDX]
-    if (leftHip && rightHip &&
-        leftHip.x !== null && leftHip.y !== null &&
-        rightHip.x !== null && rightHip.y !== null &&
-        leftHip.confidence > CONFIDENCE_THRESHOLD &&
-        rightHip.confidence > CONFIDENCE_THRESHOLD) {
-      return {
-        x: (leftHip.x + rightHip.x) / 2,
-        y: (leftHip.y + rightHip.y) / 2
+  const threshold = HIT_DETECTION_CONFIG.CONFIDENCE_THRESHOLD
+  const leftWrist = keypoints[LEFT_WRIST_IDX]
+  const rightWrist = keypoints[RIGHT_WRIST_IDX]
+  
+  return {
+    left: (leftWrist && leftWrist.x !== null && leftWrist.y !== null && leftWrist.confidence > threshold)
+      ? { x: leftWrist.x, y: leftWrist.y } : null,
+    right: (rightWrist && rightWrist.x !== null && rightWrist.y !== null && rightWrist.confidence > threshold)
+      ? { x: rightWrist.x, y: rightWrist.y } : null
+  }
+}
+
+/**
+ * Compute distance between two 2D points, normalized by frame gap.
+ * Returns speed in pixels per frame.
+ */
+function computeWristSpeed(
+  prev: { x: number; y: number; frame: number },
+  curr: { x: number; y: number; frame: number }
+): number {
+  const dx = curr.x - prev.x
+  const dy = curr.y - prev.y
+  const dist = Math.sqrt(dx * dx + dy * dy)
+  const frameGap = Math.max(1, curr.frame - prev.frame)
+  return dist / frameGap
+}
+
+/**
+ * Compute the median of a numeric array (for robust baseline estimation).
+ */
+function median(arr: number[]): number {
+  if (arr.length === 0) return 0
+  const sorted = [...arr].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 !== 0 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2
+}
+
+/**
+ * Check if the player's current pose classification suggests an active stroke.
+ * Uses both skeleton-based pose and trained model classifications.
+ */
+function isOffensivePose(player: import('@/types/analysis').FramePlayer, skFrame: import('@/types/analysis').SkeletonFrame): boolean {
+  // Check skeleton-based pose
+  if (player.pose?.pose_type && OFFENSIVE_POSE_TYPES.has(player.pose.pose_type)) {
+    return true
+  }
+  // Check trained model classifications (matched by position proximity)
+  if (skFrame.pose_classifications) {
+    for (const pc of skFrame.pose_classifications) {
+      if (OFFENSIVE_POSE_TYPES.has(pc.class_name) && pc.confidence > 0.4) {
+        return true
       }
     }
   }
+  return false
+}
+
+/**
+ * Process skeleton frames to detect shuttlecock strikes up to the current frame.
+ *
+ * Multi-layered detection to minimize false positives:
+ * 1. Velocity peak: wrist speed local max (speed[n-1] > both neighbors)
+ * 2. Absolute threshold: peak speed > MIN_WRIST_SPEED (30 px/frame)
+ * 3. Prominence: peak > PEAK_PROMINENCE × baseline median (filters out oscillations)
+ * 4. Deceleration: speed must drop to ≤ DECEL_RATIO of peak (confirms stroke follow-through)
+ * 5. Cooldown: minimum frames between hits per player
+ * 6. Pose cross-reference: offensive pose lowers threshold by 20% (optional signal boost)
+ *
+ * Processes incrementally — only new frames since last call.
+ * Returns true if new hits were detected.
+ */
+function detectHits(): boolean {
+  if (!props.skeletonData || props.skeletonData.length === 0) return false
+  if (props.currentFrame === undefined) return false
   
-  // Final fallback: use player center
-  return player.center || null
+  const H = homographyMatrix.value
+  if (!H) return false
+  
+  const targetFrame = props.currentFrame
+  let newHitsDetected = false
+  
+  for (const skFrame of props.skeletonData) {
+    if (skFrame.frame <= lastHitDetectionFrame) continue
+    if (skFrame.frame > targetFrame) break
+    
+    for (const player of skFrame.players) {
+      const wrists = getWristPositions(player)
+      if (!wrists.left && !wrists.right) continue
+      
+      // Get or create wrist state for this player
+      let state = playerWristStates.get(player.player_id)
+      if (!state) {
+        state = {
+          prevLeft: null,
+          prevRight: null,
+          speeds: [],
+          lastHitFrame: -100
+        }
+        playerWristStates.set(player.player_id, state)
+      }
+      
+      // Compute speed of each wrist independently, take max (racket hand)
+      let leftSpeed = 0
+      let rightSpeed = 0
+      
+      if (wrists.left && state.prevLeft) {
+        leftSpeed = computeWristSpeed(state.prevLeft, { ...wrists.left, frame: skFrame.frame })
+      }
+      if (wrists.right && state.prevRight) {
+        rightSpeed = computeWristSpeed(state.prevRight, { ...wrists.right, frame: skFrame.frame })
+      }
+      
+      const maxSpeed = Math.max(leftSpeed, rightSpeed)
+      
+      // Update previous wrist positions
+      if (wrists.left) state.prevLeft = { ...wrists.left, frame: skFrame.frame }
+      if (wrists.right) state.prevRight = { ...wrists.right, frame: skFrame.frame }
+      
+      // Record speed for peak detection
+      state.speeds.push(maxSpeed)
+      if (state.speeds.length > HIT_DETECTION_CONFIG.MAX_SPEED_HISTORY) {
+        state.speeds.shift()
+      }
+      
+      // Need at least 4 speed values for robust peak detection (previous, peak, current, + baseline)
+      if (state.speeds.length < 4) continue
+      
+      const n = state.speeds.length
+      const currSpeed = state.speeds[n - 1]!    // Current frame speed (after suspected peak)
+      const peakSpeed = state.speeds[n - 2]!    // Suspected peak
+      const prePeakSpeed = state.speeds[n - 3]! // Speed before the peak
+      
+      // --- Layer 1: Velocity peak (local maximum) ---
+      const isPeak = peakSpeed > currSpeed && peakSpeed > prePeakSpeed
+      if (!isPeak) continue
+      
+      // --- Layer 2: Absolute speed threshold ---
+      // If the player is in an offensive pose, lower threshold by 20%
+      const hasOffensivePose = isOffensivePose(player, skFrame)
+      const effectiveThreshold = hasOffensivePose
+        ? HIT_DETECTION_CONFIG.MIN_WRIST_SPEED * 0.8
+        : HIT_DETECTION_CONFIG.MIN_WRIST_SPEED
+      
+      if (peakSpeed < effectiveThreshold) continue
+      
+      // --- Layer 3: Peak prominence above baseline ---
+      // Compute baseline as the median of all speeds in the window (excluding the peak itself)
+      const baselineSpeeds = [...state.speeds.slice(0, n - 2), ...state.speeds.slice(n - 1)]
+      const baselineMedian = median(baselineSpeeds)
+      const prominenceOk = baselineMedian < 1 || (peakSpeed >= baselineMedian * HIT_DETECTION_CONFIG.PEAK_PROMINENCE)
+      if (!prominenceOk) continue
+      
+      // --- Layer 4: Significant deceleration after peak ---
+      // The current speed (post-peak) must have dropped substantially
+      const decelOk = currSpeed <= peakSpeed * HIT_DETECTION_CONFIG.DECEL_RATIO
+      if (!decelOk) continue
+      
+      // --- Layer 5: Cooldown between hits ---
+      const cooldownPassed = (skFrame.frame - state.lastHitFrame) >= HIT_DETECTION_CONFIG.COOLDOWN_FRAMES
+      if (!cooldownPassed) continue
+      
+      // All checks passed — register hit
+      const feetPos = getFeetPosition(player)
+      if (!feetPos) continue
+      
+      const courtPos = applyHomography(H, feetPos.x, feetPos.y)
+      if (!courtPos) continue
+      
+      // Bounds check (allow small margin for near-boundary hits)
+      if (courtPos.x < -1 || courtPos.x > COURT_WIDTH + 1 ||
+          courtPos.y < -1 || courtPos.y > COURT_LENGTH + 1) continue
+      
+      // Increment sequential hit counter for this player
+      let hitCount = playerHitCounters.get(player.player_id) ?? 0
+      hitCount++
+      playerHitCounters.set(player.player_id, hitCount)
+      
+      // Create and store hit marker
+      const marker: HitMarker = {
+        playerId: player.player_id,
+        hitNumber: hitCount,
+        courtX: courtPos.x,
+        courtY: courtPos.y,
+        frame: skFrame.frame
+      }
+      
+      let playerMarkers = hitMarkers.value.get(player.player_id)
+      if (!playerMarkers) {
+        playerMarkers = []
+        hitMarkers.value.set(player.player_id, playerMarkers)
+      }
+      playerMarkers.push(marker)
+      
+      state.lastHitFrame = skFrame.frame
+      newHitsDetected = true
+    }
+    
+    lastHitDetectionFrame = skFrame.frame
+  }
+  
+  return newHitsDetected
+}
+
+/**
+ * Reset all hit detection state (e.g., on seek backward or new analysis).
+ */
+function resetHitDetection() {
+  hitMarkers.value.clear()
+  playerHitCounters.clear()
+  playerWristStates.clear()
+  lastHitDetectionFrame = -1
 }
 
 // Court dimensions in meters (standard badminton court)
@@ -787,22 +1021,19 @@ function drawCourt(ctx: CanvasRenderingContext2D) {
 
 /**
  * Draw player trails (position history)
- * Uses dynamicPlayerTrails when skeletonData is available, otherwise falls back to legacy playerTrails
+ * Uses accumulated smoothed positions that match the actual player circle positions.
+ * This follows YOLO26's track visualization pattern: draw polylines from track_history.
  */
 function drawPlayerTrails(ctx: CanvasRenderingContext2D) {
   if (!props.showTrails) return
   
-  // Use dynamic trails from skeleton data if available, otherwise use legacy trails
-  const trails = props.skeletonData && props.skeletonData.length > 0
-    ? dynamicPlayerTrails.value
-    : playerTrails.value
+  const trails = playerTrails.value
   
   trails.forEach((trail, playerId) => {
     if (trail.length < 2) return
     
-    // Use player index for consistent coloring
-    const colorIndex = playerId - 1 // player_id is 1-based
-    const color = PLAYER_COLORS[colorIndex >= 0 ? colorIndex % PLAYER_COLORS.length : 0] ?? '#FF6B6B'
+    // Use same color mapping as drawPlayers (player_id is 0-based)
+    const color = PLAYER_COLORS[playerId % PLAYER_COLORS.length] ?? '#FF6B6B'
     
     // Draw trail as a gradient line that fades from old to new
     ctx.lineCap = 'round'
@@ -855,6 +1086,73 @@ function hexToRgba(hex: string, alpha: number): string {
   const g = parseInt(cleanHex.substring(2, 4), 16)
   const b = parseInt(cleanHex.substring(4, 6), 16)
   return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
+/**
+ * Draw cumulative hit markers on the court.
+ * Each marker is a small circle at the court position where a hit was detected,
+ * labeled with a sequential number per player. All previous markers persist on
+ * screen to build a spatial history of strike locations.
+ */
+function drawHitMarkers(ctx: CanvasRenderingContext2D) {
+  if (!props.showHitMarkers) return
+  
+  const markers = hitMarkers.value
+  if (markers.size === 0) return
+  
+  ctx.save()
+  
+  for (const [playerId, playerMarkers] of markers) {
+    const color = HIT_MARKER_COLORS[playerId % HIT_MARKER_COLORS.length] ?? '#FF2952'
+    
+    for (const marker of playerMarkers) {
+      const canvasPos = courtToCanvas(marker.courtX, marker.courtY)
+      
+      // Outer glow ring
+      ctx.beginPath()
+      ctx.arc(canvasPos.x, canvasPos.y, 9, 0, Math.PI * 2)
+      ctx.fillStyle = hexToRgba(color, 0.15)
+      ctx.fill()
+      
+      // Outer ring (stroke)
+      ctx.beginPath()
+      ctx.arc(canvasPos.x, canvasPos.y, 8, 0, Math.PI * 2)
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+      
+      // Filled inner circle
+      ctx.beginPath()
+      ctx.arc(canvasPos.x, canvasPos.y, 6, 0, Math.PI * 2)
+      ctx.fillStyle = hexToRgba(color, 0.75)
+      ctx.fill()
+      
+      // White border for legibility
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)'
+      ctx.lineWidth = 0.5
+      ctx.stroke()
+      
+      // Hit number label (sequential per player)
+      ctx.font = 'bold 7px Inter, sans-serif'
+      ctx.fillStyle = '#FFFFFF'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(`${marker.hitNumber}`, canvasPos.x, canvasPos.y)
+    }
+  }
+  
+  ctx.restore()
+}
+
+/**
+ * Get the total number of detected hits across all players (for legend display).
+ */
+function getTotalHitCount(): number {
+  let total = 0
+  for (const [, markers] of hitMarkers.value) {
+    total += markers.length
+  }
+  return total
 }
 
 /**
@@ -932,66 +1230,33 @@ function getFeetPosition(player: FramePlayer): { x: number; y: number } | null {
   return player.center || null
 }
 
+// Color used when a player is not recognized (gray/muted)
+const UNRECOGNIZED_COLOR = '#888888'
+
 /**
- * Draw players on the court
+ * Draw players on the court using smoothed positions for fluid motion.
+ * Reads from smoothedPlayerPositions map which is updated by the animation loop.
+ * Players not currently recognized are shown with a gray circle at their last known position.
  */
 function drawPlayers(ctx: CanvasRenderingContext2D) {
-  if (!props.players || props.players.length === 0) return
+  if (smoothedPlayerPositions.size === 0) return
   
-  props.players.forEach((player) => {
-    // Get feet position (or fallback to center)
-    const feetPos = getFeetPosition(player)
-    if (!feetPos) return
+  for (const [playerId, smoothed] of smoothedPlayerPositions) {
+    // Convert smoothed court coordinates to canvas coordinates
+    const canvasPos = courtToCanvas(smoothed.courtX, smoothed.courtY)
     
-    // Transform pixel position to court coordinates
-    const courtPos = transformPlayerPosition(feetPos.x, feetPos.y)
-    if (!courtPos) {
-      if (DEBUG_MODE) {
-        console.log('[MiniCourt] Player', player.player_id, 'transform failed for position:', feetPos)
-      }
-      return
-    }
-    
-    if (DEBUG_MODE) {
-      console.log('[MiniCourt] Player', player.player_id,
-        'feet pos:', `(${feetPos.x.toFixed(0)}, ${feetPos.y.toFixed(0)})`,
-        '-> court pos:', `(${courtPos.x.toFixed(2)}m, ${courtPos.y.toFixed(2)}m)`)
-    }
-    
-    // Check if position is within court bounds (with some margin)
-    const margin = 2 // meters
-    if (courtPos.x < -margin || courtPos.x > COURT_WIDTH + margin ||
-        courtPos.y < -margin || courtPos.y > COURT_LENGTH + margin) {
-      if (DEBUG_MODE) {
-        console.log('[MiniCourt] Player', player.player_id, 'outside bounds, skipping')
-      }
-      return // Skip players outside the court
-    }
-    
-    // Update trail
-    if (props.showTrails) {
-      const trail = playerTrails.value.get(player.player_id) ?? []
-      trail.push({ x: courtPos.x, y: courtPos.y })
-      if (trail.length > MAX_TRAIL_LENGTH) {
-        trail.shift()
-      }
-      playerTrails.value.set(player.player_id, trail)
-    }
-    
-    // Convert to canvas coordinates
-    const canvasPos = courtToCanvas(courtPos.x, courtPos.y)
-    
-    // Player color - use player_id for consistent coloring across frames
-    const color = PLAYER_COLORS[player.player_id % PLAYER_COLORS.length] ?? '#FF6B6B'
+    // Use gray when not recognized, normal player color when recognized
+    const normalColor = PLAYER_COLORS[playerId % PLAYER_COLORS.length] ?? '#FF6B6B'
+    const color = smoothed.isRecognized ? normalColor : UNRECOGNIZED_COLOR
     
     // Draw player circle with glow effect
     ctx.shadowColor = color
-    ctx.shadowBlur = 10
+    ctx.shadowBlur = smoothed.isRecognized ? 10 : 4
     
     // Outer glow
     ctx.beginPath()
     ctx.arc(canvasPos.x, canvasPos.y, 14, 0, Math.PI * 2)
-    ctx.fillStyle = color + '40'
+    ctx.fillStyle = smoothed.isRecognized ? (color + '40') : 'rgba(136, 136, 136, 0.15)'
     ctx.fill()
     
     // Main circle
@@ -999,45 +1264,45 @@ function drawPlayers(ctx: CanvasRenderingContext2D) {
     ctx.arc(canvasPos.x, canvasPos.y, 10, 0, Math.PI * 2)
     ctx.fillStyle = color
     ctx.fill()
-    ctx.strokeStyle = '#FFFFFF'
+    
+    // Dashed border for unrecognized players, solid for recognized
+    if (!smoothed.isRecognized) {
+      ctx.setLineDash([3, 3])
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)'
+    } else {
+      ctx.setLineDash([])
+      ctx.strokeStyle = '#FFFFFF'
+    }
     ctx.lineWidth = 2
     ctx.stroke()
+    ctx.setLineDash([])
     
     ctx.shadowBlur = 0
     
     // Player label (player_id is 0-indexed, display as 1-indexed: Player 1, Player 2)
     ctx.font = 'bold 11px Inter, sans-serif'
-    ctx.fillStyle = '#FFFFFF'
+    ctx.fillStyle = smoothed.isRecognized ? '#FFFFFF' : 'rgba(255, 255, 255, 0.7)'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(`P${player.player_id + 1}`, canvasPos.x, canvasPos.y)
+    ctx.fillText(`P${playerId + 1}`, canvasPos.x, canvasPos.y)
     
-    // Speed indicator below player
-    if (player.current_speed !== undefined && player.current_speed > 0) {
+    // Speed indicator below player (only when recognized and moving)
+    if (smoothed.isRecognized && smoothed.speed > 0.1) {
       ctx.font = '9px Inter, sans-serif'
       ctx.fillStyle = 'rgba(255, 255, 255, 0.8)'
-      ctx.fillText(`${player.current_speed.toFixed(1)} km/h`, canvasPos.x, canvasPos.y + 20)
+      ctx.fillText(`${smoothed.speed.toFixed(1)} km/h`, canvasPos.x, canvasPos.y + 20)
     }
-  })
+  }
 }
 
 /**
  * Draw shuttle position
  */
 function drawShuttle(ctx: CanvasRenderingContext2D) {
-  if (!props.showShuttle || !props.shuttlePosition) return
+  if (!props.showShuttle || !smoothedShuttle) return
   
-  // Transform shuttle position
-  const courtPos = transformPlayerPosition(props.shuttlePosition.x, props.shuttlePosition.y)
-  if (!courtPos) return
-  
-  // Check bounds
-  if (courtPos.x < -1 || courtPos.x > COURT_WIDTH + 1 ||
-      courtPos.y < -1 || courtPos.y > COURT_LENGTH + 1) {
-    return
-  }
-  
-  const canvasPos = courtToCanvas(courtPos.x, courtPos.y)
+  // Use smoothed shuttle position for fluid motion
+  const canvasPos = courtToCanvas(smoothedShuttle.courtX, smoothedShuttle.courtY)
   
   // Draw shuttle as orange diamond
   ctx.save()
@@ -1165,46 +1430,327 @@ function drawNoCourtMessage(ctx: CanvasRenderingContext2D) {
   ctx.fillText('wait for automatic detection', props.width / 2, cHeight / 2 + 22)
 }
 
+// =============================================================================
+// SMOOTH ANIMATION LOOP
+// =============================================================================
+
 /**
- * Compute a simple hash of player positions to detect changes
+ * Update target positions from current props.
+ * Transforms video-space player/shuttle positions to court-space targets.
+ * Called when player/shuttle props change.
  */
-function computePlayerHash(): string {
-  if (!props.players || props.players.length === 0) return ''
-  return props.players.map(p =>
-    `${p.player_id}:${p.center?.x?.toFixed(1) ?? ''}:${p.center?.y?.toFixed(1) ?? ''}`
-  ).join('|')
+// Maximum consecutive unrecognized frames before removing a player from the court
+const MAX_UNRECOGNIZED_FRAMES = 300 // ~10 seconds at 30fps
+
+// Minimum distance (in court meters) between two players to accept a position update.
+// If a player's new position is closer than this to another player, it's likely a
+// misassignment from the detection system and the update is rejected.
+const MIN_PLAYER_DISTANCE = 0.8 // meters (~0.8m, players can't realistically overlap)
+
+// Maximum distance a player can move per frame (in court meters).
+// At 30fps, a player sprinting at ~25 km/h covers ~0.23m per frame.
+// We use a generous threshold to allow lunges/dives but reject teleportation.
+const MAX_JUMP_PER_FRAME = 1.0 // meters per frame
+
+/**
+ * Squared distance helper
+ */
+function distSq(x1: number, y1: number, x2: number, y2: number): number {
+  return (x1 - x2) ** 2 + (y1 - y2) ** 2
+}
+
+function updateTargetPositions() {
+  const H = homographyMatrix.value
+  if (!H) return
+  
+  // Update player targets
+  if (props.players && props.players.length > 0) {
+    const activeIds = new Set<number>()
+    
+    // Phase 1: Compute candidate court positions for all detected players
+    const candidates: { playerId: number; courtX: number; courtY: number; speed: number }[] = []
+    
+    for (const player of props.players) {
+      const feetPos = getFeetPosition(player)
+      if (!feetPos) continue
+      
+      const courtPos = applyHomography(H, feetPos.x, feetPos.y)
+      if (!courtPos) continue
+      
+      // Bounds check - if out of bounds, treat as unrecognized (likely bad detection)
+      const margin = 2
+      if (courtPos.x < -margin || courtPos.x > COURT_WIDTH + margin ||
+          courtPos.y < -margin || courtPos.y > COURT_LENGTH + margin) {
+        continue
+      }
+      
+      candidates.push({
+        playerId: player.player_id,
+        courtX: courtPos.x,
+        courtY: courtPos.y,
+        speed: player.current_speed ?? 0
+      })
+    }
+    
+    // Phase 2: Detect and fix ID swaps + proximity conflicts
+    // An ID swap is when the detector temporarily assigns P1's position to P2 and vice versa.
+    // We detect this by comparing "normal" vs "swapped" assignment costs for each pair.
+    const rejectedIds = new Set<number>()
+    
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const a = candidates[i]!
+        const b = candidates[j]!
+        
+        const existingA = smoothedPlayerPositions.get(a.playerId)
+        const existingB = smoothedPlayerPositions.get(b.playerId)
+        
+        // --- Proximity check: two candidates landing on the same spot ---
+        const pairDist = Math.sqrt(distSq(a.courtX, a.courtY, b.courtX, b.courtY))
+        if (pairDist < MIN_PLAYER_DISTANCE) {
+          if (existingA && existingB) {
+            const moveA = Math.sqrt(distSq(a.courtX, a.courtY, existingA.courtX, existingA.courtY))
+            const moveB = Math.sqrt(distSq(b.courtX, b.courtY, existingB.courtX, existingB.courtY))
+            rejectedIds.add(moveA > moveB ? a.playerId : b.playerId)
+          } else if (existingA) {
+            rejectedIds.add(b.playerId)
+          } else if (existingB) {
+            rejectedIds.add(a.playerId)
+          }
+          continue
+        }
+        
+        // --- ID swap detection: check if swapping IDs gives a better fit ---
+        if (existingA && existingB) {
+          // Normal assignment cost: A→A_old + B→B_old
+          const normalCost = Math.sqrt(distSq(a.courtX, a.courtY, existingA.courtX, existingA.courtY))
+                           + Math.sqrt(distSq(b.courtX, b.courtY, existingB.courtX, existingB.courtY))
+          
+          // Swapped assignment cost: A→B_old + B→A_old
+          const swappedCost = Math.sqrt(distSq(a.courtX, a.courtY, existingB.courtX, existingB.courtY))
+                            + Math.sqrt(distSq(b.courtX, b.courtY, existingA.courtX, existingA.courtY))
+          
+          // If swapped assignment is significantly better, it's an ID swap
+          // The swapped cost must be less than half the normal cost to trigger
+          // (this avoids false positives when players are near each other legitimately)
+          if (swappedCost < normalCost * 0.5) {
+            // ID swap detected - reject both updates, keep last known positions
+            rejectedIds.add(a.playerId)
+            rejectedIds.add(b.playerId)
+          }
+        }
+      }
+    }
+    
+    // Phase 2b: Single-player jump check
+    // Reject any player whose position jumped unrealistically far in one frame
+    for (const candidate of candidates) {
+      if (rejectedIds.has(candidate.playerId)) continue
+      
+      const existing = smoothedPlayerPositions.get(candidate.playerId)
+      if (existing && existing.isRecognized) {
+        const jumpDist = Math.sqrt(distSq(
+          candidate.courtX, candidate.courtY,
+          existing.courtX, existing.courtY
+        ))
+        if (jumpDist > MAX_JUMP_PER_FRAME) {
+          rejectedIds.add(candidate.playerId)
+        }
+      }
+    }
+    
+    // Phase 3: Apply accepted candidate positions
+    for (const candidate of candidates) {
+      if (rejectedIds.has(candidate.playerId)) continue
+      
+      // Mark this player as successfully recognized in this frame
+      activeIds.add(candidate.playerId)
+      
+      const existing = smoothedPlayerPositions.get(candidate.playerId)
+      if (existing) {
+        // Update target - animation loop will smoothly interpolate
+        existing.targetCourtX = candidate.courtX
+        existing.targetCourtY = candidate.courtY
+        existing.targetSpeed = candidate.speed
+        existing.isRecognized = true
+        existing.unrecognizedFrames = 0
+      } else {
+        // New player - snap to position immediately (no lag on first appearance)
+        smoothedPlayerPositions.set(candidate.playerId, {
+          courtX: candidate.courtX,
+          courtY: candidate.courtY,
+          targetCourtX: candidate.courtX,
+          targetCourtY: candidate.courtY,
+          speed: candidate.speed,
+          targetSpeed: candidate.speed,
+          isRecognized: true,
+          unrecognizedFrames: 0
+        })
+      }
+    }
+    
+    // For players no longer recognized: keep last position, mark as unrecognized
+    for (const [id, pos] of smoothedPlayerPositions) {
+      if (!activeIds.has(id)) {
+        pos.isRecognized = false
+        pos.unrecognizedFrames++
+        // Freeze position: set target to current so smoothing stops
+        pos.targetCourtX = pos.courtX
+        pos.targetCourtY = pos.courtY
+        pos.targetSpeed = 0
+        pos.speed = 0
+        
+        // Remove player after being unrecognized for too long
+        if (pos.unrecognizedFrames > MAX_UNRECOGNIZED_FRAMES) {
+          smoothedPlayerPositions.delete(id)
+        }
+      }
+    }
+  } else {
+    // No players at all - mark all as unrecognized but keep their positions
+    for (const [id, pos] of smoothedPlayerPositions) {
+      pos.isRecognized = false
+      pos.unrecognizedFrames++
+      pos.targetCourtX = pos.courtX
+      pos.targetCourtY = pos.courtY
+      pos.targetSpeed = 0
+      pos.speed = 0
+      
+      if (pos.unrecognizedFrames > MAX_UNRECOGNIZED_FRAMES) {
+        smoothedPlayerPositions.delete(id)
+      }
+    }
+  }
+  
+  // Update shuttle target
+  if (props.shuttlePosition && props.showShuttle) {
+    const courtPos = applyHomography(H, props.shuttlePosition.x, props.shuttlePosition.y)
+    if (courtPos &&
+        courtPos.x >= -1 && courtPos.x <= COURT_WIDTH + 1 &&
+        courtPos.y >= -1 && courtPos.y <= COURT_LENGTH + 1) {
+      if (smoothedShuttle) {
+        smoothedShuttle.targetCourtX = courtPos.x
+        smoothedShuttle.targetCourtY = courtPos.y
+      } else {
+        smoothedShuttle = {
+          courtX: courtPos.x,
+          courtY: courtPos.y,
+          targetCourtX: courtPos.x,
+          targetCourtY: courtPos.y
+        }
+      }
+    }
+  } else {
+    smoothedShuttle = null
+  }
+  
+  // Record smoothed positions into trails (follows YOLO26 track_history pattern)
+  recordTrailPositions()
+  
+  // Run hit detection on skeleton data up to current frame
+  if (props.showHitMarkers) {
+    detectHits()
+  }
 }
 
 /**
- * Main render function with throttling
- * PERFORMANCE OPTIMIZATION: Throttles renders to ~30fps and skips
- * redundant renders when player positions haven't changed
+ * Interpolate smoothed positions toward targets using exponential smoothing.
+ * Returns true if any position was updated (requires re-render).
  */
-function render(force = false) {
+function interpolatePositions(deltaTime: number): boolean {
+  let anyMoved = false
+  const factor = 1 - Math.exp(-SMOOTHING_SPEED * deltaTime)
+  
+  for (const [, pos] of smoothedPlayerPositions) {
+    const dx = pos.targetCourtX - pos.courtX
+    const dy = pos.targetCourtY - pos.courtY
+    const ds = pos.targetSpeed - pos.speed
+    
+    if (Math.abs(dx) > 0.002 || Math.abs(dy) > 0.002) {
+      pos.courtX += dx * factor
+      pos.courtY += dy * factor
+      pos.speed += ds * factor
+      anyMoved = true
+    } else {
+      // Snap to target when close enough to avoid endless micro-updates
+      pos.courtX = pos.targetCourtX
+      pos.courtY = pos.targetCourtY
+      pos.speed = pos.targetSpeed
+    }
+  }
+  
+  if (smoothedShuttle) {
+    const dx = smoothedShuttle.targetCourtX - smoothedShuttle.courtX
+    const dy = smoothedShuttle.targetCourtY - smoothedShuttle.courtY
+    
+    if (Math.abs(dx) > 0.002 || Math.abs(dy) > 0.002) {
+      smoothedShuttle.courtX += dx * factor
+      smoothedShuttle.courtY += dy * factor
+      anyMoved = true
+    } else {
+      smoothedShuttle.courtX = smoothedShuttle.targetCourtX
+      smoothedShuttle.courtY = smoothedShuttle.targetCourtY
+    }
+  }
+  
+  return anyMoved
+}
+
+/**
+ * Animation loop for smooth position rendering.
+ * Runs via requestAnimationFrame, interpolating positions each display frame.
+ * Automatically stops when all positions have converged to save CPU.
+ */
+function animationLoop(timestamp: number) {
+  if (!isAnimating) return
+  
+  const deltaTime = lastAnimTime > 0
+    ? Math.min((timestamp - lastAnimTime) / 1000, 0.05) // Cap at 50ms to avoid huge jumps
+    : 1 / 60
+  lastAnimTime = timestamp
+  
+  const moved = interpolatePositions(deltaTime)
+  if (moved) {
+    renderFrame()
+    animFrameId = requestAnimationFrame(animationLoop)
+  } else {
+    // All positions converged - stop loop to save CPU
+    // Will restart when new target positions arrive
+    isAnimating = false
+    animFrameId = null
+  }
+}
+
+/**
+ * Start the smooth animation loop (idempotent)
+ */
+function startAnimLoop() {
+  if (isAnimating) return
+  isAnimating = true
+  lastAnimTime = 0
+  animFrameId = requestAnimationFrame(animationLoop)
+}
+
+/**
+ * Stop the smooth animation loop
+ */
+function stopAnimLoop() {
+  isAnimating = false
+  if (animFrameId !== null) {
+    cancelAnimationFrame(animFrameId)
+    animFrameId = null
+  }
+}
+
+/**
+ * Render a single frame - draws court, trails, players, and shuttle.
+ * Called from the animation loop for smooth rendering, or directly when config changes.
+ */
+function renderFrame() {
   const canvas = canvasRef.value
   if (!canvas) return
   
-  // PERFORMANCE OPTIMIZATION: Skip render if positions haven't changed
-  // But always render in keypoint selection mode
-  const currentHash = computePlayerHash()
-  if (!force && !props.isKeypointSelectionMode && currentHash === lastPlayerHash) return
-  lastPlayerHash = currentHash
-  
-  // PERFORMANCE OPTIMIZATION: Throttle render calls
-  const now = performance.now()
-  if (!force && now - lastRenderTime < RENDER_THROTTLE_MS) {
-    // Schedule a render for later if not already pending
-    if (pendingRenderFrame === null) {
-      pendingRenderFrame = requestAnimationFrame(() => {
-        pendingRenderFrame = null
-        render(true)
-      })
-    }
-    return
-  }
-  lastRenderTime = now
-  
-  // PERFORMANCE OPTIMIZATION: Cache canvas context
+  // Cache canvas context
   if (!cachedCtx) {
     cachedCtx = canvas.getContext('2d', {
       alpha: true,
@@ -1223,19 +1769,20 @@ function render(force = false) {
   
   // In keypoint selection mode, show the keypoint guide overlay
   if (props.isKeypointSelectionMode) {
-    // Draw keypoint selection guide on top
     drawKeypointSelectionGuide(ctx)
     return
   }
   
   // Only draw players/trails/shuttle when we have valid court corners for tracking
   if (!effectiveCourtCorners.value) {
-    // No court corners - show the court but no player tracking
     return
   }
   
   // Draw player trails
   drawPlayerTrails(ctx)
+  
+  // Draw cumulative hit markers (below players, above trails)
+  drawHitMarkers(ctx)
   
   // Draw shuttle
   drawShuttle(ctx)
@@ -1244,56 +1791,89 @@ function render(force = false) {
   drawPlayers(ctx)
 }
 
-// Watch for changes and re-render
+/**
+ * Full render: update targets from current props, then draw.
+ * Used for initial render and when non-positional config changes.
+ */
+function render() {
+  updateTargetPositions()
+  renderFrame()
+}
+
+// =============================================================================
+// WATCHERS
+// =============================================================================
+
+// Watch for player/shuttle position changes → update targets & start animating
+watch([() => props.players, () => props.shuttlePosition], () => {
+  updateTargetPositions()
+  // Start animation loop if we have data to animate
+  if (smoothedPlayerPositions.size > 0 || smoothedShuttle) {
+    startAnimLoop()
+  }
+  // Also render immediately for responsiveness
+  renderFrame()
+}, { deep: true })
+
+// Watch for court/display config changes → full re-render
 watch([
-  () => props.players,
   () => props.courtCorners,
   () => props.manualKeypoints,
-  () => props.shuttlePosition,
   () => props.showGrid,
   () => props.showLabels,
   () => props.showShuttle,
   () => props.showTrails,
+  () => props.showHitMarkers,
   () => props.isKeypointSelectionMode,
   () => props.keypointSelectionCount,
   () => props.height,
   () => props.width,
-  () => props.currentFrame,  // Re-render when frame changes for dynamic trails
-  () => props.skeletonData   // Re-render when skeleton data changes
+  () => props.skeletonData
 ], () => {
-  // Reset cached context when dimensions change
+  // Reset cached context when dimensions or court data change
   cachedCtx = null
-  render(true) // Force render when props change
+  // Re-compute targets in case homography changed
+  updateTargetPositions()
+  renderFrame()
 }, { deep: true })
 
-// Optimized watch for currentFrame changes (high frequency during playback)
-// Use a separate watcher with throttling for smooth trail updates
-watch(() => props.currentFrame, () => {
-  // Don't force render, let the throttle in render() handle it
-  render(false)
+// Watch for frame changes — clear trails on seek (backward jump)
+watch(() => props.currentFrame, (newFrame, oldFrame) => {
+  // Detect seeking backward: clear accumulated trails and hit markers
+  if (oldFrame !== undefined && newFrame !== undefined && newFrame < oldFrame - 1) {
+    playerTrails.value.clear()
+    lastTrailFrame = -1
+    // Reset hit detection so markers are recomputed from frame 0 to new position
+    resetHitDetection()
+  }
+  if (props.showTrails || props.showHitMarkers) {
+    renderFrame()
+  }
 })
 
 // Initial render
 onMounted(() => {
-  render(true)
+  updateTargetPositions()
+  renderFrame()
 })
 
 // Cleanup
 onUnmounted(() => {
   playerTrails.value.clear()
-  // Cancel any pending render
-  if (pendingRenderFrame !== null) {
-    cancelAnimationFrame(pendingRenderFrame)
-    pendingRenderFrame = null
-  }
-  // Clear cached context
+  resetHitDetection()
+  stopAnimLoop()
+  smoothedPlayerPositions.clear()
+  smoothedShuttle = null
   cachedCtx = null
 })
 
 // Expose for parent components
 defineExpose({
-  render,
-  clearTrails: () => playerTrails.value.clear()
+  render: () => { updateTargetPositions(); renderFrame() },
+  clearTrails: () => playerTrails.value.clear(),
+  clearHitMarkers: () => resetHitDetection(),
+  getHitMarkers: () => hitMarkers.value,
+  getTotalHitCount
 })
 </script>
 
@@ -1324,6 +1904,13 @@ defineExpose({
           :style="{ backgroundColor: PLAYER_COLORS[index % PLAYER_COLORS.length] }"
         />
         <span class="legend-label">P{{ player.player_id + 1 }}</span>
+        <span
+          v-if="showHitMarkers && hitMarkers.get(player.player_id)?.length"
+          class="hit-count"
+          :style="{ color: HIT_MARKER_COLORS[index % HIT_MARKER_COLORS.length] }"
+        >
+          {{ hitMarkers.get(player.player_id)?.length }} hits
+        </span>
       </div>
     </div>
   </div>
@@ -1417,5 +2004,12 @@ defineExpose({
   font-size: 11px;
   color: #888;
   font-weight: 500;
+}
+
+.hit-count {
+  font-size: 9px;
+  font-weight: 600;
+  margin-left: 2px;
+  opacity: 0.9;
 }
 </style>

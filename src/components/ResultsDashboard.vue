@@ -75,7 +75,8 @@ async function handleExportPDF() {
       court_detection: props.result.court_detection ? {
         detected: props.result.court_detection.detected,
         confidence: props.result.court_detection.confidence,
-        court_dimensions: props.result.court_detection.court_dimensions
+        court_dimensions: props.result.court_detection.court_dimensions,
+        court_corners: props.result.court_detection.court_corners ?? undefined
       } : null,
       shuttle_analytics: props.result.shuttle_analytics as Record<string, unknown> | null ?? null,
       player_zone_analytics: props.result.player_zone_analytics as Record<string, unknown> | null ?? null
@@ -100,12 +101,13 @@ const formattedDuration = computed(() => {
   return `${mins}:${secs.toString().padStart(2, '0')}`
 })
 
-// Maximum realistic speed thresholds (km/h) - matches App.vue filtering
-// Speeds above these are likely tracking errors (e.g., ID swap to judge)
-// Note: App.vue already filters out speeds > 50 km/h from the raw data
-const MAX_REALISTIC_SPEED_KMH = 50  // Absolute cap for display - tracking errors filtered in App.vue
-const TYPICAL_MAX_SPEED_KMH = 30   // Realistic average max for badminton
-const SUSPICIOUS_SPEED_KMH = 40     // Above this is flagged as suspicious
+// Maximum realistic speed thresholds (km/h)
+// UNIFIED with backend (modal_convex_processor.py) and Convex speed calculator (http.ts)
+// Research: Badminton players rarely exceed 25 km/h even in explosive movements.
+// Typical max during active play: 18-25 km/h. Average speeds: 5-15 km/h.
+const MAX_REALISTIC_SPEED_KMH = 25  // Absolute cap for max speed display
+const TYPICAL_MAX_SPEED_KMH = 15    // Realistic cap for average speed
+const SUSPICIOUS_SPEED_KMH = 20     // Above this is suspicious for averages
 
 // Helper to cap speed to realistic values
 function capSpeed(speed: number, isMax: boolean = false): number {

@@ -776,12 +776,15 @@ function calculateZoneAnalytics(
 // =============================================================================
 
 // Maximum realistic speed for a badminton player (km/h)
-// Speeds above this are filtered as tracking errors
-const MAX_REALISTIC_SPEED_KMH = 50.0
+// Research: Badminton players rarely exceed 25 km/h even in explosive movements.
+// Usain Bolt's peak is 44.7 km/h — 50 km/h is physically impossible in badminton.
+// UNIFIED with backend modal_convex_processor.py (MAX_VALID_SPEED_MPS = 7.0 = 25 km/h)
+const MAX_REALISTIC_SPEED_KMH = 25.0
 
 // Maximum realistic movement per frame (pixels at 30fps)
-// ~0.5 meters per frame max -> at typical calibration, this is ~50-100px
-const MAX_FRAME_JUMP_PIXELS = 200
+// At 7 m/s max and typical court calibration (~0.008 m/px), that's ~29px/frame.
+// Allow 80px to account for calibration variance — matches backend MAX_PX_PER_FRAME.
+const MAX_FRAME_JUMP_PIXELS = 80
 
 interface SpeedStatistics {
   avg: { speed_kmh: number }
@@ -811,61 +814,149 @@ interface ManualCourtKeypoints {
   service_line_far_right?: number[]
 }
 
+// Standard badminton court dimensions (meters)
+const COURT_LENGTH = 13.4
+const COURT_WIDTH = 6.1
+
 /**
- * Calculate meters per pixel from manual court keypoints.
- * Uses the known court dimensions (13.4m x 6.1m for doubles) and
- * the pixel distances between corners to compute accurate calibration.
+ * Compute a 3x3 homography matrix from 4 source points (pixel space)
+ * to 4 destination points (court-meter space).
+ *
+ * Uses Direct Linear Transform (DLT) with 4 point correspondences.
+ * Returns a 9-element flat array representing the 3x3 matrix [h0..h8],
+ * or null if the computation fails.
+ *
+ * The homography maps: [x', y', w] = H * [x, y, 1]
+ * Court coords: real_x = x'/w, real_y = y'/w
  */
-function calculateMetersPerPixel(
-  keypoints: ManualCourtKeypoints,
-  videoWidth: number,
-  videoHeight: number
-): number {
-  // Badminton court dimensions (meters)
-  const COURT_LENGTH = 13.4  // Full length
-  const COURT_WIDTH = 6.1   // Doubles width
-  
-  // Get corner coordinates
-  const topLeft = keypoints.top_left
-  const topRight = keypoints.top_right
-  const bottomLeft = keypoints.bottom_left
-  const bottomRight = keypoints.bottom_right
-  
-  // Calculate pixel distances for horizontal edges (width of court)
-  const topEdgePx = Math.sqrt(
-    Math.pow(topRight[0] - topLeft[0], 2) +
-    Math.pow(topRight[1] - topLeft[1], 2)
-  )
-  const bottomEdgePx = Math.sqrt(
-    Math.pow(bottomRight[0] - bottomLeft[0], 2) +
-    Math.pow(bottomRight[1] - bottomLeft[1], 2)
-  )
-  
-  // Calculate pixel distances for vertical edges (length of court)
-  const leftEdgePx = Math.sqrt(
-    Math.pow(bottomLeft[0] - topLeft[0], 2) +
-    Math.pow(bottomLeft[1] - topLeft[1], 2)
-  )
-  const rightEdgePx = Math.sqrt(
-    Math.pow(bottomRight[0] - topRight[0], 2) +
-    Math.pow(bottomRight[1] - topRight[1], 2)
-  )
-  
-  // Average the edge lengths (accounts for perspective)
-  const avgWidthPx = (topEdgePx + bottomEdgePx) / 2
-  const avgLengthPx = (leftEdgePx + rightEdgePx) / 2
-  
-  // Calculate meters per pixel for both dimensions
-  const mppWidth = COURT_WIDTH / avgWidthPx
-  const mppLength = COURT_LENGTH / avgLengthPx
-  
-  // Use weighted average (length typically more visible)
-  const metersPerPixel = (mppWidth + mppLength) / 2
-  
-  console.log(`[Speed] Calibration: avgWidth=${avgWidthPx.toFixed(1)}px, avgLength=${avgLengthPx.toFixed(1)}px, mpp=${metersPerPixel.toFixed(6)}`)
-  
-  return metersPerPixel
+function computeHomography(
+  srcPts: number[][],  // 4 pixel points [[x,y], ...]
+  dstPts: number[][]   // 4 court-meter points [[x,y], ...]
+): number[] | null {
+  if (srcPts.length < 4 || dstPts.length < 4) return null
+
+  // Build 8x8 linear system: A * h = b
+  // For each point pair (sx, sy) -> (dx, dy):
+  //   [sx, sy, 1, 0,  0,  0, -dx*sx, -dx*sy] [h0]   [dx]
+  //   [0,  0,  0, sx, sy, 1, -dy*sx, -dy*sy] [h1] = [dy]
+  const A: number[][] = []
+  const b: number[] = []
+
+  for (let i = 0; i < 4; i++) {
+    const sx = srcPts[i]![0]!, sy = srcPts[i]![1]!
+    const dx = dstPts[i]![0]!, dy = dstPts[i]![1]!
+
+    A.push([sx, sy, 1, 0, 0, 0, -dx * sx, -dx * sy])
+    b.push(dx)
+    A.push([0, 0, 0, sx, sy, 1, -dy * sx, -dy * sy])
+    b.push(dy)
+  }
+
+  // Solve via Gaussian elimination with partial pivoting
+  const n = 8
+  const M: number[][] = A.map((row, i) => [...row, b[i]!])
+
+  for (let col = 0; col < n; col++) {
+    // Partial pivot
+    let maxRow = col
+    let maxVal = Math.abs(M[col]![col]!)
+    for (let row = col + 1; row < n; row++) {
+      const val = Math.abs(M[row]![col]!)
+      if (val > maxVal) {
+        maxVal = val
+        maxRow = row
+      }
+    }
+    if (maxVal < 1e-12) return null // Singular matrix
+
+    // Swap rows
+    if (maxRow !== col) {
+      const tmp = M[col]!
+      M[col] = M[maxRow]!
+      M[maxRow] = tmp
+    }
+
+    // Eliminate below
+    const pivot = M[col]![col]!
+    for (let row = col + 1; row < n; row++) {
+      const factor = M[row]![col]! / pivot
+      for (let j = col; j <= n; j++) {
+        M[row]![j] = M[row]![j]! - factor * M[col]![j]!
+      }
+    }
+  }
+
+  // Back substitution
+  const h = new Array(n).fill(0)
+  for (let row = n - 1; row >= 0; row--) {
+    let sum = M[row]![n]!
+    for (let j = row + 1; j < n; j++) {
+      sum -= M[row]![j]! * h[j]!
+    }
+    h[row] = sum / M[row]![row]!
+  }
+
+  // h[0..7] are h0-h7, h8 = 1
+  return [...h, 1.0]
 }
+
+/**
+ * Apply a 3x3 homography to transform a pixel point to court-meter coordinates.
+ *
+ * H is a 9-element flat array [h0, h1, h2, h3, h4, h5, h6, h7, h8].
+ * Returns [courtX, courtY] in meters, or null if the transform degenerates.
+ */
+function applyHomography(H: number[], px: number, py: number): [number, number] | null {
+  const w = H[6]! * px + H[7]! * py + H[8]!
+  if (Math.abs(w) < 1e-12) return null
+  const cx = (H[0]! * px + H[1]! * py + H[2]!) / w
+  const cy = (H[3]! * px + H[4]! * py + H[5]!) / w
+  return [cx, cy]
+}
+
+/**
+ * Build a homography matrix from manual court keypoints.
+ * Maps the 4 pixel corners to standard badminton court coordinates in meters.
+ *
+ * Court coordinate system:
+ *   Origin (0,0) = top-left corner
+ *   X-axis = court width (0 to 6.1m)
+ *   Y-axis = court length (0 to 13.4m)
+ */
+function buildHomographyFromKeypoints(
+  keypoints: ManualCourtKeypoints
+): number[] | null {
+  const srcPts = [
+    keypoints.top_left,
+    keypoints.top_right,
+    keypoints.bottom_right,
+    keypoints.bottom_left,
+  ]
+
+  // Validate all points exist
+  for (const pt of srcPts) {
+    if (!pt || pt.length < 2) return null
+  }
+
+  const dstPts = [
+    [0, 0],                     // top_left → (0, 0)
+    [COURT_WIDTH, 0],           // top_right → (6.1, 0)
+    [COURT_WIDTH, COURT_LENGTH], // bottom_right → (6.1, 13.4)
+    [0, COURT_LENGTH],          // bottom_left → (0, 13.4)
+  ]
+
+  return computeHomography(srcPts, dstPts)
+}
+
+// Typical maximum speed for badminton (km/h) - for summary stats cap
+// Most badminton movement is 5-18 km/h, with rare bursts to 25 km/h
+const TYPICAL_MAX_SPEED_KMH = 15.0
+
+// Suspicious speed threshold - above this is flagged as potential outlier
+const SUSPICIOUS_SPEED_KMH = 20.0
+
+// Median filter window size
+const SPEED_MEDIAN_WINDOW = 5
 
 function calculateSpeedFromSkeleton(
   skeletonData: SkeletonFrameData[],
@@ -874,69 +965,152 @@ function calculateSpeedFromSkeleton(
   videoHeight: number,
   manualKeypoints?: ManualCourtKeypoints | null
 ): SpeedData {
-  // Calculate meters per pixel - use manual keypoints if available
-  let metersPerPixel: number
   const hasManualKeypoints = !!manualKeypoints?.top_left && !!manualKeypoints?.bottom_left
   
+  // --- Compute homography for perspective-correct distance calculation ---
+  // When manual keypoints are available, use homography to transform pixel
+  // coords to court-meter coords. This correctly handles perspective distortion
+  // (near-camera players appear larger / move more pixels per meter).
+  let homography: number[] | null = null
+  let fallbackMpp = 0  // fallback meters-per-pixel when no keypoints
+  
   if (hasManualKeypoints && manualKeypoints) {
-    metersPerPixel = calculateMetersPerPixel(manualKeypoints, videoWidth, videoHeight)
-  } else {
-    // Fallback: approximate based on typical court visibility in video
-    // Assume court length (13.4m) covers about 60% of the max dimension
-    metersPerPixel = 13.4 / (Math.max(videoWidth, videoHeight) * 0.6)
+    homography = buildHomographyFromKeypoints(manualKeypoints)
+    if (homography) {
+      console.log("[Speed] Using homography-based court calibration (perspective-correct)")
+    } else {
+      console.log("[Speed] Homography computation failed, falling back to simple mpp")
+    }
   }
+  
+  if (!homography) {
+    // Fallback: approximate based on typical court visibility in video
+    // Use 80% of max dimension (matches modal_convex_processor.py)
+    fallbackMpp = COURT_LENGTH / (Math.max(videoWidth, videoHeight) * 0.8)
+    console.log(`[Speed] Using fallback meters-per-pixel: ${fallbackMpp.toFixed(6)}`)
+  }
+  
+  // Helper: convert pixel position to court-meter position
+  function pixelToMeters(px: number, py: number): [number, number] | null {
+    if (homography) {
+      const result = applyHomography(homography, px, py)
+      if (!result) return null
+      // Reject points far outside the court (bad detections)
+      const [cx, cy] = result
+      if (cx < -2 || cx > COURT_WIDTH + 2 || cy < -2 || cy > COURT_LENGTH + 2) {
+        return null  // Outside court with 2m margin
+      }
+      return result
+    }
+    // Fallback: scale linearly (inaccurate but better than nothing)
+    return [px * fallbackMpp, py * fallbackMpp]
+  }
+  
+  // Maximum distance per frame in meters (at 30fps, 7 m/s max => 0.23m/frame)
+  const MAX_DISTANCE_PER_FRAME_M = 0.25
   
   const frameData: SpeedData["frame_data"] = []
   const playerStats: Record<string, {
     speeds: number[]
     distance: number
-    prevPos: { x: number; y: number; frame: number } | null
+    prevCourtPos: { cx: number; cy: number; px: number; py: number; frame: number } | null
+    speedWindow: number[]  // Sliding window for median filtering
   }> = {}
   
   let filteredOutCount = 0
+  let medianFilteredCount = 0
   
   for (const frame of skeletonData) {
     const frameSpeeds: Array<{ player_id: number; speed_kmh: number }> = []
     
     for (const player of frame.players) {
-      let x: number | null = null
-      let y: number | null = null
+      let px: number | null = null
+      let py: number | null = null
       
       if (player.center) {
-        x = player.center.x
-        y = player.center.y
+        px = player.center.x
+        py = player.center.y
       } else if (player.position) {
-        x = player.position.x
-        y = player.position.y
+        px = player.position.x
+        py = player.position.y
       }
       
-      if (x === null || y === null) continue
+      if (px === null || py === null) continue
+      
+      // Transform pixel position to court meters
+      const courtPos = pixelToMeters(px, py)
+      if (!courtPos) continue
+      
+      const [cx, cy] = courtPos
       
       const pid = player.player_id.toString()
       if (!playerStats[pid]) {
-        playerStats[pid] = { speeds: [], distance: 0, prevPos: null }
+        playerStats[pid] = { speeds: [], distance: 0, prevCourtPos: null, speedWindow: [] }
       }
       
       let speed_kmh = 0
-      if (playerStats[pid].prevPos) {
-        const prev = playerStats[pid].prevPos!
-        const dx = x - prev.x
-        const dy = y - prev.y
-        const distPx = Math.sqrt(dx * dx + dy * dy)
-        const distM = distPx * metersPerPixel
-        const dt = (frame.frame - prev.frame) / fps
+      let isValidMeasurement = true
+      
+      if (playerStats[pid].prevCourtPos) {
+        const prev = playerStats[pid].prevCourtPos!
+        
+        // Calculate distance in COURT METERS (perspective-corrected)
+        const dxM = cx - prev.cx
+        const dyM = cy - prev.cy
+        const distM = Math.sqrt(dxM * dxM + dyM * dyM)
+        
+        // Also check pixel distance for tracking jump detection
+        const dxPx = px - prev.px
+        const dyPx = py - prev.py
+        const distPx = Math.sqrt(dxPx * dxPx + dyPx * dyPx)
+        
+        const framesElapsed = Math.max(1, frame.frame - prev.frame)
+        const dt = framesElapsed / fps
+        const distPerFrame = distM / framesElapsed
+        const pxPerFrame = distPx / framesElapsed
         
         if (dt > 0) {
           const speedMs = distM / dt
           speed_kmh = speedMs * 3.6
           
-          // Filter out unrealistic speeds (tracking errors, ID swaps)
-          // Also check for unrealistic position jumps (potential tracking loss)
-          if (speed_kmh > MAX_REALISTIC_SPEED_KMH || distPx > MAX_FRAME_JUMP_PIXELS * dt * fps) {
-            // Treat as tracking error - zero speed for this frame
+          // STEP 1: Pixel-based jump detection (catches tracking ID swaps)
+          if (pxPerFrame > MAX_FRAME_JUMP_PIXELS) {
             filteredOutCount++
             speed_kmh = 0
-          } else {
+            isValidMeasurement = false
+          }
+          // STEP 2: Distance-per-frame check in meters (catches position jumps)
+          else if (distPerFrame > MAX_DISTANCE_PER_FRAME_M) {
+            filteredOutCount++
+            speed_kmh = 0
+            isValidMeasurement = false
+          }
+          // STEP 3: Hard speed cap (physiological limit)
+          else if (speed_kmh > MAX_REALISTIC_SPEED_KMH) {
+            filteredOutCount++
+            speed_kmh = 0
+            isValidMeasurement = false
+          }
+          // STEP 4: Median filter — reject outlier spikes
+          else {
+            const window = playerStats[pid].speedWindow
+            if (window.length >= 3) {
+              const sortedWindow = [...window].sort((a, b) => a - b)
+              const medianSpeed = sortedWindow[Math.floor(sortedWindow.length / 2)]!
+              if (medianSpeed > 1.0 && speed_kmh > medianSpeed * 2.0) {
+                medianFilteredCount++
+                speed_kmh = 0
+                isValidMeasurement = false
+              }
+            }
+          }
+          
+          if (isValidMeasurement && speed_kmh > 0) {
+            // Add to median filter window
+            playerStats[pid].speedWindow.push(speed_kmh)
+            if (playerStats[pid].speedWindow.length > SPEED_MEDIAN_WINDOW) {
+              playerStats[pid].speedWindow.shift()
+            }
             // Valid speed - add to stats
             playerStats[pid].speeds.push(speed_kmh)
             playerStats[pid].distance += distM
@@ -944,7 +1118,10 @@ function calculateSpeedFromSkeleton(
         }
       }
       
-      playerStats[pid].prevPos = { x, y, frame: frame.frame }
+      // Only update tracking position if measurement was valid (avoid propagating jumps)
+      if (isValidMeasurement) {
+        playerStats[pid].prevCourtPos = { cx, cy, px, py, frame: frame.frame }
+      }
       frameSpeeds.push({ player_id: player.player_id, speed_kmh })
     }
     
@@ -954,19 +1131,55 @@ function calculateSpeedFromSkeleton(
   }
   
   if (filteredOutCount > 0) {
-    console.log(`[Speed] Filtered out ${filteredOutCount} unrealistic speed values (>${MAX_REALISTIC_SPEED_KMH} km/h)`)
+    console.log(`[Speed] Filtered out ${filteredOutCount} unrealistic speed values (jump/cap filter)`)
+  }
+  if (medianFilteredCount > 0) {
+    console.log(`[Speed] Filtered out ${medianFilteredCount} speed values by median filter`)
   }
   
-  // Calculate statistics per player
+  // Calculate statistics per player with multi-stage filtering
+  // (matches modal_convex_processor.py summary calculation)
   const statistics: Record<string, SpeedStatistics> = {}
   for (const [pid, stats] of Object.entries(playerStats)) {
-    const speeds = stats.speeds.filter(s => s <= MAX_REALISTIC_SPEED_KMH)
-    const avgSpeed = speeds.length > 0 ? speeds.reduce((a, b) => a + b, 0) / speeds.length : 0
-    const maxSpeed = speeds.length > 0 ? Math.min(Math.max(...speeds), MAX_REALISTIC_SPEED_KMH) : 0
+    // Stage 1: Hard filter — already done during per-frame processing
+    let filtered = stats.speeds.filter(s => s <= MAX_REALISTIC_SPEED_KMH)
+    
+    // Stage 2: IQR-based outlier removal (if enough data)
+    if (filtered.length >= 5) {
+      const sorted = [...filtered].sort((a, b) => a - b)
+      const q1Idx = Math.floor(sorted.length / 4)
+      const q3Idx = Math.floor(3 * sorted.length / 4)
+      const q1 = sorted[q1Idx] ?? 0
+      const q3 = sorted[q3Idx] ?? 0
+      const iqr = q3 - q1
+      const upperBound = Math.min(q3 + 1.5 * iqr, SUSPICIOUS_SPEED_KMH)
+      filtered = filtered.filter(s => s <= upperBound)
+    }
+    
+    // Stage 3: Remove top 5% as final safety measure
+    if (filtered.length >= 5) {
+      const sorted = [...filtered].sort((a, b) => a - b)
+      const cutoffIdx = Math.floor(sorted.length * 0.95)
+      if (cutoffIdx > 0) {
+        filtered = sorted.slice(0, cutoffIdx)
+      }
+    }
+    
+    // Calculate stats from filtered data
+    const avgSpeed = filtered.length > 0
+      ? filtered.reduce((a, b) => a + b, 0) / filtered.length
+      : 0
+    const maxSpeed = filtered.length > 0
+      ? Math.max(...filtered)
+      : 0
+    
+    // Apply final physiological caps (safety net) — matches backend
+    const cappedAvg = Math.min(avgSpeed, TYPICAL_MAX_SPEED_KMH)
+    const cappedMax = Math.min(maxSpeed, MAX_REALISTIC_SPEED_KMH)
     
     statistics[pid] = {
-      avg: { speed_kmh: avgSpeed },
-      max: { speed_kmh: maxSpeed },
+      avg: { speed_kmh: cappedAvg },
+      max: { speed_kmh: cappedMax },
       total_distance_m: stats.distance,
     }
   }
@@ -1169,7 +1382,17 @@ http.route({
       // Call Modal PDF export service
       const modalPdfEndpoint = "https://coenhallie--badminton-tracker-pdf-export-generate-pdf.modal.run"
       
+      // Build config, ensuring frontend player data is included so the PDF
+      // shows the same calibrated speed values as the dashboard.
+      const pdfConfig = config || {
+        title: `Badminton Analysis - ${video.filename || videoId}`,
+        include_heatmap: true,
+        heatmap_colormap: "turbo",
+        heatmap_alpha: 0.6,
+      }
+      
       console.log("[PDF EXPORT] Calling Modal PDF service...")
+      console.log("[PDF EXPORT] Frontend player data included:", !!pdfConfig.players)
       const modalResponse = await fetch(modalPdfEndpoint, {
         method: "POST",
         headers: {
@@ -1178,12 +1401,7 @@ http.route({
         body: JSON.stringify({
           videoUrl,
           resultsUrl,
-          config: config || {
-            title: `Badminton Analysis - ${video.filename || videoId}`,
-            include_heatmap: true,
-            heatmap_colormap: "turbo",
-            heatmap_alpha: 0.6,
-          },
+          config: pdfConfig,
         }),
       })
       
