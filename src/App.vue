@@ -8,6 +8,7 @@ import CourtSetup from '@/components/CourtSetup.vue'
 import MiniCourt from '@/components/MiniCourt.vue'
 import SpeedGraph from '@/components/SpeedGraph.vue'
 import ShotSpeedList from '@/components/ShotSpeedList.vue'
+import AdvancedAnalytics from '@/components/AdvancedAnalytics.vue'
 import {
   checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
   getHeatmap, preloadHeatmap, triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
@@ -1097,6 +1098,21 @@ watch(videoSectionRef, () => {
               New Analysis
             </button>
 
+            <div class="results-header-right">
+              <!-- Export Video Button -->
+              <button
+                class="export-btn"
+                :disabled="videoPlayerRef?.isExporting"
+                @click="videoPlayerRef?.startExport()"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                <span>Export Video</span>
+              </button>
+
             <!-- Settings Toggle Button -->
             <button
               class="settings-toggle-btn"
@@ -1112,7 +1128,21 @@ watch(videoSectionRef, () => {
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
+            </div>
           </div>
+
+          <!-- Export Progress Overlay -->
+          <Transition name="fade">
+            <div v-if="videoPlayerRef?.isExporting" class="export-progress-overlay">
+              <div class="export-progress-content">
+                <div class="export-progress-bar-track">
+                  <div class="export-progress-bar-fill" :style="{ width: (videoPlayerRef?.exportProgress ?? 0) + '%' }"></div>
+                </div>
+                <span class="export-progress-text">Exporting... {{ videoPlayerRef?.exportProgress ?? 0 }}%</span>
+                <button class="export-cancel-btn" @click="videoPlayerRef?.cancelExport()">Cancel</button>
+              </div>
+            </div>
+          </Transition>
 
           <!-- Collapsible Settings Panel -->
           <Transition name="settings-slide">
@@ -1349,6 +1379,13 @@ watch(videoSectionRef, () => {
                 :result="analysisResult"
                 :manual-keypoints-set="manualCourtKeypoints !== null"
                 :zone-recalculation-trigger="zoneRecalculationTrigger"
+              />
+            </div>
+
+            <div class="dashboard-section">
+              <AdvancedAnalytics
+                :result="analysisResult"
+                :current-frame="currentFrame"
               />
             </div>
           </div>
@@ -2057,6 +2094,96 @@ a:hover {
 
 .settings-toggle-btn .chevron.rotated {
   transform: rotate(180deg);
+}
+
+/* Results Header Right Group */
+.results-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Export Video Button */
+.export-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: #141414;
+  border: 1px solid #333;
+  border-radius: 0;
+  color: #fff;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.export-btn:hover:not(:disabled) {
+  background: #1a1a1a;
+  border-color: #22c55e;
+}
+
+.export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.export-btn svg {
+  width: 18px;
+  height: 18px;
+  color: #22c55e;
+}
+
+/* Export Progress Overlay */
+.export-progress-overlay {
+  background: #141414;
+  border: 1px solid #333;
+  padding: 16px 24px;
+  margin-bottom: 16px;
+}
+
+.export-progress-content {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.export-progress-bar-track {
+  flex: 1;
+  height: 6px;
+  background: #222;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.export-progress-bar-fill {
+  height: 100%;
+  background: #22c55e;
+  transition: width 0.3s ease;
+}
+
+.export-progress-text {
+  font-size: 0.8rem;
+  color: #aaa;
+  white-space: nowrap;
+  min-width: 110px;
+}
+
+.export-cancel-btn {
+  padding: 6px 14px;
+  background: transparent;
+  border: 1px solid #555;
+  border-radius: 0;
+  color: #aaa;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.export-cancel-btn:hover {
+  border-color: #ef4444;
+  color: #ef4444;
 }
 
 /* Settings Panel */

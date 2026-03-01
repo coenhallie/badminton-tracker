@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toRef, type Ref } from 'vue'
 import type { SkeletonFrame, Keypoint, BadmintonDetections, BoundingBoxDetection } from '@/types/analysis'
 import { SKELETON_CONNECTIONS, PLAYER_COLORS } from '@/types/analysis'
 import PoseOverlay from './PoseOverlay.vue'
+import { useVideoExport } from '@/composables/useVideoExport'
 
 // =============================================================================
 // PERFORMANCE OPTIMIZATION: Debug mode flag
@@ -531,7 +532,7 @@ function formatTime(seconds: number): string {
 }
 
 function togglePlay() {
-  if (!videoRef.value) return
+  if (!videoRef.value || isExporting.value) return
 
   if (isPlaying.value) {
     videoRef.value.pause()
@@ -576,6 +577,7 @@ function handleLoadedMetadata() {
 }
 
 function handleSeek(event: MouseEvent) {
+  if (isExporting.value) return
   const target = event.currentTarget as HTMLElement
   const rect = target.getBoundingClientRect()
   const percent = (event.clientX - rect.left) / rect.width
@@ -925,7 +927,7 @@ function drawCourtGuideLines(ctx: CanvasRenderingContext2D, scaleX: number, scal
 // NOTE: drawKeypointGuide function removed - point order guide now rendered in App.vue as a fixed modal
 
 function skipTime(seconds: number) {
-  if (!videoRef.value) return
+  if (!videoRef.value || isExporting.value) return
   videoRef.value.currentTime = Math.max(0, Math.min(duration.value, videoRef.value.currentTime + seconds))
 }
 
@@ -1472,7 +1474,7 @@ function stopSkeletonAnimation() {
 
 // Keyboard shortcuts
 function handleKeydown(event: KeyboardEvent) {
-  if (event.target instanceof HTMLInputElement) return
+  if (event.target instanceof HTMLInputElement || isExporting.value) return
 
   switch (event.key) {
     case ' ':
@@ -1621,10 +1623,33 @@ function seekToFrame(frameNumber: number) {
   }
 }
 
+// =============================================================================
+// VIDEO EXPORT: Bake overlays into downloadable video
+// =============================================================================
+const {
+  isExporting,
+  exportProgress,
+  startExport,
+  cancelExport,
+} = useVideoExport({
+  videoRef,
+  canvasRef,
+  findFrameAtOrBeforeFn: (time: number) => {
+    const frame = findFrameAtOrBefore(time)
+    drawOverlay(frame)
+    return frame
+  },
+  showHeatmap: toRef(props, 'showHeatmap') as Ref<boolean>,
+})
+
 defineExpose({
   seekTo,
   seekToFrame,
   setPlaybackRate,
+  isExporting,
+  exportProgress,
+  startExport,
+  cancelExport,
 })
 </script>
 
@@ -1639,12 +1664,13 @@ defineExpose({
       <video
         ref="videoRef"
         :src="videoUrl"
+        crossorigin="anonymous"
         :class="{ 'video-dimmed': showHeatmap }"
         @play="handlePlay"
         @pause="handlePause"
         @timeupdate="handleTimeUpdate"
         @loadedmetadata="handleLoadedMetadata"
-        @click="!isKeypointSelectionMode && togglePlay()"
+        @click="!isKeypointSelectionMode && !isExporting && togglePlay()"
       />
       <canvas
         v-if="(showSkeleton || showBoundingBoxes || showHeatmap) && (skeletonData || heatmapData)"

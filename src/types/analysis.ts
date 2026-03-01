@@ -579,3 +579,169 @@ export const PLAYER_SPEED_COLORS = [
   '#22C55E',  // Player 3 - Green (if more players)
   '#F59E0B',  // Player 4 - Amber
 ]
+
+// =============================================================================
+// ADVANCED ANALYTICS TYPES
+// =============================================================================
+
+// --- Rally Segmentation ---
+export interface Rally {
+  id: number
+  startFrame: number
+  endFrame: number
+  startTimestamp: number
+  endTimestamp: number
+  durationSeconds: number
+  shotCount: number
+  shots: RallyShot[]
+  winner: number | null  // player_id or null if unknown
+}
+
+export interface RallyShot {
+  frame: number
+  timestamp: number
+  playerId: number
+  shotType: ShotType | TrainedPoseClass | string
+  shuttlePosition: { x: number; y: number } | null
+  playerPosition: { x: number; y: number }
+}
+
+// --- Shot Placement ---
+export interface ShotPlacement {
+  shotType: string
+  position: { x: number; y: number }  // court coordinates (normalized 0-1)
+  playerId: number
+  frame: number
+}
+
+export interface ShotPlacementHeatmap {
+  shotType: string
+  grid: number[][]  // 2D grid of counts
+  total: number
+}
+
+// --- Recovery Analysis ---
+export interface RecoveryEvent {
+  playerId: number
+  shotFrame: number
+  shotTimestamp: number
+  recoveryFrame: number
+  recoveryTimestamp: number
+  recoveryTimeSeconds: number
+  shotPosition: { x: number; y: number }
+  recoveryPosition: { x: number; y: number }
+  basePosition: { x: number; y: number }  // ideal center position
+  distanceFromBase: number  // how far from base at recovery point (pixels, relative comparison only)
+  quality: 'excellent' | 'good' | 'fair' | 'poor'
+}
+
+// --- Fatigue Analysis ---
+export interface FatigueSegment {
+  segmentIndex: number
+  startTimestamp: number
+  endTimestamp: number
+  playerId: number
+  avgSpeed: number
+  maxSpeed: number
+  distanceCovered: number
+  avgRecoveryTime: number
+  courtCoverage: number  // percentage of court covered
+}
+
+export interface FatigueProfile {
+  playerId: number
+  segments: FatigueSegment[]
+  speedDeclinePercent: number  // % decline from first to last segment
+  recoveryDeclinePercent: number
+  coverageDeclinePercent: number
+  fatigueOnsetSegment: number | null  // segment where decline starts
+}
+
+// --- Reaction Time ---
+export interface ReactionEvent {
+  playerId: number
+  opponentShotFrame: number
+  firstMovementFrame: number
+  reactionTimeMs: number
+  opponentShotTimestamp: number
+  movementStartTimestamp: number
+}
+
+// --- Rally Momentum ---
+export interface MomentumPoint {
+  frame: number
+  timestamp: number
+  momentum: number  // -1 to 1 (negative = player 2 dominating, positive = player 1)
+  reason: string
+}
+
+// --- Shot Sequence Patterns ---
+export interface ShotPattern {
+  sequence: string[]  // e.g., ['clear', 'drop', 'net_shot']
+  count: number
+  successRate: number | null  // % of times this pattern led to winning the rally
+  playerId: number
+}
+
+// --- Movement Efficiency ---
+export interface MovementEfficiency {
+  playerId: number
+  totalDistance: number
+  usefulDistance: number  // distance toward shuttle/base
+  wastedDistance: number  // lateral/backward movement not toward objective
+  efficiencyScore: number  // 0-100
+  avgDirectness: number   // ratio of displacement to distance per segment
+}
+
+// --- Pressure Index ---
+export interface PressureEvent {
+  frame: number
+  timestamp: number
+  playerId: number  // player who hit the shot
+  pressureScore: number  // 0-100
+  factors: {
+    shotSpeed: number
+    placementDifficulty: number  // distance from opponent's position
+    recoveryTimeForced: number   // time pressure on opponent
+    courtPositionAdvantage: number
+  }
+}
+
+// --- Kinetic Chain ---
+export interface KineticChainEvent {
+  frame: number
+  timestamp: number
+  playerId: number
+  shotType: string
+  chainSequence: {
+    joint: string
+    peakFrame: number
+    peakVelocity: number
+    timing: number  // ms relative to contact
+  }[]
+  chainScore: number  // 0-100, how well-sequenced the chain is
+}
+
+// --- Benchmark ---
+export interface BenchmarkComparison {
+  metric: string
+  playerValue: number
+  proAverage: number
+  proRange: { min: number; max: number }
+  percentile: number  // where the player falls (0-100)
+  unit: string
+}
+
+// Professional badminton benchmarks (from BWF data)
+export const PRO_BENCHMARKS = {
+  avgSpeed: { avg: 8.5, min: 6.0, max: 12.0, unit: 'km/h' },
+  maxSpeed: { avg: 18.0, min: 14.0, max: 25.0, unit: 'km/h' },
+  totalDistance: { avg: 1800, min: 1200, max: 2800, unit: 'm (per game)' },
+  reactionTime: { avg: 280, min: 180, max: 400, unit: 'ms' },
+  recoveryTime: { avg: 1.2, min: 0.6, max: 2.0, unit: 's' },
+  courtCoverage: { avg: 72, min: 55, max: 90, unit: '%' },
+  shotsPerRally: { avg: 8, min: 4, max: 20, unit: 'shots' },
+  rallyDuration: { avg: 8.5, min: 3.0, max: 25.0, unit: 's' },
+  movementEfficiency: { avg: 68, min: 50, max: 85, unit: '%' },
+  smashSpeed: { avg: 300, min: 200, max: 493, unit: 'km/h (shuttle)' },
+} as const
