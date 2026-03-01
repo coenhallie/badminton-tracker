@@ -16,28 +16,22 @@ const {
   shotPlacementsByType,
   recoveryStats,
   fatigueProfiles,
+  videoDuration,
   reactionStats,
-  momentumTimeline,
-  currentMomentum,
-  shotPatterns,
   movementEfficiency,
   pressureEvents,
-  kineticChainEvents,
-  benchmarkComparisons,
 } = useAdvancedAnalytics(
   computed(() => props.result),
   computed(() => props.currentFrame)
 )
 
-type Tab = 'rallies' | 'shots' | 'movement' | 'tactical' | 'benchmark'
+type Tab = 'rallies' | 'shots' | 'movement'
 const activeTab = ref<Tab>('rallies')
 
 const tabs: { id: Tab; label: string }[] = [
   { id: 'rallies', label: 'Rallies' },
   { id: 'shots', label: 'Shots' },
   { id: 'movement', label: 'Movement' },
-  { id: 'tactical', label: 'Tactical' },
-  { id: 'benchmark', label: 'Benchmark' },
 ]
 
 // Selected shot type filter for placement heatmap
@@ -67,19 +61,6 @@ function getHeatmapCellColor(value: number, maxValue: number): string {
   const b = Math.round(94 - intensity * 60)
   const a = 0.3 + intensity * 0.7
   return `rgba(${r}, ${g}, ${b}, ${a})`
-}
-
-function getMomentumColor(value: number): string {
-  if (value > 0.1) return PLAYER_COLORS[0] ?? '#FF6B6B'
-  if (value < -0.1) return PLAYER_COLORS[1] ?? '#4ECDC4'
-  return '#666'
-}
-
-function getPercentileColor(pct: number): string {
-  if (pct >= 75) return '#22c55e'
-  if (pct >= 50) return '#3b82f6'
-  if (pct >= 25) return '#f59e0b'
-  return '#ef4444'
 }
 
 function getQualityColor(quality: string): string {
@@ -206,28 +187,6 @@ function getFatigueColor(declinePercent: number): string {
           </div>
         </section>
 
-        <!-- Momentum Timeline -->
-        <section class="aa-section" v-if="momentumTimeline.length > 0">
-          <h3>Rally Momentum</h3>
-          <div class="momentum-bar">
-            <div class="momentum-labels">
-              <span :style="{ color: PLAYER_COLORS[0] }">P1 Dominating</span>
-              <span>Neutral</span>
-              <span :style="{ color: PLAYER_COLORS[1] }">P2 Dominating</span>
-            </div>
-            <div class="momentum-track">
-              <div
-                class="momentum-indicator"
-                :style="{
-                  left: `${(currentMomentum + 1) / 2 * 100}%`,
-                  background: getMomentumColor(currentMomentum)
-                }"
-              />
-              <div class="momentum-center" />
-            </div>
-          </div>
-        </section>
-
         <div v-if="rallies.length === 0" class="aa-empty">
           <p>No rallies detected. At least 2 shots must be detected via shuttle trajectory, player pose, or movement deceleration.</p>
         </div>
@@ -279,83 +238,8 @@ function getFatigueColor(declinePercent: number): string {
           </div>
         </section>
 
-        <!-- Shot Patterns -->
-        <section class="aa-section" v-if="shotPatterns.length > 0">
-          <h3>Common Shot Sequences</h3>
-          <div class="pattern-list">
-            <div
-              v-for="(pattern, i) in shotPatterns"
-              :key="i"
-              class="pattern-item"
-            >
-              <div class="pattern-sequence">
-                <span
-                  v-for="(shot, j) in pattern.sequence"
-                  :key="j"
-                  class="pattern-shot"
-                >
-                  {{ shot }}
-                  <span v-if="j < pattern.sequence.length - 1" class="pattern-arrow">&rarr;</span>
-                </span>
-              </div>
-              <div class="pattern-meta">
-                <span class="pattern-count">{{ pattern.count }}x</span>
-                <span class="pattern-player" :style="{ color: getPlayerColor(pattern.playerId) }">
-                  P{{ pattern.playerId + 1 }}
-                </span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- Kinetic Chain -->
-        <section class="aa-section" v-if="kineticChainEvents.length > 0">
-          <h3>Kinetic Chain Analysis</h3>
-          <p class="section-desc">How well joint activation sequences from hip to wrist during power shots</p>
-          <div class="chain-list">
-            <div
-              v-for="(event, i) in kineticChainEvents.slice(0, 10)"
-              :key="i"
-              class="chain-item"
-            >
-              <div class="chain-header">
-                <span class="chain-shot">{{ event.shotType }}</span>
-                <span class="chain-score" :style="{ color: event.chainScore >= 70 ? '#22c55e' : event.chainScore >= 40 ? '#f59e0b' : '#ef4444' }">
-                  {{ event.chainScore.toFixed(0) }}/100
-                </span>
-                <span class="chain-time">{{ formatTime(event.timestamp) }}</span>
-              </div>
-              <div class="chain-sequence">
-                <div
-                  v-for="(joint, j) in event.chainSequence"
-                  :key="j"
-                  class="chain-joint"
-                >
-                  <span class="joint-name">{{ joint.joint }}</span>
-                  <span class="joint-timing">{{ joint.timing > 0 ? '+' : '' }}{{ joint.timing.toFixed(0) }}ms</span>
-                  <span v-if="j < event.chainSequence.length - 1" class="chain-arrow">&rarr;</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- Pressure Index -->
-        <section class="aa-section" v-if="pressureEvents.length > 0">
-          <h3>Pressure Index</h3>
-          <p class="section-desc">How much pressure each shot puts on the opponent (0-100)</p>
-          <div class="aa-stat-row">
-            <div class="aa-stat-card" v-for="pid in [0, 1]" :key="pid">
-              <span class="aa-stat-value" :style="{ color: getPlayerColor(pid) }">
-                {{ (pressureEvents.filter(e => e.playerId === pid).reduce((s, e) => s + e.pressureScore, 0) / Math.max(1, pressureEvents.filter(e => e.playerId === pid).length)).toFixed(0) }}
-              </span>
-              <span class="aa-stat-label">P{{ pid + 1 }} Avg Pressure</span>
-            </div>
-          </div>
-        </section>
-
-        <div v-if="shotPlacementsByType.length === 0 && shotPatterns.length === 0" class="aa-empty">
-          <p>No shot data available. Shot analytics require sufficient shuttle positions or detected shots.</p>
+        <div v-if="shotPlacementsByType.length === 0" class="aa-empty">
+          <p>Insufficient shuttle tracking data for shot placement heatmap. Shots must have detected shuttle positions.</p>
         </div>
       </div>
 
@@ -429,6 +313,20 @@ function getFatigueColor(declinePercent: number): string {
           </div>
         </section>
 
+        <!-- Pressure Index -->
+        <section class="aa-section" v-if="pressureEvents.length > 0">
+          <h3>Pressure Index</h3>
+          <p class="section-desc">How much pressure each shot puts on the opponent (0-100)</p>
+          <div class="aa-stat-row">
+            <div class="aa-stat-card" v-for="pid in [0, 1]" :key="pid">
+              <span class="aa-stat-value" :style="{ color: getPlayerColor(pid) }">
+                {{ (pressureEvents.filter(e => e.playerId === pid).reduce((s, e) => s + e.pressureScore, 0) / Math.max(1, pressureEvents.filter(e => e.playerId === pid).length)).toFixed(0) }}
+              </span>
+              <span class="aa-stat-label">P{{ pid + 1 }} Avg Pressure</span>
+            </div>
+          </div>
+        </section>
+
         <!-- Movement Efficiency -->
         <section class="aa-section" v-if="movementEfficiency.length > 0">
           <h3>Movement Efficiency</h3>
@@ -460,6 +358,14 @@ function getFatigueColor(declinePercent: number): string {
                 </div>
               </div>
             </div>
+          </div>
+        </section>
+
+        <!-- Fatigue Detection - Too Short Notice -->
+        <section class="aa-section" v-if="fatigueProfiles.length === 0 && videoDuration > 0 && videoDuration < 600">
+          <h3>Fatigue Analysis</h3>
+          <div class="aa-empty">
+            <p>Video too short for fatigue analysis. Fatigue patterns require at least 10 minutes of footage (current: {{ Math.floor(videoDuration / 60) }}m {{ Math.floor(videoDuration % 60) }}s).</p>
           </div>
         </section>
 
@@ -530,129 +436,6 @@ function getFatigueColor(declinePercent: number): string {
 
         <div v-if="!reactionStats && !recoveryStats && movementEfficiency.length === 0 && fatigueProfiles.length === 0" class="aa-empty">
           <p>Movement analytics require player tracking data with speed calculations. Minimum sample thresholds must be met.</p>
-        </div>
-      </div>
-
-      <!-- ============================================================ -->
-      <!-- TACTICAL TAB (currently same data, different view) -->
-      <!-- ============================================================ -->
-      <div v-if="activeTab === 'tactical'" class="tab-panel">
-
-        <!-- Shot Pattern Strategy -->
-        <section class="aa-section" v-if="shotPatterns.length > 0">
-          <h3>Tactical Shot Patterns</h3>
-          <p class="section-desc">Most frequently used shot combinations per player</p>
-          <div class="tactical-patterns">
-            <div
-              v-for="pid in [0, 1]"
-              :key="pid"
-              class="player-patterns"
-            >
-              <div class="player-patterns-header">
-                <div class="player-badge" :style="{ background: getPlayerColor(pid) }">P{{ pid + 1 }}</div>
-                <span>Top Patterns</span>
-              </div>
-              <div class="pattern-entries">
-                <div
-                  v-for="(p, i) in shotPatterns.filter(sp => sp.playerId === pid).slice(0, 5)"
-                  :key="i"
-                  class="pattern-entry"
-                >
-                  <span class="pattern-rank">#{{ i + 1 }}</span>
-                  <span class="pattern-seq">{{ p.sequence.join(' → ') }}</span>
-                  <span class="pattern-freq">{{ p.count }}x</span>
-                </div>
-                <div v-if="shotPatterns.filter(sp => sp.playerId === pid).length === 0" class="no-patterns">
-                  No patterns detected
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- Pressure Distribution -->
-        <section class="aa-section" v-if="pressureEvents.length > 0">
-          <h3>Pressure Distribution Over Time</h3>
-          <div class="pressure-timeline">
-            <div
-              v-for="(evt, i) in pressureEvents.slice(0, 30)"
-              :key="i"
-              class="pressure-dot-wrapper"
-              :title="`P${evt.playerId + 1} - Score: ${evt.pressureScore.toFixed(0)}`"
-            >
-              <div
-                class="pressure-dot"
-                :style="{
-                  height: `${evt.pressureScore}%`,
-                  background: getPlayerColor(evt.playerId),
-                  opacity: 0.5 + (evt.pressureScore / 200)
-                }"
-              />
-            </div>
-          </div>
-          <div class="pressure-legend">
-            <span>Low Pressure</span>
-            <span>High Pressure</span>
-          </div>
-        </section>
-
-        <div v-if="shotPatterns.length === 0 && pressureEvents.length === 0" class="aa-empty">
-          <p>Tactical analytics require rally and shot detection data.</p>
-        </div>
-      </div>
-
-      <!-- ============================================================ -->
-      <!-- BENCHMARK TAB -->
-      <!-- ============================================================ -->
-      <div v-if="activeTab === 'benchmark'" class="tab-panel">
-        <section class="aa-section" v-if="benchmarkComparisons.length > 0">
-          <h3>Performance vs Professional Players</h3>
-          <p class="section-desc">How your metrics compare to BWF professional averages</p>
-          <div class="benchmark-list">
-            <div
-              v-for="(comp, i) in benchmarkComparisons"
-              :key="i"
-              class="benchmark-item"
-            >
-              <div class="benchmark-header">
-                <span class="benchmark-metric">{{ comp.metric }}</span>
-                <span class="benchmark-percentile" :style="{ color: getPercentileColor(comp.percentile) }">
-                  {{ comp.percentile.toFixed(0) }}th percentile
-                </span>
-              </div>
-              <div class="benchmark-bar-container">
-                <div class="benchmark-range">
-                  <span class="range-min">{{ comp.proRange.min }}</span>
-                  <span class="range-max">{{ comp.proRange.max }}</span>
-                </div>
-                <div class="benchmark-bar">
-                  <!-- Pro average marker -->
-                  <div
-                    class="benchmark-pro-marker"
-                    :style="{ left: `${((comp.proAverage - comp.proRange.min) / (comp.proRange.max - comp.proRange.min)) * 100}%` }"
-                    :title="`Pro Avg: ${comp.proAverage}`"
-                  />
-                  <!-- Player marker -->
-                  <div
-                    class="benchmark-player-marker"
-                    :style="{
-                      left: `${Math.min(100, Math.max(0, ((comp.playerValue - comp.proRange.min) / (comp.proRange.max - comp.proRange.min)) * 100))}%`,
-                      background: getPercentileColor(comp.percentile)
-                    }"
-                    :title="`You: ${comp.playerValue.toFixed(1)}`"
-                  />
-                </div>
-              </div>
-              <div class="benchmark-values">
-                <span>You: <strong>{{ comp.playerValue.toFixed(1) }}</strong> {{ comp.unit }}</span>
-                <span>Pro: <strong>{{ comp.proAverage.toFixed(1) }}</strong> {{ comp.unit }}</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <div v-if="benchmarkComparisons.length === 0" class="aa-empty">
-          <p>Benchmark data requires player tracking results.</p>
         </div>
       </div>
 
@@ -935,46 +718,6 @@ function getFatigueColor(declinePercent: number): string {
   color: #666;
 }
 
-/* Momentum */
-.momentum-bar {
-  padding: 12px;
-  background: #1a1a1a;
-  border: 1px solid #222;
-}
-
-.momentum-labels {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.7rem;
-  color: #888;
-  margin-bottom: 8px;
-}
-
-.momentum-track {
-  position: relative;
-  height: 24px;
-  background: #111;
-  border: 1px solid #333;
-}
-
-.momentum-center {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: #444;
-}
-
-.momentum-indicator {
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  width: 12px;
-  margin-left: -6px;
-  transition: left 0.3s ease, background 0.3s ease;
-}
-
 /* Shot Placement Heatmap */
 .shot-type-filter {
   display: flex;
@@ -1059,126 +802,6 @@ function getFatigueColor(declinePercent: number): string {
   font-size: 0.75rem;
   color: #666;
   margin-top: 6px;
-}
-
-/* Pattern List */
-.pattern-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.pattern-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 12px;
-  background: #1a1a1a;
-  border: 1px solid #222;
-}
-
-.pattern-sequence {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.pattern-shot {
-  font-size: 0.8rem;
-  color: #ccc;
-  text-transform: capitalize;
-}
-
-.pattern-arrow {
-  color: #555;
-  font-size: 0.7rem;
-}
-
-.pattern-meta {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.pattern-count {
-  font-size: 0.8rem;
-  color: #22c55e;
-  font-weight: 600;
-}
-
-.pattern-player {
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-/* Kinetic Chain */
-.chain-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.chain-item {
-  padding: 12px;
-  background: #1a1a1a;
-  border: 1px solid #222;
-}
-
-.chain-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.chain-shot {
-  font-size: 0.85rem;
-  color: #fff;
-  font-weight: 600;
-  text-transform: capitalize;
-}
-
-.chain-score {
-  font-size: 0.85rem;
-  font-weight: 700;
-}
-
-.chain-time {
-  font-size: 0.7rem;
-  color: #666;
-  margin-left: auto;
-}
-
-.chain-sequence {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.chain-joint {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.joint-name {
-  font-size: 0.75rem;
-  color: #ccc;
-  text-transform: capitalize;
-  background: #222;
-  padding: 2px 8px;
-}
-
-.joint-timing {
-  font-size: 0.65rem;
-  color: #888;
-  font-variant-numeric: tabular-nums;
-}
-
-.chain-arrow {
-  color: #555;
-  font-size: 0.7rem;
 }
 
 /* Recovery */
@@ -1386,190 +1009,6 @@ function getFatigueColor(declinePercent: number): string {
 .metric-lbl {
   font-size: 0.65rem;
   color: #888;
-}
-
-/* Tactical Patterns */
-.tactical-patterns {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 12px;
-}
-
-.player-patterns {
-  background: #1a1a1a;
-  border: 1px solid #222;
-  padding: 16px;
-}
-
-.player-patterns-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-  font-size: 0.85rem;
-  color: #ccc;
-  font-weight: 600;
-}
-
-.pattern-entries {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.pattern-entry {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  background: #151515;
-  border: 1px solid #1a1a1a;
-}
-
-.pattern-rank {
-  font-size: 0.7rem;
-  color: #666;
-  width: 20px;
-}
-
-.pattern-seq {
-  flex: 1;
-  font-size: 0.8rem;
-  color: #ccc;
-  text-transform: capitalize;
-}
-
-.pattern-freq {
-  font-size: 0.8rem;
-  color: #22c55e;
-  font-weight: 600;
-}
-
-.no-patterns {
-  font-size: 0.8rem;
-  color: #555;
-  padding: 8px;
-}
-
-/* Pressure */
-.pressure-timeline {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 100px;
-  padding: 8px;
-  background: #1a1a1a;
-  border: 1px solid #222;
-}
-
-.pressure-dot-wrapper {
-  flex: 1;
-  height: 100%;
-  display: flex;
-  align-items: flex-end;
-}
-
-.pressure-dot {
-  width: 100%;
-  min-height: 2px;
-  transition: height 0.2s;
-}
-
-.pressure-legend {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.65rem;
-  color: #666;
-  margin-top: 4px;
-}
-
-/* Benchmark */
-.benchmark-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.benchmark-item {
-  padding: 14px;
-  background: #1a1a1a;
-  border: 1px solid #222;
-}
-
-.benchmark-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-}
-
-.benchmark-metric {
-  font-size: 0.9rem;
-  color: #fff;
-  font-weight: 600;
-}
-
-.benchmark-percentile {
-  font-size: 0.8rem;
-  font-weight: 600;
-}
-
-.benchmark-bar-container {
-  margin-bottom: 8px;
-}
-
-.benchmark-range {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.65rem;
-  color: #666;
-  margin-bottom: 4px;
-}
-
-.benchmark-bar {
-  position: relative;
-  height: 16px;
-  background: linear-gradient(90deg, #222 0%, #333 50%, #222 100%);
-  border: 1px solid #333;
-}
-
-.benchmark-pro-marker {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: #888;
-  transform: translateX(-1px);
-}
-
-.benchmark-pro-marker::after {
-  content: 'Pro';
-  position: absolute;
-  top: -14px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 0.55rem;
-  color: #888;
-  white-space: nowrap;
-}
-
-.benchmark-player-marker {
-  position: absolute;
-  top: 1px;
-  bottom: 1px;
-  width: 10px;
-  transform: translateX(-5px);
-}
-
-.benchmark-values {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.75rem;
-  color: #888;
-}
-
-.benchmark-values strong {
-  color: #ccc;
 }
 
 /* Empty state */

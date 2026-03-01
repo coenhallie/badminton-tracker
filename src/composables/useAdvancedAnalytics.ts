@@ -29,14 +29,9 @@ import type {
   FatigueSegment,
   FatigueProfile,
   ReactionEvent,
-  MomentumPoint,
-  ShotPattern,
   MovementEfficiency,
   PressureEvent,
-  KineticChainEvent,
-  BenchmarkComparison,
 } from '@/types/analysis'
-import { PRO_BENCHMARKS } from '@/types/analysis'
 
 // =============================================================================
 // UTILITY HELPERS
@@ -50,11 +45,6 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
 
-function percentile(value: number, min: number, max: number): number {
-  if (max <= min) return 50
-  return clamp(((value - min) / (max - min)) * 100, 0, 100)
-}
-
 function getCenter(player: FramePlayer): { x: number; y: number } {
   return player.center || { x: 0, y: 0 }
 }
@@ -65,10 +55,6 @@ const HITTING_POSES = new Set([
   // Also accept trained model class names
   'serve', 'offense', 'lift',
 ])
-
-/** Aggressive pose types for momentum calculation */
-const AGGRESSIVE_POSES = new Set(['smash', 'overhead', 'offense', 'serving', 'serve', 'forehand'])
-const DEFENSIVE_POSES = new Set(['defense', 'lift', 'lunge', 'recovery'])
 
 /** Get the pose type string from a player, reading from player.pose (the ONLY source) */
 function getPlayerPoseType(player: FramePlayer): string | null {
@@ -102,6 +88,10 @@ export function useAdvancedAnalytics(
     const MIN_GAP_FRAMES = Math.max(3, Math.floor(fps * 0.25))
     const MIN_GAP_SECONDS = 0.3
 
+    // Build frame lookup map for O(1) access by frame number
+    const frameMap = new Map<number, SkeletonFrame>()
+    for (const f of frames) frameMap.set(f.frame, f)
+
     // --- Method 1: Shuttle trajectory direction changes ---
     const shots: RallyShot[] = []
     const shuttlePositions: { frame: number; ts: number; x: number; y: number }[] = []
@@ -129,7 +119,7 @@ export function useAdvancedAnalytics(
         const dot = vx1 * vx2 + vy1 * vy2
 
         if (dot < 0 && (p1.frame - lastShotFrame) >= MIN_GAP_FRAMES) {
-          const skFrame = frames.find(f => f.frame === p1.frame)
+          const skFrame = frameMap.get(p1.frame)
           if (skFrame && skFrame.players.length > 0) {
             // Find closest player to shuttle
             let closest = skFrame.players[0]!
@@ -196,7 +186,7 @@ export function useAdvancedAnalytics(
     }
 
     // --- Method 3: Deceleration-based detection (proven from ShotSpeedList) ---
-    const decelShots = detectShotsFromDeceleration(frames, fps)
+    const decelShots = detectShotsFromDeceleration(frames, fps, frameMap)
 
     // Merge all methods, deduplicate
     const all = mergeShots([...shots, ...poseShots, ...decelShots], MIN_GAP_FRAMES)
@@ -204,7 +194,7 @@ export function useAdvancedAnalytics(
   }
 
   /** Proven deceleration method adapted from ShotSpeedList.vue */
-  function detectShotsFromDeceleration(frames: SkeletonFrame[], fps: number): RallyShot[] {
+  function detectShotsFromDeceleration(frames: SkeletonFrame[], fps: number, frameMap: Map<number, SkeletonFrame>): RallyShot[] {
     if (frames.length < 10) return []
 
     const playerTimelines = new Map<number, {
@@ -253,7 +243,7 @@ export function useAdvancedAnalytics(
 
         if (decel > DECEL_THRESHOLD && prev3 > MIN_SPEED_BEFORE && entry.timestamp - lastShotTs > MIN_SHOT_GAP) {
           // Get pose type from this frame
-          const skFrame = frames.find(f => f.frame === entry.frame)
+          const skFrame = frameMap.get(entry.frame)
           const player = skFrame?.players.find(p => p.player_id === playerId)
           const poseType = player ? (getPlayerPoseType(player) || 'unknown') : 'unknown'
 
@@ -410,6 +400,9 @@ export function useAdvancedAnalytics(
     const rangeX = maxX - minX || 1
     const rangeY = maxY - minY || 1
 
+    const allGrid = Array.from({ length: GRID_SIZE }, () => new Array(GRID_SIZE).fill(0) as number[])
+    let allTotal = 0
+
     for (const p of placements) {
       if (!typeMap.has(p.shotType)) {
         typeMap.set(p.shotType, {
@@ -417,18 +410,11 @@ export function useAdvancedAnalytics(
           total: 0,
         })
       }
-      const entry = typeMap.get(p.shotType)!
       const gx = clamp(Math.floor(((p.position.x - minX) / rangeX) * GRID_SIZE), 0, GRID_SIZE - 1)
       const gy = clamp(Math.floor(((p.position.y - minY) / rangeY) * GRID_SIZE), 0, GRID_SIZE - 1)
+      const entry = typeMap.get(p.shotType)!
       entry.grid[gy]![gx]!++
       entry.total++
-    }
-
-    const allGrid = Array.from({ length: GRID_SIZE }, () => new Array(GRID_SIZE).fill(0) as number[])
-    let allTotal = 0
-    for (const p of placements) {
-      const gx = clamp(Math.floor(((p.position.x - minX) / rangeX) * GRID_SIZE), 0, GRID_SIZE - 1)
-      const gy = clamp(Math.floor(((p.position.y - minY) / rangeY) * GRID_SIZE), 0, GRID_SIZE - 1)
       allGrid[gy]![gx]!++
       allTotal++
     }
@@ -456,6 +442,10 @@ export function useAdvancedAnalytics(
     for (const rally of rallies.value) allShots.push(...rally.shots)
     if (allShots.length < 2) return []
 
+    // Build frame-number-to-index map for O(1) lookups
+    const frameIndexMap = new Map<number, number>()
+    for (let i = 0; i < frames.length; i++) frameIndexMap.set(frames[i]!.frame, i)
+
     // Precompute base positions (average position per player — always in pixels)
     const basePositions = new Map<number, { x: number; y: number }>()
     const posAccum = new Map<number, { sx: number; sy: number; n: number }>()
@@ -471,12 +461,37 @@ export function useAdvancedAnalytics(
       if (acc.n > 0) basePositions.set(pid, { x: acc.sx / acc.n, y: acc.sy / acc.n })
     }
 
+    // Compute noise floor per player: median frame-to-frame displacement
+    // This reflects natural keypoint jitter at this camera distance
+    const playerNoiseFloor = new Map<number, number>()
+    for (const [pid] of posAccum) {
+      const displacements: number[] = []
+      let prev: { x: number; y: number } | null = null
+      for (const f of frames) {
+        const player = f.players.find(p => p.player_id === pid)
+        if (!player) continue
+        const pos = getCenter(player)
+        if (prev) {
+          displacements.push(dist(prev, pos))
+        }
+        prev = pos
+      }
+      if (displacements.length > 10) {
+        displacements.sort((a, b) => a - b)
+        const median = displacements[Math.floor(displacements.length / 2)]!
+        // Use 2x the noise floor as the stationary threshold
+        playerNoiseFloor.set(pid, Math.max(2, median * 2))
+      } else {
+        playerNoiseFloor.set(pid, 8) // fallback
+      }
+    }
+
     for (const shot of allShots) {
       const pid = shot.playerId
       const basePos = basePositions.get(pid)
       if (!basePos) continue
 
-      const shotFrameIdx = frames.findIndex(f => f.frame >= shot.frame)
+      const shotFrameIdx = frameIndexMap.get(shot.frame) ?? frames.findIndex(f => f.frame >= shot.frame)
       if (shotFrameIdx < 0) continue
 
       const RECOVERY_WINDOW = Math.floor(fps * 2)
@@ -484,7 +499,8 @@ export function useAdvancedAnalytics(
       let recoveryPos: { x: number; y: number } | null = null
 
       // Use position displacement to detect when player stops moving
-      // (more reliable than current_speed which has 50% zero values)
+      // Threshold is calibrated to this video's noise floor
+      const stationaryThreshold = playerNoiseFloor.get(pid) ?? 8
       let prevPos: { x: number; y: number } | null = null
       let stationaryCount = 0
 
@@ -496,7 +512,7 @@ export function useAdvancedAnalytics(
         const pos = getCenter(player)
         if (prevPos) {
           const displacement = dist(prevPos, pos)
-          if (displacement < 8) { // pixels — nearly stationary between frames
+          if (displacement < stationaryThreshold) {
             stationaryCount++
             if (stationaryCount >= 3) { // Stationary for 3+ consecutive frames
               recoveryFrame = f
@@ -573,13 +589,20 @@ export function useAdvancedAnalytics(
   // 6. FATIGUE DETECTION
   // =========================================================================
 
+  const videoDuration = computed(() => {
+    const frames = analysisResult.value?.skeleton_data
+    if (!frames || frames.length < 2) return 0
+    return frames[frames.length - 1]!.timestamp - frames[0]!.timestamp
+  })
+
   const fatigueProfiles = computed<FatigueProfile[]>(() => {
     const result = analysisResult.value
     if (!result?.skeleton_data || result.skeleton_data.length < 30) return []
 
     const frames = result.skeleton_data
-    const totalDuration = frames[frames.length - 1]!.timestamp - frames[0]!.timestamp
-    if (totalDuration < 10) return []
+    const totalDuration = videoDuration.value
+    // Fatigue develops over 15-60+ minutes; analyzing short clips is meaningless
+    if (totalDuration < 600) return [] // Minimum 10 minutes
 
     const NUM_SEGMENTS = 4
     const segmentDuration = totalDuration / NUM_SEGMENTS
@@ -587,51 +610,93 @@ export function useAdvancedAnalytics(
     const playerIds = new Set<number>()
     for (const f of frames) for (const p of f.players) playerIds.add(p.player_id)
 
+    // Compute position range per player for relative grid sizing
+    const playerPosRange = new Map<number, { minX: number; maxX: number; minY: number; maxY: number }>()
+    for (const f of frames) {
+      for (const p of f.players) {
+        const c = getCenter(p)
+        let range = playerPosRange.get(p.player_id)
+        if (!range) {
+          range = { minX: c.x, maxX: c.x, minY: c.y, maxY: c.y }
+          playerPosRange.set(p.player_id, range)
+        }
+        range.minX = Math.min(range.minX, c.x)
+        range.maxX = Math.max(range.maxX, c.x)
+        range.minY = Math.min(range.minY, c.y)
+        range.maxY = Math.max(range.maxY, c.y)
+      }
+    }
+
     const profiles: FatigueProfile[] = []
+    const GRID_CELLS = 10
+    const totalGridCells = GRID_CELLS * GRID_CELLS
+    const startTs = frames[0]!.timestamp
+
+    // Precompute per-player grid config
+    const playerGridConfig = new Map<number, { cellX: number; cellY: number; offX: number; offY: number }>()
+    for (const pid of playerIds) {
+      const posRange = playerPosRange.get(pid)
+      playerGridConfig.set(pid, {
+        cellX: posRange ? Math.max(1, (posRange.maxX - posRange.minX) / GRID_CELLS) : 50,
+        cellY: posRange ? Math.max(1, (posRange.maxY - posRange.minY) / GRID_CELLS) : 50,
+        offX: posRange?.minX ?? 0,
+        offY: posRange?.minY ?? 0,
+      })
+    }
+
+    // Single-pass: accumulate segment metrics for all players simultaneously
+    type SegAccum = { totalSpeed: number; maxSpeed: number; nonZeroCount: number; positions: Set<string> }
+    const segData = new Map<number, SegAccum[]>() // pid -> segments
+    for (const pid of playerIds) {
+      segData.set(pid, Array.from({ length: NUM_SEGMENTS }, () => ({
+        totalSpeed: 0, maxSpeed: 0, nonZeroCount: 0, positions: new Set<string>(),
+      })))
+    }
+
+    for (const f of frames) {
+      const seg = Math.min(Math.floor((f.timestamp - startTs) / segmentDuration), NUM_SEGMENTS - 1)
+      for (const player of f.players) {
+        const accum = segData.get(player.player_id)?.[seg]
+        if (!accum) continue
+
+        const speed = player.current_speed || 0
+        if (speed > 0) {
+          accum.totalSpeed += speed
+          accum.maxSpeed = Math.max(accum.maxSpeed, speed)
+          accum.nonZeroCount++
+        }
+
+        const grid = playerGridConfig.get(player.player_id)!
+        const pos = getCenter(player)
+        const gx = Math.floor((pos.x - grid.offX) / grid.cellX)
+        const gy = Math.floor((pos.y - grid.offY) / grid.cellY)
+        accum.positions.add(`${gx},${gy}`)
+      }
+    }
+
+    // Pre-bucket recovery events by player+segment
+    const recoveryBuckets = new Map<string, RecoveryEvent[]>()
+    for (const e of recoveryEvents.value) {
+      const seg = Math.min(Math.floor((e.shotTimestamp - startTs) / segmentDuration), NUM_SEGMENTS - 1)
+      const key = `${e.playerId}:${seg}`
+      let bucket = recoveryBuckets.get(key)
+      if (!bucket) { bucket = []; recoveryBuckets.set(key, bucket) }
+      bucket.push(e)
+    }
 
     for (const pid of playerIds) {
+      const playerSegs = segData.get(pid)!
       const segments: FatigueSegment[] = []
       let hasEnoughData = true
 
       for (let seg = 0; seg < NUM_SEGMENTS; seg++) {
-        const segStart = frames[0]!.timestamp + seg * segmentDuration
+        const accum = playerSegs[seg]!
+        if (accum.nonZeroCount < 5) { hasEnoughData = false; break }
+
+        const segStart = startTs + seg * segmentDuration
         const segEnd = segStart + segmentDuration
-        const segFrames = frames.filter(f => f.timestamp >= segStart && f.timestamp < segEnd)
 
-        // FIXED: Only include non-zero speeds (backend sets speed=0 for unreliable measurements)
-        let totalSpeed = 0
-        let maxSpeed = 0
-        let nonZeroSpeedCount = 0
-        const positions = new Set<string>()
-
-        for (const f of segFrames) {
-          const player = f.players.find(p => p.player_id === pid)
-          if (!player) continue
-
-          const speed = player.current_speed || 0
-          if (speed > 0) {
-            totalSpeed += speed
-            maxSpeed = Math.max(maxSpeed, speed)
-            nonZeroSpeedCount++
-          }
-
-          // Grid-based court coverage (relative metric — works in pixels)
-          const pos = getCenter(player)
-          const gx = Math.floor(pos.x / 50)
-          const gy = Math.floor(pos.y / 50)
-          positions.add(`${gx},${gy}`)
-        }
-
-        // Require minimum non-zero speed samples for reliable segment data
-        if (nonZeroSpeedCount < 5) {
-          hasEnoughData = false
-          break
-        }
-
-        // Get recovery events for this segment
-        const segRecoveries = recoveryEvents.value.filter(
-          e => e.playerId === pid && e.shotTimestamp >= segStart && e.shotTimestamp < segEnd
-        )
+        const segRecoveries = recoveryBuckets.get(`${pid}:${seg}`) || []
         const avgRecovery = segRecoveries.length > 0
           ? segRecoveries.reduce((a, e) => a + e.recoveryTimeSeconds, 0) / segRecoveries.length
           : 0
@@ -641,11 +706,11 @@ export function useAdvancedAnalytics(
           startTimestamp: segStart,
           endTimestamp: segEnd,
           playerId: pid,
-          avgSpeed: totalSpeed / nonZeroSpeedCount, // Only non-zero speeds
-          maxSpeed,
-          distanceCovered: 0, // Not displayed — pixel distance is meaningless without calibration
+          avgSpeed: accum.totalSpeed / accum.nonZeroCount,
+          maxSpeed: accum.maxSpeed,
+          distanceCovered: 0,
           avgRecoveryTime: avgRecovery,
-          courtCoverage: (positions.size / 100) * 100,
+          courtCoverage: (accum.positions.size / totalGridCells) * 100,
         })
       }
 
@@ -684,6 +749,23 @@ export function useAdvancedAnalytics(
   })
 
   // =========================================================================
+  // SHARED: Inter-player distance metrics (used by reaction + pressure)
+  // =========================================================================
+
+  const interPlayerDistMetrics = computed(() => {
+    const frames = analysisResult.value?.skeleton_data
+    if (!frames) return { avg: 500, max: 500 }
+    let total = 0, count = 0, max = 0
+    for (const f of frames) {
+      if (f.players.length >= 2) {
+        const d = dist(getCenter(f.players[0]!), getCenter(f.players[1]!))
+        total += d; count++; max = Math.max(max, d)
+      }
+    }
+    return { avg: count > 0 ? total / count : 500, max: max || 500 }
+  })
+
+  // =========================================================================
   // 7. REACTION TIME
   // =========================================================================
 
@@ -695,6 +777,14 @@ export function useAdvancedAnalytics(
     const fps = result.fps || 30
     const events: ReactionEvent[] = []
 
+    // Build frame-number-to-index map for O(1) lookups
+    const frameIndexMap = new Map<number, number>()
+    for (let i = 0; i < frames.length; i++) frameIndexMap.set(frames[i]!.frame, i)
+
+    // Use 2.5% of average inter-player distance as displacement threshold
+    // This self-calibrates to the video's scale/zoom level
+    const DISPLACEMENT_THRESHOLD = Math.max(5, interPlayerDistMetrics.value.avg * 0.025)
+
     for (const rally of rallies.value) {
       for (let i = 1; i < rally.shots.length; i++) {
         const prevShot = rally.shots[i - 1]!
@@ -705,16 +795,13 @@ export function useAdvancedAnalytics(
         const respondingPlayer = currShot.playerId
         const opponentShotFrame = prevShot.frame
 
-        const startIdx = frames.findIndex(f => f.frame >= opponentShotFrame)
+        const startIdx = frameIndexMap.get(opponentShotFrame) ?? frames.findIndex(f => f.frame >= opponentShotFrame)
         if (startIdx < 0) continue
 
-        // FIXED: Use position displacement instead of filtered current_speed
-        // current_speed has ~50% zero values from backend filtering — unreliable for detecting movement start
         const basePlayer = frames[startIdx]?.players.find(p => p.player_id === respondingPlayer)
         if (!basePlayer) continue
         const basePos = getCenter(basePlayer)
 
-        const DISPLACEMENT_THRESHOLD = 15 // pixels — meaningful movement start
         let firstMovementFrame: number | null = null
 
         for (let j = startIdx + 1; j < Math.min(startIdx + Math.floor(fps * 1.5), frames.length); j++) {
@@ -769,110 +856,6 @@ export function useAdvancedAnalytics(
         totalMeasured: times.length,
       }
     })
-  })
-
-  // =========================================================================
-  // 8. RALLY MOMENTUM
-  // =========================================================================
-
-  const momentumTimeline = computed<MomentumPoint[]>(() => {
-    if (!analysisResult.value?.skeleton_data) return []
-
-    const frames = analysisResult.value.skeleton_data
-    const points: MomentumPoint[] = []
-    let momentum = 0
-
-    for (const rally of rallies.value) {
-      for (const shot of rally.shots) {
-        const direction = shot.playerId === 0 ? 1 : -1
-
-        // FIXED: Use player.pose types (now correctly read), with speed-based fallback
-        let aggressiveness = 0.05 // base — neutral shot
-        if (AGGRESSIVE_POSES.has(shot.shotType)) {
-          aggressiveness = 0.15
-        } else if (DEFENSIVE_POSES.has(shot.shotType)) {
-          aggressiveness = -0.05
-        } else if (shot.shotType === 'unknown') {
-          // Fallback: use player speed as aggression proxy
-          const skFrame = frames.find(f => f.frame === shot.frame)
-          const player = skFrame?.players.find(p => p.player_id === shot.playerId)
-          const speed = player?.current_speed || 0
-          if (speed > 8) aggressiveness = 0.12       // fast movement = aggressive
-          else if (speed > 4) aggressiveness = 0.07
-          // else keep 0.05 default
-        }
-
-        momentum += direction * aggressiveness
-        momentum = clamp(momentum, -1, 1)
-        momentum *= 0.92
-
-        points.push({
-          frame: shot.frame,
-          timestamp: shot.timestamp,
-          momentum,
-          reason: `P${shot.playerId + 1} ${shot.shotType}`,
-        })
-      }
-      momentum *= 0.5
-    }
-
-    return points
-  })
-
-  // =========================================================================
-  // 9. SHOT SEQUENCE PATTERNS
-  // =========================================================================
-
-  const shotPatterns = computed<ShotPattern[]>(() => {
-    // Need minimum shots for meaningful patterns
-    const totalShots = rallies.value.reduce((s, r) => s + r.shotCount, 0)
-    if (totalShots < 5) return []
-
-    const patternMap = new Map<string, { count: number; playerId: number }>()
-
-    for (const rally of rallies.value) {
-      // 2-shot sequences from same player (alternating shots)
-      for (let i = 0; i < rally.shots.length - 2; i++) {
-        const s1 = rally.shots[i]!
-        const s3 = rally.shots[i + 2]!
-
-        if (s1.playerId === s3.playerId && s1.shotType !== 'unknown' && s3.shotType !== 'unknown') {
-          const seq = [s1.shotType, s3.shotType]
-          const key = `${s1.playerId}:${seq.join('\u2192')}`
-          if (!patternMap.has(key)) patternMap.set(key, { count: 0, playerId: s1.playerId })
-          patternMap.get(key)!.count++
-        }
-      }
-
-      // 3-consecutive-shot patterns from same player
-      const playerShots = new Map<number, RallyShot[]>()
-      for (const shot of rally.shots) {
-        if (!playerShots.has(shot.playerId)) playerShots.set(shot.playerId, [])
-        playerShots.get(shot.playerId)!.push(shot)
-      }
-
-      for (const [pid, shots] of playerShots) {
-        for (let i = 0; i < shots.length - 2; i++) {
-          // Skip patterns with 'unknown' types — not informative
-          if (shots[i]!.shotType === 'unknown' || shots[i + 1]!.shotType === 'unknown' || shots[i + 2]!.shotType === 'unknown') continue
-          const seq = [shots[i]!.shotType, shots[i + 1]!.shotType, shots[i + 2]!.shotType]
-          const key = `${pid}:${seq.join('\u2192')}`
-          if (!patternMap.has(key)) patternMap.set(key, { count: 0, playerId: pid })
-          patternMap.get(key)!.count++
-        }
-      }
-    }
-
-    return Array.from(patternMap.entries())
-      .map(([key, data]) => ({
-        sequence: key.split(':')[1]?.split('\u2192') || [],
-        count: data.count,
-        successRate: null,
-        playerId: data.playerId,
-      }))
-      .filter(p => p.count >= 2)
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 15)
   })
 
   // =========================================================================
@@ -946,41 +929,35 @@ export function useAdvancedAnalytics(
     const frames = result.skeleton_data
     const events: PressureEvent[] = []
 
-    // Precompute max distance for normalization
-    let maxPlayerDist = 0
-    for (const f of frames) {
-      if (f.players.length >= 2) {
-        const d = dist(getCenter(f.players[0]!), getCenter(f.players[1]!))
-        maxPlayerDist = Math.max(maxPlayerDist, d)
-      }
-    }
-    if (maxPlayerDist === 0) maxPlayerDist = 500 // fallback
+    // Build frame lookup map for O(1) access
+    const frameMap = new Map<number, SkeletonFrame>()
+    for (const f of frames) frameMap.set(f.frame, f)
+
+    const maxPlayerDist = interPlayerDistMetrics.value.max
 
     for (const rally of rallies.value) {
       for (let i = 0; i < rally.shots.length; i++) {
         const shot = rally.shots[i]!
         const hitterId = shot.playerId
 
-        const skFrame = frames.find(f => f.frame === shot.frame)
+        const skFrame = frameMap.get(shot.frame)
         if (!skFrame) continue
 
         const hitter = skFrame.players.find(p => p.player_id === hitterId)
         const opponent = skFrame.players.find(p => p.player_id !== hitterId)
         if (!hitter || !opponent) continue
 
-        const hitterPos = getCenter(hitter)
         const opponentPos = getCenter(opponent)
 
-        // FIXED: Only use reliably-available factors (removed shuttle_speed_kmh)
+        // Simplified to 2 reliable factors (50/50 weighting)
 
-        // Factor 1: Distance opponent must travel (40%)
-        // Higher distance from opponent to shot position = more pressure
+        // Factor 1: Opponent travel distance normalized by max observed distance (50%)
         const opponentTravelDist = shot.shuttlePosition
           ? dist(shot.shuttlePosition, opponentPos)
-          : dist(shot.playerPosition, opponentPos) // Use hitter position as proxy
+          : dist(shot.playerPosition, opponentPos)
         const travelFactor = clamp((opponentTravelDist / maxPlayerDist) * 100, 0, 100)
 
-        // Factor 2: Time pressure — shorter time between shots = more pressure (30%)
+        // Factor 2: Time pressure — shorter time between shots = more pressure (50%)
         let timeFactor = 50 // default mid-range
         if (i + 1 < rally.shots.length) {
           const nextShot = rally.shots[i + 1]!
@@ -989,12 +966,8 @@ export function useAdvancedAnalytics(
           timeFactor = clamp((1 - (timeBetween - 0.3) / 1.7) * 100, 0, 100)
         }
 
-        // Factor 3: Court position — how displaced the opponent is from their base (30%)
-        const opponentDisplacement = dist(opponentPos, hitterPos)
-        const positionFactor = clamp((opponentDisplacement / maxPlayerDist) * 100, 0, 100)
-
         const pressureScore = clamp(
-          travelFactor * 0.4 + timeFactor * 0.3 + positionFactor * 0.3,
+          travelFactor * 0.5 + timeFactor * 0.5,
           0, 100
         )
 
@@ -1004,10 +977,10 @@ export function useAdvancedAnalytics(
           playerId: hitterId,
           pressureScore,
           factors: {
-            shotSpeed: 0, // Not available reliably
+            shotSpeed: 0,
             placementDifficulty: travelFactor,
             recoveryTimeForced: timeFactor,
-            courtPositionAdvantage: positionFactor,
+            courtPositionAdvantage: 0,
           },
         })
       }
@@ -1017,230 +990,12 @@ export function useAdvancedAnalytics(
   })
 
   // =========================================================================
-  // 12. KINETIC CHAIN ANALYSIS
-  // =========================================================================
-
-  const kineticChainEvents = computed<KineticChainEvent[]>(() => {
-    const result = analysisResult.value
-    if (!result?.skeleton_data) return []
-
-    const frames = result.skeleton_data
-    const fps = result.fps || 30
-    const events: KineticChainEvent[] = []
-
-    const JOINTS = [
-      { name: 'hip', indices: [11, 12] },
-      { name: 'shoulder', indices: [5, 6] },
-      { name: 'elbow', indices: [7, 8] },
-      { name: 'wrist', indices: [9, 10] },
-    ]
-
-    // FIXED: Accept power shots from player.pose (now correctly read via detectAllShots)
-    const POWER_POSES = new Set(['smash', 'overhead', 'serving', 'serve', 'offense', 'forehand', 'clear'])
-
-    for (const rally of rallies.value) {
-      for (const shot of rally.shots) {
-        // Accept shots with known power pose types
-        if (!POWER_POSES.has(shot.shotType)) continue
-
-        const shotIdx = frames.findIndex(f => f.frame === shot.frame)
-        if (shotIdx < 0) continue
-
-        const WINDOW = 10
-        const startIdx = Math.max(0, shotIdx - WINDOW)
-        const endIdx = Math.min(frames.length - 1, shotIdx + WINDOW)
-        const windowFrames = frames.slice(startIdx, endIdx + 1)
-
-        const player = frames[shotIdx]?.players.find(p => p.player_id === shot.playerId)
-        if (!player?.keypoints || player.keypoints.length < 17) continue
-
-        const chainSequence: KineticChainEvent['chainSequence'] = []
-
-        for (const joint of JOINTS) {
-          const velocities: { frame: number; vel: number }[] = []
-
-          for (let i = 1; i < windowFrames.length; i++) {
-            const prevFrame = windowFrames[i - 1]!
-            const currFrame = windowFrames[i]!
-            const prevPlayer = prevFrame.players.find(p => p.player_id === shot.playerId)
-            const currPlayer = currFrame.players.find(p => p.player_id === shot.playerId)
-
-            if (!prevPlayer?.keypoints?.length || !currPlayer?.keypoints?.length) continue
-
-            let totalVel = 0
-            let validCount = 0
-            for (const idx of joint.indices) {
-              const prevKp = prevPlayer.keypoints[idx]
-              const currKp = currPlayer.keypoints[idx]
-              if (prevKp?.x != null && prevKp?.y != null && currKp?.x != null && currKp?.y != null) {
-                const dt = (currFrame.frame - prevFrame.frame) / fps
-                if (dt > 0) {
-                  totalVel += dist({ x: prevKp.x, y: prevKp.y }, { x: currKp.x, y: currKp.y }) / dt
-                  validCount++
-                }
-              }
-            }
-
-            if (validCount > 0) {
-              velocities.push({ frame: currFrame.frame, vel: totalVel / validCount })
-            }
-          }
-
-          if (velocities.length > 0) {
-            const peak = velocities.reduce((max, v) => v.vel > max.vel ? v : max, velocities[0]!)
-            chainSequence.push({
-              joint: joint.name,
-              peakFrame: peak.frame,
-              peakVelocity: peak.vel,
-              timing: ((peak.frame - shot.frame) / fps) * 1000,
-            })
-          }
-        }
-
-        if (chainSequence.length >= 3) {
-          let score = 50
-          for (let i = 1; i < chainSequence.length; i++) {
-            if (chainSequence[i]!.timing > chainSequence[i - 1]!.timing) score += 12.5
-            else score -= 10
-          }
-
-          events.push({
-            frame: shot.frame,
-            timestamp: shot.timestamp,
-            playerId: shot.playerId,
-            shotType: shot.shotType,
-            chainSequence,
-            chainScore: clamp(score, 0, 100),
-          })
-        }
-      }
-    }
-
-    return events
-  })
-
-  // =========================================================================
-  // 13. BENCHMARK AGAINST PROS
-  // =========================================================================
-
-  const benchmarkComparisons = computed<BenchmarkComparison[]>(() => {
-    const result = analysisResult.value
-    if (!result?.players?.length) return []
-
-    const comparisons: BenchmarkComparison[] = []
-    const benchmarks = PRO_BENCHMARKS
-
-    // Average speed (already in km/h from backend)
-    const avgSpeed = result.players.reduce((s, p) => s + p.avg_speed, 0) / result.players.length
-    comparisons.push({
-      metric: 'Average Speed',
-      playerValue: avgSpeed,
-      proAverage: benchmarks.avgSpeed.avg,
-      proRange: { min: benchmarks.avgSpeed.min, max: benchmarks.avgSpeed.max },
-      percentile: percentile(avgSpeed, benchmarks.avgSpeed.min, benchmarks.avgSpeed.max),
-      unit: benchmarks.avgSpeed.unit,
-    })
-
-    // Max speed
-    const maxSpd = Math.max(...result.players.map(p => p.max_speed))
-    comparisons.push({
-      metric: 'Max Speed',
-      playerValue: maxSpd,
-      proAverage: benchmarks.maxSpeed.avg,
-      proRange: { min: benchmarks.maxSpeed.min, max: benchmarks.maxSpeed.max },
-      percentile: percentile(maxSpd, benchmarks.maxSpeed.min, benchmarks.maxSpeed.max),
-      unit: benchmarks.maxSpeed.unit,
-    })
-
-    // REMOVED: totalDistance comparison — clip is NOT a full game, comparing to "per game" stats is misleading
-    // REMOVED: smashSpeed — shuttle speed rarely available
-
-    // Reaction time (if enough data)
-    const rStats = reactionStats.value
-    if (rStats && rStats.length > 0) {
-      const avgReaction = rStats.reduce((s, p) => s + p.avgReactionMs, 0) / rStats.length
-      comparisons.push({
-        metric: 'Reaction Time',
-        playerValue: avgReaction,
-        proAverage: benchmarks.reactionTime.avg,
-        proRange: { min: benchmarks.reactionTime.min, max: benchmarks.reactionTime.max },
-        percentile: 100 - percentile(avgReaction, benchmarks.reactionTime.min, benchmarks.reactionTime.max),
-        unit: benchmarks.reactionTime.unit,
-      })
-    }
-
-    // Recovery time
-    const recStats = recoveryStats.value
-    if (recStats && recStats.perPlayer.length > 0) {
-      const avgRecovery = recStats.perPlayer.reduce((s, p) => s + p.avgRecoveryTime, 0) / recStats.perPlayer.length
-      comparisons.push({
-        metric: 'Recovery Time',
-        playerValue: avgRecovery,
-        proAverage: benchmarks.recoveryTime.avg,
-        proRange: { min: benchmarks.recoveryTime.min, max: benchmarks.recoveryTime.max },
-        percentile: 100 - percentile(avgRecovery, benchmarks.recoveryTime.min, benchmarks.recoveryTime.max),
-        unit: benchmarks.recoveryTime.unit,
-      })
-    }
-
-    // Rally stats
-    if (rallies.value.length >= 3) { // Need minimum rallies for meaningful comparison
-      const avgShotsPerRally = rallies.value.reduce((s, r) => s + r.shotCount, 0) / rallies.value.length
-      comparisons.push({
-        metric: 'Shots per Rally',
-        playerValue: avgShotsPerRally,
-        proAverage: benchmarks.shotsPerRally.avg,
-        proRange: { min: benchmarks.shotsPerRally.min, max: benchmarks.shotsPerRally.max },
-        percentile: percentile(avgShotsPerRally, benchmarks.shotsPerRally.min, benchmarks.shotsPerRally.max),
-        unit: benchmarks.shotsPerRally.unit,
-      })
-
-      const avgRallyDur = rallies.value.reduce((s, r) => s + r.durationSeconds, 0) / rallies.value.length
-      comparisons.push({
-        metric: 'Rally Duration',
-        playerValue: avgRallyDur,
-        proAverage: benchmarks.rallyDuration.avg,
-        proRange: { min: benchmarks.rallyDuration.min, max: benchmarks.rallyDuration.max },
-        percentile: percentile(avgRallyDur, benchmarks.rallyDuration.min, benchmarks.rallyDuration.max),
-        unit: benchmarks.rallyDuration.unit,
-      })
-    }
-
-    // Movement efficiency
-    if (movementEfficiency.value.length > 0) {
-      const avgEff = movementEfficiency.value.reduce((s, e) => s + e.efficiencyScore, 0) / movementEfficiency.value.length
-      comparisons.push({
-        metric: 'Movement Efficiency',
-        playerValue: avgEff,
-        proAverage: benchmarks.movementEfficiency.avg,
-        proRange: { min: benchmarks.movementEfficiency.min, max: benchmarks.movementEfficiency.max },
-        percentile: percentile(avgEff, benchmarks.movementEfficiency.min, benchmarks.movementEfficiency.max),
-        unit: benchmarks.movementEfficiency.unit,
-      })
-    }
-
-    return comparisons
-  })
-
-  // =========================================================================
   // SUMMARY / CURRENT STATE
   // =========================================================================
 
   const currentRally = computed<Rally | null>(() => {
     const frame = currentFrame.value
     return rallies.value.find(r => frame >= r.startFrame && frame <= r.endFrame) || null
-  })
-
-  const currentMomentum = computed(() => {
-    const frame = currentFrame.value
-    const pts = momentumTimeline.value
-    if (pts.length === 0) return 0
-    let latest = pts[0]!
-    for (const p of pts) {
-      if (p.frame <= frame) latest = p
-      else break
-    }
-    return latest.momentum
   })
 
   // =========================================================================
@@ -1256,15 +1011,11 @@ export function useAdvancedAnalytics(
     recoveryEvents,
     recoveryStats,
     fatigueProfiles,
+    videoDuration,
     reactionEvents,
     reactionStats,
-    momentumTimeline,
-    currentMomentum,
-    shotPatterns,
     movementEfficiency,
     pressureEvents,
-    kineticChainEvents,
-    benchmarkComparisons,
     isComputing,
   }
 }

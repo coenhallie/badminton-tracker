@@ -51,14 +51,7 @@ export const listVideos = query({
       .order("desc")
       .take(50)
     
-    return Promise.all(
-      videos.map(async (video) => ({
-        ...video,
-        videoUrl: video.storageId 
-          ? await ctx.storage.getUrl(video.storageId)
-          : null,
-      }))
-    )
+    return videos
   },
 })
 
@@ -261,9 +254,7 @@ export const deleteVideo = mutation({
       .withIndex("by_videoId", (q) => q.eq("videoId", videoId))
       .collect()
     
-    for (const log of logs) {
-      await ctx.db.delete(log._id)
-    }
+    await Promise.all(logs.map(log => ctx.db.delete(log._id)))
     
     // Delete video record
     await ctx.db.delete(videoId)

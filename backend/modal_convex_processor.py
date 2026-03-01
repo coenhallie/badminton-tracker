@@ -1058,8 +1058,16 @@ with_reid: False
                 print(f"[MODAL] Court ROI init error: {e}")
         MOVEMENT_WARMUP_FRAMES = 45  # Build movement history for 1.5 seconds before filtering
         
+        # Shuttle false-positive filter: suppress static objects misidentified as shuttles
+        # A real shuttle is always moving; static detections are court markings/logos
+        shuttle_static_clusters = []  # List of {x, y, count} for positions that keep appearing
+        SHUTTLE_STATIC_DIST_THRESHOLD = 15  # pixels — detections within this distance are "same spot"
+        SHUTTLE_STATIC_COUNT_THRESHOLD = 5   # if a position appears 5+ times statically, it's a false positive
+        prev_shuttle_pos = None  # previous frame's accepted shuttle position
+        SHUTTLE_MIN_MOVEMENT = 10  # pixels — minimum movement between frames to count as "moving"
+
         last_progress_update = time.time()
-        
+
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -1137,17 +1145,52 @@ with_reid: False
                         # Skip all other classes (chairs, tables, person, etc.)
                         # Person detections are also skipped as players come from pose model
             
-            # Extract best shuttle position for tracking
+            # Extract best shuttle position with static false-positive filtering
             shuttle_position = None
             if badminton_detections["shuttlecocks"]:
-                best_shuttle = max(
-                    badminton_detections["shuttlecocks"],
-                    key=lambda s: s["confidence"]
-                )
-                shuttle_position = {
-                    "x": best_shuttle["x"],
-                    "y": best_shuttle["y"]
-                }
+                candidates = sorted(badminton_detections["shuttlecocks"], key=lambda s: s["confidence"], reverse=True)
+
+                for candidate in candidates:
+                    cx, cy = candidate["x"], candidate["y"]
+
+                    # Check if this position is near a known static cluster
+                    is_static = False
+                    for cluster in shuttle_static_clusters:
+                        if math.sqrt((cx - cluster["x"])**2 + (cy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD:
+                            cluster["count"] += 1
+                            cluster["x"] = (cluster["x"] * (cluster["count"] - 1) + cx) / cluster["count"]
+                            cluster["y"] = (cluster["y"] * (cluster["count"] - 1) + cy) / cluster["count"]
+                            is_static = True
+                            break
+
+                    if is_static:
+                        continue
+
+                    # Check if it moved relative to previous shuttle position
+                    if prev_shuttle_pos is not None:
+                        movement = math.sqrt((cx - prev_shuttle_pos["x"])**2 + (cy - prev_shuttle_pos["y"])**2)
+                        if movement < SHUTTLE_MIN_MOVEMENT:
+                            found_cluster = False
+                            for cluster in shuttle_static_clusters:
+                                if math.sqrt((cx - cluster["x"])**2 + (cy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD * 2:
+                                    cluster["count"] += 1
+                                    found_cluster = True
+                                    break
+                            if not found_cluster:
+                                shuttle_static_clusters.append({"x": cx, "y": cy, "count": 1})
+                            continue
+
+                    shuttle_position = {"x": cx, "y": cy}
+                    break
+
+                if shuttle_position:
+                    prev_shuttle_pos = shuttle_position
+
+                # Prune: only keep confirmed static clusters
+                shuttle_static_clusters = [
+                    c for c in shuttle_static_clusters
+                    if c["count"] >= SHUTTLE_STATIC_COUNT_THRESHOLD
+                ]
             
             # Extract skeleton data from pose model with tracking
             frame_data = {

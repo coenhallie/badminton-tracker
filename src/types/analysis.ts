@@ -667,22 +667,6 @@ export interface ReactionEvent {
   movementStartTimestamp: number
 }
 
-// --- Rally Momentum ---
-export interface MomentumPoint {
-  frame: number
-  timestamp: number
-  momentum: number  // -1 to 1 (negative = player 2 dominating, positive = player 1)
-  reason: string
-}
-
-// --- Shot Sequence Patterns ---
-export interface ShotPattern {
-  sequence: string[]  // e.g., ['clear', 'drop', 'net_shot']
-  count: number
-  successRate: number | null  // % of times this pattern led to winning the rally
-  playerId: number
-}
-
 // --- Movement Efficiency ---
 export interface MovementEfficiency {
   playerId: number
@@ -707,41 +691,3 @@ export interface PressureEvent {
   }
 }
 
-// --- Kinetic Chain ---
-export interface KineticChainEvent {
-  frame: number
-  timestamp: number
-  playerId: number
-  shotType: string
-  chainSequence: {
-    joint: string
-    peakFrame: number
-    peakVelocity: number
-    timing: number  // ms relative to contact
-  }[]
-  chainScore: number  // 0-100, how well-sequenced the chain is
-}
-
-// --- Benchmark ---
-export interface BenchmarkComparison {
-  metric: string
-  playerValue: number
-  proAverage: number
-  proRange: { min: number; max: number }
-  percentile: number  // where the player falls (0-100)
-  unit: string
-}
-
-// Professional badminton benchmarks (from BWF data)
-export const PRO_BENCHMARKS = {
-  avgSpeed: { avg: 8.5, min: 6.0, max: 12.0, unit: 'km/h' },
-  maxSpeed: { avg: 18.0, min: 14.0, max: 25.0, unit: 'km/h' },
-  totalDistance: { avg: 1800, min: 1200, max: 2800, unit: 'm (per game)' },
-  reactionTime: { avg: 280, min: 180, max: 400, unit: 'ms' },
-  recoveryTime: { avg: 1.2, min: 0.6, max: 2.0, unit: 's' },
-  courtCoverage: { avg: 72, min: 55, max: 90, unit: '%' },
-  shotsPerRally: { avg: 8, min: 4, max: 20, unit: 'shots' },
-  rallyDuration: { avg: 8.5, min: 3.0, max: 25.0, unit: 's' },
-  movementEfficiency: { avg: 68, min: 50, max: 85, unit: '%' },
-  smashSpeed: { avg: 300, min: 200, max: 493, unit: 'km/h (shuttle)' },
-} as const
