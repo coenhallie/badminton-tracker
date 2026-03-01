@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toRef, type Ref } from 'vue'
-import type { SkeletonFrame, Keypoint, BadmintonDetections, BoundingBoxDetection } from '@/types/analysis'
+import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, BoundingBoxDetection } from '@/types/analysis'
 import { SKELETON_CONNECTIONS, PLAYER_COLORS } from '@/types/analysis'
 import PoseOverlay from './PoseOverlay.vue'
 import { useVideoExport } from '@/composables/useVideoExport'
@@ -389,7 +389,13 @@ const progressPercent = computed(() =>
 
 const currentFrame = computed(() => {
   if (!videoRef.value) return 0
-  const fps = 30 // Assume 30fps, would be better to get from video metadata
+  // Derive FPS from skeleton data timestamps if available, else fall back to 30
+  const skData = props.skeletonData
+  let fps = 30
+  if (skData && skData.length >= 2) {
+    const totalTs = skData[skData.length - 1]!.timestamp - skData[0]!.timestamp
+    if (totalTs > 0) fps = (skData.length - 1) / totalTs
+  }
   return Math.floor(currentTime.value * fps)
 })
 
@@ -514,16 +520,149 @@ const currentSkeletonFrame = computed(() => {
   return findFrameAtOrBefore(currentTime.value)
 })
 
-// NOTE: Interpolation functions (getInterpolatedFrame, interpolateBoundingBoxes)
-// have been intentionally removed. Interpolating skeleton/bounding box positions
-// between keyframes causes the overlay to lead the video because:
-// 1. Video displays discrete frames, but interpolation creates continuous positions
-// 2. The interpolated position at time T may predict where the player will be in
-//    the NEXT video frame, causing the skeleton to appear to anticipate movement
-// 3. requestAnimationFrame fires independently of video frame presentation
-//
-// Instead, we now use exact frame lookup with floor semantics (findFrameAtOrBefore)
-// combined with requestVideoFrameCallback for frame-accurate synchronization.
+/**
+ * Find interpolated skeleton frame for smooth overlay rendering.
+ * Returns a synthetic SkeletonFrame with positions lerped between the
+ * floor frame (at-or-before targetTime) and the ceiling frame (after targetTime).
+ *
+ * This does NOT cause the skeleton to lead the video because:
+ * - The blend factor t is clamped to [0, 1] between two real frames
+ * - At t=0, we show the floor frame exactly (same as findFrameAtOrBefore)
+ * - At t=1, we show the ceiling frame — but only when targetTime has reached it
+ * - We never extrapolate beyond the ceiling frame
+ *
+ * The interpolation ONLY affects rendering coordinates (keypoints, center,
+ * bounding boxes). Analytics reads raw skeleton_data directly and is unaffected.
+ */
+function findInterpolatedFrame(targetTime: number): SkeletonFrame | null {
+  if (!props.skeletonData || props.skeletonData.length === 0) return null
+
+  const timestamps = timestampIndex.value
+  if (timestamps.length === 0) return null
+
+  // Binary search for floor index (last frame with timestamp <= targetTime)
+  let left = 0
+  let right = timestamps.length - 1
+  let floorIdx = -1
+
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2)
+    const midVal = timestamps[mid]
+    if (midVal !== undefined && midVal <= targetTime) {
+      floorIdx = mid
+      left = mid + 1
+    } else {
+      right = mid - 1
+    }
+  }
+
+  if (floorIdx < 0) {
+    const firstTimestamp = timestamps[0]
+    if (firstTimestamp !== undefined && firstTimestamp - targetTime < 0.02) {
+      return props.skeletonData[0] ?? null
+    }
+    return null
+  }
+
+  const floorFrame = props.skeletonData[floorIdx]!
+  const ceilIdx = floorIdx + 1
+
+  // If no ceiling frame or we're exactly on a frame, return floor
+  if (ceilIdx >= timestamps.length) return floorFrame
+
+  const ceilFrame = props.skeletonData[ceilIdx]!
+  const floorTs = timestamps[floorIdx]!
+  const ceilTs = timestamps[ceilIdx]!
+  const span = ceilTs - floorTs
+  if (span <= 0) return floorFrame
+
+  const t = (targetTime - floorTs) / span
+
+  // If very close to floor frame, just return it (avoid unnecessary work)
+  if (t < 0.01) return floorFrame
+  // If very close to ceiling frame, return ceiling
+  if (t > 0.99) return ceilFrame
+
+  // Interpolate player positions
+  const interpolatedPlayers: FramePlayer[] = floorFrame.players.map(floorPlayer => {
+    // Find matching player in ceiling frame by player_id
+    const ceilPlayer = ceilFrame.players.find(p => p.player_id === floorPlayer.player_id)
+    if (!ceilPlayer) return floorPlayer // No match — use floor as-is
+
+    // Lerp center
+    const center = {
+      x: floorPlayer.center.x + (ceilPlayer.center.x - floorPlayer.center.x) * t,
+      y: floorPlayer.center.y + (ceilPlayer.center.y - floorPlayer.center.y) * t,
+    }
+
+    // Lerp keypoints
+    const keypoints: Keypoint[] = floorPlayer.keypoints.map((floorKp, i) => {
+      const ceilKp = ceilPlayer.keypoints[i]
+      if (!ceilKp || floorKp.x === null || floorKp.y === null ||
+          ceilKp.x === null || ceilKp.y === null) {
+        return floorKp
+      }
+      return {
+        name: floorKp.name,
+        x: floorKp.x + (ceilKp.x - floorKp.x) * t,
+        y: floorKp.y + (ceilKp.y - floorKp.y) * t,
+        confidence: Math.min(floorKp.confidence, ceilKp.confidence),
+      }
+    })
+
+    return {
+      ...floorPlayer,
+      center,
+      keypoints,
+      // Keep speed/pose from floor frame (non-interpolatable)
+    }
+  })
+
+  // Interpolate shuttle position if both frames have one
+  let shuttle_position = floorFrame.shuttle_position
+  if (floorFrame.shuttle_position && ceilFrame.shuttle_position) {
+    shuttle_position = {
+      x: floorFrame.shuttle_position.x + (ceilFrame.shuttle_position.x - floorFrame.shuttle_position.x) * t,
+      y: floorFrame.shuttle_position.y + (ceilFrame.shuttle_position.y - floorFrame.shuttle_position.y) * t,
+    }
+  }
+
+  // Interpolate bounding box positions
+  let badminton_detections = floorFrame.badminton_detections
+  if (floorFrame.badminton_detections && ceilFrame.badminton_detections) {
+    const lerpDetections = (
+      floorDets: BoundingBoxDetection[],
+      ceilDets: BoundingBoxDetection[]
+    ): BoundingBoxDetection[] => {
+      return floorDets.map(fd => {
+        // Match by class and closest position
+        const cd = ceilDets.find(d => d.class === fd.class)
+        if (!cd) return fd
+        return {
+          ...fd,
+          x: fd.x + (cd.x - fd.x) * t,
+          y: fd.y + (cd.y - fd.y) * t,
+          width: fd.width + (cd.width - fd.width) * t,
+          height: fd.height + (cd.height - fd.height) * t,
+        }
+      })
+    }
+
+    badminton_detections = {
+      ...floorFrame.badminton_detections,
+      players: lerpDetections(floorFrame.badminton_detections.players, ceilFrame.badminton_detections.players),
+      shuttlecocks: lerpDetections(floorFrame.badminton_detections.shuttlecocks, ceilFrame.badminton_detections.shuttlecocks),
+      rackets: lerpDetections(floorFrame.badminton_detections.rackets, ceilFrame.badminton_detections.rackets),
+    }
+  }
+
+  return {
+    ...floorFrame,
+    players: interpolatedPlayers,
+    shuttle_position,
+    badminton_detections,
+  }
+}
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60)
@@ -993,13 +1132,12 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   }
 
   // PERFORMANCE OPTIMIZATION: Skip rendering if nothing has changed.
-  // When called from animation loop (exactFrame provided), skip if same frame
-  // since there's no interpolation — the same skeleton frame means identical output.
-  // When called from watchers (no exactFrame), also skip if same frame number.
-  if (frame && !hasHeatmapToRender) {
+  // During playback, interpolated frames have continuously changing positions
+  // so we always redraw. When paused (no exactFrame), skip if same frame number.
+  if (frame && !hasHeatmapToRender && exactFrame === undefined) {
     if (frame.frame === lastFrameNumber) return
-    lastFrameNumber = frame.frame
-  } else if (frame) {
+  }
+  if (frame) {
     lastFrameNumber = frame.frame
   }
   
@@ -1431,9 +1569,9 @@ function startSkeletonAnimation() {
       // Use the exact media time from the video frame just presented
       currentTime.value = metadata.mediaTime
 
-      // Find the skeleton frame at or just before this exact video frame time
-      // No interpolation — this ensures pixel-perfect alignment with the video
-      const frame = findFrameAtOrBefore(metadata.mediaTime)
+      // Interpolate skeleton between floor/ceiling frames for smooth overlay
+      // This never leads the video — t is clamped within [floorTime, ceilTime]
+      const frame = findInterpolatedFrame(metadata.mediaTime)
       drawOverlay(frame)
 
       // Request callback for the next video frame
@@ -1441,15 +1579,14 @@ function startSkeletonAnimation() {
     }
     videoFrameCallbackId = video.requestVideoFrameCallback(onVideoFrame)
   } else {
-    // Fallback: requestAnimationFrame loop without interpolation
+    // Fallback: requestAnimationFrame loop with interpolation
     const animate = () => {
       if (videoRef.value) {
         currentTime.value = videoRef.value.currentTime
       }
 
-      // Floor-semantic lookup: find the skeleton frame at or just before
-      // the current video time. Never returns a future frame.
-      const frame = findFrameAtOrBefore(currentTime.value)
+      // Interpolate skeleton between floor/ceiling frames for smooth overlay
+      const frame = findInterpolatedFrame(currentTime.value)
       drawOverlay(frame)
 
       animationFrameId = requestAnimationFrame(animate)
