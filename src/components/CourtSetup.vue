@@ -480,7 +480,7 @@ watch(videoDimensions, () => {
 }
 
 .setup-header h2 {
-  color: #22c55e;
+  color: var(--color-accent);
   font-size: 1.5rem;
   margin: 0 0 8px 0;
 }
@@ -491,7 +491,7 @@ watch(videoDimensions, () => {
 }
 
 .setup-content {
-  background: #0d0d0d;
+  background: var(--color-bg);
   width: 100%;
 }
 
@@ -508,8 +508,8 @@ watch(videoDimensions, () => {
 .spinner {
   width: 40px;
   height: 40px;
-  border: 3px solid #333;
-  border-top-color: #22c55e;
+  border: 3px solid var(--color-border-secondary);
+  border-top-color: var(--color-accent);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -541,12 +541,12 @@ watch(videoDimensions, () => {
 .selection-canvas {
   display: block;
   cursor: crosshair;
-  border: 2px solid #333;
+  border: 2px solid var(--color-border-secondary);
 }
 
 .selection-canvas.complete {
   cursor: default;
-  border-color: #22c55e;
+  border-color: var(--color-accent);
 }
 
 /* MiniCourt keypoint guide - slightly larger for better visibility */
@@ -570,8 +570,8 @@ watch(videoDimensions, () => {
   align-items: center;
   gap: 12px;
   padding: 16px 24px;
-  background: #0d0d0d;
-  border: 2px solid #22c55e;
+  background: var(--color-bg);
+  border: 2px solid var(--color-accent);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   z-index: 20;
 }
@@ -584,7 +584,7 @@ watch(videoDimensions, () => {
 }
 
 .keypoint-title {
-  color: #22c55e;
+  color: var(--color-accent);
   font-weight: bold;
   font-size: 1rem;
 }
@@ -601,7 +601,7 @@ watch(videoDimensions, () => {
 
 .keypoint-btn {
   padding: 8px 16px;
-  border: 1px solid #333;
+  border: 1px solid var(--color-border-secondary);
   font-weight: bold;
   font-size: 0.875rem;
   cursor: pointer;
@@ -614,20 +614,20 @@ watch(videoDimensions, () => {
 }
 
 .keypoint-btn.undo {
-  background: #1a1a1a;
-  border-color: #333;
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-border-secondary);
   color: white;
 }
 
 .keypoint-btn.undo:hover:not(:disabled) {
-  background: #222;
-  border-color: #22c55e;
+  background: var(--color-bg-hover);
+  border-color: var(--color-accent);
 }
 
 .keypoint-btn.cancel {
   background: #1a0000;
-  border-color: #ef4444;
-  color: #ef4444;
+  border-color: var(--color-error);
+  color: var(--color-error);
 }
 
 .keypoint-btn.cancel:hover {
@@ -636,8 +636,8 @@ watch(videoDimensions, () => {
 
 .keypoint-btn.apply {
   background: #001a00;
-  border-color: #22c55e;
-  color: #22c55e;
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
 .keypoint-btn.apply:hover:not(:disabled) {
@@ -655,7 +655,7 @@ watch(videoDimensions, () => {
 
 .info-box strong {
   display: block;
-  color: #22c55e;
+  color: var(--color-accent);
   margin-bottom: 6px;
 }
 

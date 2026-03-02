@@ -915,8 +915,8 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 
 <style scoped>
 .shot-speed-container {
-  background: #141414;
-  border: 1px solid #222;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -931,14 +931,14 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
   justify-content: space-between;
   align-items: center;
   padding-bottom: 8px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .header-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #fff;
+  color: var(--color-text-heading);
   font-weight: 600;
   font-size: 14px;
 }
@@ -956,9 +956,9 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 }
 
 .unit-toggle {
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   color: #f59e0b;
-  border: 1px solid #333;
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   padding: 4px 10px;
   font-size: 11px;
@@ -969,14 +969,14 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 
 .unit-toggle:hover,
 .unit-toggle.active {
-  background: #222;
+  background: var(--color-border);
   border-color: #f59e0b;
 }
 
 .filter-select {
-  background: #1a1a1a;
-  color: #fff;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-heading);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   padding: 4px 8px;
   font-size: 11px;
@@ -984,12 +984,12 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 }
 
 .close-btn {
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   padding: 4px;
   cursor: pointer;
-  color: #666;
+  color: var(--color-text-tertiary);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -997,9 +997,9 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 }
 
 .close-btn:hover {
-  background: #222;
-  color: #fff;
-  border-color: #444;
+  background: var(--color-border);
+  color: var(--color-text-heading);
+  border-color: var(--color-border-hover);
 }
 
 .icon-sm {
@@ -1016,7 +1016,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 .icon-large {
   width: 32px;
   height: 32px;
-  color: #666;
+  color: var(--color-text-tertiary);
   margin-bottom: 8px;
 }
 
@@ -1030,14 +1030,14 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 .stat-card {
   flex: 1;
   min-width: 70px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   padding: 8px 10px;
   text-align: center;
 }
 
 .stat-label {
   display: block;
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 10px;
   text-transform: uppercase;
   margin-bottom: 2px;
@@ -1045,7 +1045,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 
 .stat-value {
   display: block;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 14px;
   font-weight: 600;
 }
@@ -1066,14 +1066,14 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  background: #1a1a2e;
-  border: 1px solid #2a2a4a;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   font-size: 11px;
-  color: #8b8baa;
+  color: var(--color-text-secondary);
 }
 
 .info-banner strong {
-  color: #aaaacc;
+  color: var(--color-text);
 }
 
 /* Column Headers */
@@ -1081,11 +1081,11 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
   display: flex;
   align-items: center;
   padding: 6px 8px;
-  background: #1a1a1a;
-  border-bottom: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border-secondary);
   font-size: 10px;
   text-transform: uppercase;
-  color: #666;
+  color: var(--color-text-tertiary);
   font-weight: 600;
   gap: 4px;
 }
@@ -1154,7 +1154,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
   gap: 4px;
   cursor: pointer;
   transition: background 0.15s;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid var(--color-bg-tertiary);
   font-size: 12px;
   color: #ccc;
 }
@@ -1165,7 +1165,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 
 .shot-row.selected {
   background: #1a2a1a;
-  border-left: 2px solid #22c55e;
+  border-left: 2px solid var(--color-accent);
   padding-left: 6px;
 }
 
@@ -1174,7 +1174,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
   padding: 1px 6px;
   font-size: 10px;
   font-weight: 600;
-  color: #fff;
+  color: var(--color-text-heading);
   border-radius: 2px;
 }
 
@@ -1188,7 +1188,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 
 .speed-value {
   font-size: 11px;
-  color: #888;
+  color: var(--color-text-secondary);
 }
 
 .sparkline {
@@ -1209,7 +1209,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
   align-items: center;
   justify-content: center;
   padding: 20px;
-  color: #666;
+  color: var(--color-text-tertiary);
   gap: 4px;
   text-align: center;
 }
@@ -1230,15 +1230,15 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
 }
 
 .shot-list::-webkit-scrollbar-track {
-  background: #111;
+  background: var(--color-bg-input);
 }
 
 .shot-list::-webkit-scrollbar-thumb {
-  background: #333;
+  background: var(--color-border-secondary);
   border-radius: 3px;
 }
 
 .shot-list::-webkit-scrollbar-thumb:hover {
-  background: #444;
+  background: var(--color-border-hover);
 }
 </style>

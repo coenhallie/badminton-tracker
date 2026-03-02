@@ -556,8 +556,8 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 .results-dashboard {
   width: 100%;
   padding: 24px;
-  background: #141414;
-  border: 1px solid #222;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
   border-radius: 0;
 }
 
@@ -567,7 +567,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   align-items: flex-start;
   margin-bottom: 24px;
   padding-bottom: 16px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--color-border);
   gap: 16px;
 }
 
@@ -578,14 +578,14 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .dashboard-header h2 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.5rem;
   font-weight: 600;
   margin: 0;
 }
 
 .video-id {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.875rem;
   font-family: monospace;
 }
@@ -602,7 +602,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  background: #22c55e;
+  background: var(--color-accent);
   color: #000;
   border: none;
   border-radius: 0;
@@ -613,7 +613,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .export-btn:hover:not(:disabled) {
-  background: #16a34a;
+  background: var(--color-accent-dark);
 }
 
 .export-btn:disabled {
@@ -622,9 +622,9 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .export-btn.is-loading {
-  background: #1a1a1a;
-  border: 1px solid #22c55e;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
 }
 
 .export-btn svg {
@@ -642,7 +642,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .export-error {
-  color: #ef4444;
+  color: var(--color-error);
   font-size: 0.75rem;
   margin: 0;
 }
@@ -659,8 +659,8 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   align-items: center;
   gap: 12px;
   padding: 16px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
   border-radius: 0;
 }
 
@@ -669,7 +669,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   height: 48px;
   padding: 12px;
   border-radius: 0;
-  border: 1px solid #333;
+  border: 1px solid var(--color-border-secondary);
 }
 
 .stat-icon svg {
@@ -678,23 +678,23 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .duration-icon {
-  background: #1a1a1a;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
 }
 
 .frames-icon {
-  background: #1a1a1a;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
 }
 
 .players-icon {
-  background: #1a1a1a;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
 }
 
 .fps-icon {
-  background: #1a1a1a;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
 }
 
 .stat-content {
@@ -703,14 +703,14 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .stat-value {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.5rem;
   font-weight: 700;
   line-height: 1.2;
 }
 
 .stat-label {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.875rem;
 }
 
@@ -723,7 +723,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 .metrics-section h3,
 .players-section h3,
 .shuttle-section h3 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.125rem;
   font-weight: 600;
   margin-bottom: 16px;
@@ -738,27 +738,27 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 
 .metric-card {
   padding: 20px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
   border-radius: 0;
   text-align: center;
 }
 
 .metric-card.highlight {
-  background: #1a1a1a;
-  border: 1px solid #22c55e;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-accent);
 }
 
 .metric-label {
   display: block;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
   margin-bottom: 8px;
 }
 
 .metric-value {
   display: block;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 2rem;
   font-weight: 700;
 }
@@ -766,11 +766,11 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 .metric-value small {
   font-size: 1rem;
   font-weight: 400;
-  color: #888;
+  color: var(--color-text-secondary);
 }
 
 .shuttle-value {
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .players-grid {
@@ -781,8 +781,8 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 
 .player-card {
   padding: 20px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
   border-radius: 0;
   border-left: 4px solid var(--player-color);
 }
@@ -807,7 +807,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .player-header h4 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1rem;
   font-weight: 600;
   margin: 0;
@@ -825,13 +825,13 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .player-stat .label {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.75rem;
   margin-bottom: 2px;
 }
 
 .player-stat .value {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1rem;
   font-weight: 600;
 }
@@ -839,13 +839,13 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 .shot-speeds {
   margin-top: 24px;
   padding: 20px;
-  background: #0d0d0d;
-  border: 1px solid #222;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
   border-radius: 0;
 }
 
 .shot-speeds h4 {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
   font-weight: 500;
   margin-bottom: 16px;
@@ -862,7 +862,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 .speed-bar {
   flex: 1;
   min-width: 12px;
-  background: #22c55e;
+  background: var(--color-accent);
   border-radius: 0;
   cursor: pointer;
   transition: opacity 0.2s ease;
@@ -876,7 +876,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   display: flex;
   justify-content: space-between;
   padding: 8px 8px 0;
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.625rem;
 }
 
@@ -888,11 +888,11 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   display: flex;
   align-items: center;
   gap: 12px;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
   padding: 16px;
-  background: #0d0d0d;
-  border: 1px solid #222;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
   border-radius: 0;
 }
 
@@ -908,7 +908,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .court-section h3 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.125rem;
   font-weight: 600;
   margin-bottom: 16px;
@@ -920,7 +920,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 .section-icon {
   width: 20px;
   height: 20px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .court-badge {
@@ -929,15 +929,15 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   padding: 4px 10px;
   border-radius: 0;
   background: #1a0000;
-  border: 1px solid #ef4444;
-  color: #ef4444;
+  border: 1px solid var(--color-error);
+  color: var(--color-error);
   margin-left: auto;
 }
 
 .court-badge.court-detected {
   background: #001a00;
-  border-color: #22c55e;
-  color: #22c55e;
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
 .court-stats {
@@ -948,24 +948,24 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .court-card {
-  border: 1px solid #22c55e;
+  border: 1px solid var(--color-accent);
 }
 
 .court-value {
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .confidence-bar {
   margin-top: 12px;
   height: 6px;
-  background: #222;
+  background: var(--color-border);
   border-radius: 0;
   overflow: hidden;
 }
 
 .confidence-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--color-accent);
   border-radius: 0;
   transition: width 0.3s ease;
 }
@@ -976,20 +976,20 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   gap: 12px;
   padding: 16px;
   background: #001a00;
-  border: 1px solid #22c55e;
+  border: 1px solid var(--color-accent);
   border-radius: 0;
 }
 
 .court-note svg {
   width: 20px;
   height: 20px;
-  color: #22c55e;
+  color: var(--color-accent);
   flex-shrink: 0;
   margin-top: 2px;
 }
 
 .court-note span {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
   line-height: 1.5;
 }
@@ -1004,7 +1004,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .coverage-section h3 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.125rem;
   font-weight: 600;
   margin-bottom: 16px;
@@ -1015,7 +1015,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 
 .loading-indicator {
   font-size: 0.75rem;
-  color: #666;
+  color: var(--color-text-tertiary);
   font-weight: 400;
   margin-left: auto;
 }
@@ -1026,13 +1026,13 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   align-items: center;
   gap: 12px;
   padding: 16px;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
 }
 
 .coverage-error {
-  border-color: #ef4444;
+  border-color: var(--color-error);
   background: #1a0000;
 }
 
@@ -1044,16 +1044,16 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .coverage-error svg {
-  color: #ef4444;
+  color: var(--color-error);
 }
 
 .coverage-notice svg {
-  color: #f59e0b;
+  color: var(--color-warning);
 }
 
 .coverage-error span,
 .coverage-notice span {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
 }
 
@@ -1065,8 +1065,8 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 
 .coverage-card {
   padding: 20px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
   border-radius: 0;
   border-left: 4px solid var(--player-color);
 }
@@ -1079,7 +1079,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .coverage-header h4 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1rem;
   font-weight: 600;
   margin: 0;
@@ -1087,7 +1087,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .position-count {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.75rem;
 }
 
@@ -1100,7 +1100,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .zone-group h5 {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.75rem;
   font-weight: 500;
   margin: 0 0 8px 0;
@@ -1122,26 +1122,26 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .zone-label {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.75rem;
 }
 
 .zone-label.with-tooltip {
   position: relative;
   cursor: help;
-  border-bottom: 1px dotted #444;
+  border-bottom: 1px dotted var(--color-border-hover);
   padding-bottom: 1px;
   transition: color 0.2s ease, border-color 0.2s ease;
 }
 
 .zone-label.with-tooltip:hover {
-  color: #fff;
-  border-color: #666;
+  color: var(--color-text-heading);
+  border-color: var(--color-text-tertiary);
 }
 
 .zone-bar-container {
   height: 8px;
-  background: #222;
+  background: var(--color-border);
   border-radius: 0;
   overflow: hidden;
 }
@@ -1177,7 +1177,7 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 }
 
 .zone-value {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 0.75rem;
   font-weight: 600;
   text-align: right;
@@ -1189,16 +1189,16 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   align-items: center;
   padding-top: 12px;
   margin-top: 4px;
-  border-top: 1px solid #222;
+  border-top: 1px solid var(--color-border);
 }
 
 .distance-label {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.75rem;
 }
 
 .distance-value {
-  color: #22c55e;
+  color: var(--color-accent);
   font-size: 0.875rem;
   font-weight: 600;
 }

@@ -217,19 +217,19 @@ async function startUpload() {
 
 .upload-zone {
   position: relative;
-  border: 2px dashed #333;
+  border: 2px dashed var(--color-border-secondary);
   border-radius: 0;
   padding: 48px 24px;
   text-align: center;
   cursor: pointer;
   transition: all 0.3s ease;
-  background: #141414;
+  background: var(--color-bg-secondary);
 }
 
 .upload-zone:hover,
 .upload-zone.dragging {
-  border-color: #22c55e;
-  background: #1a1a1a;
+  border-color: var(--color-accent);
+  background: var(--color-bg-tertiary);
 }
 
 .upload-zone.dragging {
@@ -240,7 +240,7 @@ async function startUpload() {
   width: 64px;
   height: 64px;
   margin: 0 auto 16px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .upload-icon svg {
@@ -249,19 +249,19 @@ async function startUpload() {
 }
 
 .upload-zone h3 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.25rem;
   margin-bottom: 8px;
 }
 
 .upload-zone p {
-  color: #888;
+  color: var(--color-text-secondary);
   margin-bottom: 8px;
 }
 
 .file-types {
   font-size: 0.875rem;
-  color: #666;
+  color: var(--color-text-tertiary);
 }
 
 .file-input {
@@ -274,10 +274,10 @@ async function startUpload() {
 }
 
 .file-preview {
-  background: #141414;
+  background: var(--color-bg-secondary);
   border-radius: 0;
   padding: 24px;
-  border: 1px solid #222;
+  border: 1px solid var(--color-border);
 }
 
 .file-info {
@@ -291,9 +291,9 @@ async function startUpload() {
   width: 48px;
   height: 48px;
   padding: 10px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   border-radius: 0;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .file-icon svg {
@@ -309,7 +309,7 @@ async function startUpload() {
 }
 
 .file-name {
-  color: #fff;
+  color: var(--color-text-heading);
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
@@ -317,7 +317,7 @@ async function startUpload() {
 }
 
 .file-size {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.875rem;
 }
 
@@ -325,22 +325,22 @@ async function startUpload() {
   width: 36px;
   height: 36px;
   padding: 8px;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
-  color: #ef4444;
+  color: var(--color-error);
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .remove-btn:hover {
-  background: #222;
-  border-color: #ef4444;
+  background: var(--color-border);
+  border-color: var(--color-error);
 }
 
 .progress-bar {
   height: 8px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   border-radius: 0;
   overflow: hidden;
   margin-bottom: 16px;
@@ -348,7 +348,7 @@ async function startUpload() {
 
 .progress-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--color-accent);
   border-radius: 0;
   transition: width 0.3s ease;
 }
@@ -360,7 +360,7 @@ async function startUpload() {
   justify-content: center;
   gap: 8px;
   padding: 14px 24px;
-  background: #22c55e;
+  background: var(--color-accent);
   border: none;
   border-radius: 0;
   color: #000;
@@ -371,7 +371,7 @@ async function startUpload() {
 }
 
 .upload-btn:hover {
-  background: #16a34a;
+  background: var(--color-accent-dark);
 }
 
 .upload-btn svg {
@@ -384,14 +384,14 @@ async function startUpload() {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  color: #888;
+  color: var(--color-text-secondary);
 }
 
 .spinner {
   width: 24px;
   height: 24px;
-  border: 3px solid #222;
-  border-top-color: #22c55e;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-accent);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useTheme } from '@/composables/useTheme'
 import VideoUpload from '@/components/VideoUpload.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import ResultsDashboard from '@/components/ResultsDashboard.vue'
@@ -17,6 +18,8 @@ import {
 import type { HealthCheckResponse } from '@/services/api'
 import type { UploadResponse, AnalysisResult, SkeletonFrame } from '@/types/analysis'
 import type { HeatmapData, SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
+
+const { isDark, toggleTheme } = useTheme()
 
 // App states: upload -> court-setup (new!) -> analyzing -> results
 type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
@@ -721,11 +724,27 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.2
+            alpha v1.3
           </button>
         </div>
 
         <nav class="nav">
+          <button class="theme-toggle" @click="toggleTheme" :title="isDark ? 'Switch to light mode' : 'Switch to dark mode'">
+            <svg v-if="isDark" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="5"/>
+              <line x1="12" y1="1" x2="12" y2="3"/>
+              <line x1="12" y1="21" x2="12" y2="23"/>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+              <line x1="1" y1="12" x2="3" y2="12"/>
+              <line x1="21" y1="12" x2="23" y2="12"/>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+            </svg>
+            <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </button>
           <button
             class="api-status"
             :class="{ connected: isApiConnected, checking: isCheckingHealth }"
@@ -753,6 +772,20 @@ watch(videoSectionRef, () => {
             </button>
           </div>
           <div class="changelog-content">
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.3-alpha</span>
+                <span class="version-date">March 2, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - Add video overlay export functionality</li>
+                <li> - Removal of inaccurate metrics</li>
+                <li> - Add light mode</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
             <div class="changelog-entry">
               <div class="changelog-version">
                 <span class="version-tag">v1.2-alpha</span>
@@ -1417,19 +1450,19 @@ html {
 
 body {
   font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #0d0d0d;
-  color: #e2e8f0;
+  background: var(--color-bg);
+  color: var(--color-text);
   min-height: 100vh;
 }
 
 a {
-  color: #22c55e;
+  color: var(--color-accent);
   text-decoration: none;
   transition: color 0.2s ease;
 }
 
 a:hover {
-  color: #4ade80;
+  color: var(--color-accent-hover);
 }
 
 /* Transitions */
@@ -1469,11 +1502,11 @@ a:hover {
 /* Header */
 .header {
   padding: 16px 24px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--color-border);
   position: sticky;
   top: 0;
   z-index: 100;
-  background: #0d0d0d;
+  background: var(--color-bg);
 }
 
 .header-content {
@@ -1493,13 +1526,13 @@ a:hover {
 .logo svg {
   width: 32px;
   height: 32px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .logo h1 {
   font-size: 1.25rem;
   font-weight: 700;
-  color: #ffffff;
+  color: var(--color-text-heading);
 }
 
 .nav {
@@ -1508,33 +1541,53 @@ a:hover {
   gap: 16px;
 }
 
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.theme-toggle:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+  border-color: var(--color-border-hover);
+}
+
 .api-status {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   font-size: 0.75rem;
-  color: #ef4444;
+  color: var(--color-error);
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .api-status:hover {
-  background: #252525;
-  border-color: #444;
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-hover);
 }
 
 .api-status.connected {
-  background: #1a1a1a;
-  border-color: #22c55e;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
 .api-status.connected:hover {
-  border-color: #4ade80;
+  border-color: var(--color-accent-hover);
 }
 
 .api-status.checking {
@@ -1560,8 +1613,8 @@ a:hover {
 
 /* Health Modal Styles */
 .health-modal {
-  background: #0a0a0a;
-  border: 1px solid #333;
+  background: var(--color-bg-modal);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   width: 90%;
   max-width: 500px;
@@ -1576,7 +1629,7 @@ a:hover {
   justify-content: space-between;
   align-items: center;
   padding: 20px 24px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .health-header h2 {
@@ -1604,14 +1657,14 @@ a:hover {
 
 .health-status-banner.connected {
   background: rgba(34, 197, 94, 0.1);
-  border: 1px solid #22c55e;
-  color: #22c55e;
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
 }
 
 .health-status-banner.disconnected {
   background: rgba(239, 68, 68, 0.1);
-  border: 1px solid #ef4444;
-  color: #ef4444;
+  border: 1px solid var(--color-error);
+  color: var(--color-error);
 }
 
 .backend-badge {
@@ -1633,8 +1686,8 @@ a:hover {
 
 .backend-badge.local {
   background: rgba(34, 197, 94, 0.1);
-  border: 1px solid #22c55e;
-  color: #22c55e;
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
 }
 
 .status-icon {
@@ -1646,7 +1699,7 @@ a:hover {
 }
 
 .health-section {
-  border: 1px solid #222;
+  border: 1px solid var(--color-border);
   border-radius: 0;
   padding: 16px;
 }
@@ -1655,7 +1708,7 @@ a:hover {
   font-size: 0.875rem;
   font-weight: 600;
   margin: 0 0 12px 0;
-  color: #888;
+  color: var(--color-text-secondary);
 }
 
 .health-info-row {
@@ -1663,7 +1716,7 @@ a:hover {
   justify-content: space-between;
   align-items: center;
   padding: 8px 0;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid var(--color-bg-tertiary);
 }
 
 .health-info-row:last-child {
@@ -1671,7 +1724,7 @@ a:hover {
 }
 
 .health-info-row .label {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
 }
 
@@ -1681,7 +1734,7 @@ a:hover {
 }
 
 .health-info-row code {
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   padding: 4px 8px;
   border-radius: 0;
   font-family: 'SF Mono', Monaco, 'Courier New', monospace;
@@ -1701,14 +1754,14 @@ a:hover {
   align-items: center;
   gap: 4px;
   padding: 12px 8px;
-  background: #111;
-  border: 1px solid #222;
+  background: var(--color-bg-input);
+  border: 1px solid var(--color-border);
   border-radius: 0;
   text-align: center;
 }
 
 .component-item.active {
-  border-color: #22c55e;
+  border-color: var(--color-accent);
   background: rgba(34, 197, 94, 0.05);
 }
 
@@ -1718,7 +1771,7 @@ a:hover {
 
 .component-name {
   font-size: 0.75rem;
-  color: #888;
+  color: var(--color-text-secondary);
 }
 
 .component-status {
@@ -1728,7 +1781,7 @@ a:hover {
 }
 
 .component-item.active .component-status {
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .resource-bars {
@@ -1747,25 +1800,25 @@ a:hover {
 .resource-label {
   width: 60px;
   font-size: 0.75rem;
-  color: #888;
+  color: var(--color-text-secondary);
 }
 
 .resource-bar {
   flex: 1;
   height: 8px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   border-radius: 0;
   overflow: hidden;
 }
 
 .resource-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--color-accent);
   transition: width 0.3s ease;
 }
 
 .resource-fill.warning {
-  background: #f59e0b;
+  background: var(--color-warning);
 }
 
 .resource-value {
@@ -1782,7 +1835,7 @@ a:hover {
 
 .troubleshoot-tips p {
   margin: 0 0 12px 0;
-  color: #888;
+  color: var(--color-text-secondary);
 }
 
 .troubleshoot-tips ol {
@@ -1797,7 +1850,7 @@ a:hover {
 .troubleshoot-tips code {
   display: block;
   margin-top: 8px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   padding: 8px 12px;
   border-radius: 0;
   font-family: 'SF Mono', Monaco, 'Courier New', monospace;
@@ -1816,18 +1869,18 @@ a:hover {
   align-items: center;
   gap: 8px;
   padding: 10px 20px;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 0.875rem;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .refresh-btn:hover:not(:disabled) {
-  background: #252525;
-  border-color: #444;
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-hover);
 }
 
 .refresh-btn:disabled {
@@ -1838,8 +1891,8 @@ a:hover {
 .spinner {
   width: 16px;
   height: 16px;
-  border: 2px solid #333;
-  border-top-color: #fff;
+  border: 2px solid var(--color-border-secondary);
+  border-top-color: var(--color-text-heading);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -1855,13 +1908,13 @@ a:hover {
   width: 36px;
   height: 36px;
   border-radius: 0;
-  color: #888;
+  color: var(--color-text-secondary);
   transition: all 0.2s ease;
 }
 
 .nav-link:hover {
-  background: #1a1a1a;
-  color: #fff;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-heading);
 }
 
 .nav-link svg {
@@ -1872,7 +1925,7 @@ a:hover {
 /* Error Banner */
 .error-banner {
   background: #1a0000;
-  border-bottom: 1px solid #ef4444;
+  border-bottom: 1px solid var(--color-error);
 }
 
 .error-content {
@@ -1882,7 +1935,7 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 12px;
-  color: #ef4444;
+  color: var(--color-error);
 }
 
 .error-content svg {
@@ -1905,7 +1958,7 @@ a:hover {
   background: transparent;
   border: none;
   border-radius: 0;
-  color: #ef4444;
+  color: var(--color-error);
   cursor: pointer;
   transition: background 0.2s ease;
 }
@@ -1953,13 +2006,13 @@ a:hover {
   font-size: 2.5rem;
   font-weight: 700;
   margin-bottom: 16px;
-  color: #ffffff;
+  color: var(--color-text-heading);
 }
 
 .hero p {
   max-width: 600px;
   margin: 0 auto;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 1.125rem;
   line-height: 1.7;
 }
@@ -1974,15 +2027,15 @@ a:hover {
 
 .feature {
   padding: 24px;
-  background: #141414;
-  border: 1px solid #222;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
   border-radius: 0;
   text-align: center;
   transition: all 0.2s ease;
 }
 
 .feature:hover {
-  border-color: #22c55e;
+  border-color: var(--color-accent);
 }
 
 .feature-icon {
@@ -1990,10 +2043,10 @@ a:hover {
   height: 56px;
   margin: 0 auto 16px;
   padding: 14px;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .feature-icon svg {
@@ -2002,14 +2055,14 @@ a:hover {
 }
 
 .feature h3 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.125rem;
   font-weight: 600;
   margin-bottom: 8px;
 }
 
 .feature p {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.875rem;
   line-height: 1.6;
 }
@@ -2033,19 +2086,19 @@ a:hover {
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  background: #141414;
-  border: 1px solid #333;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .back-btn:hover {
-  background: #1a1a1a;
-  border-color: #22c55e;
-  color: #fff;
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-accent);
+  color: var(--color-text-heading);
 }
 
 .back-btn svg {
@@ -2059,10 +2112,10 @@ a:hover {
   align-items: center;
   gap: 10px;
   padding: 10px 18px;
-  background: #141414;
-  border: 1px solid #333;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
@@ -2070,25 +2123,25 @@ a:hover {
 }
 
 .settings-toggle-btn:hover {
-  background: #1a1a1a;
-  border-color: #22c55e;
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-accent);
 }
 
 .settings-toggle-btn.active {
-  background: #1a1a1a;
-  border-color: #22c55e;
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-accent);
 }
 
 .settings-toggle-btn svg:first-child {
   width: 18px;
   height: 18px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .settings-toggle-btn .chevron {
   width: 16px;
   height: 16px;
-  color: #888;
+  color: var(--color-text-secondary);
   transition: transform 0.3s ease;
 }
 
@@ -2109,10 +2162,10 @@ a:hover {
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  background: #141414;
-  border: 1px solid #333;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
@@ -2120,8 +2173,8 @@ a:hover {
 }
 
 .export-btn:hover:not(:disabled) {
-  background: #1a1a1a;
-  border-color: #22c55e;
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-accent);
 }
 
 .export-btn:disabled {
@@ -2132,13 +2185,13 @@ a:hover {
 .export-btn svg {
   width: 18px;
   height: 18px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 /* Export Progress Overlay */
 .export-progress-overlay {
-  background: #141414;
-  border: 1px solid #333;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-secondary);
   padding: 16px 24px;
   margin-bottom: 16px;
 }
@@ -2152,14 +2205,14 @@ a:hover {
 .export-progress-bar-track {
   flex: 1;
   height: 6px;
-  background: #222;
+  background: var(--color-border);
   border-radius: 3px;
   overflow: hidden;
 }
 
 .export-progress-bar-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--color-accent);
   transition: width 0.3s ease;
 }
 
@@ -2182,14 +2235,14 @@ a:hover {
 }
 
 .export-cancel-btn:hover {
-  border-color: #ef4444;
-  color: #ef4444;
+  border-color: var(--color-error);
+  color: var(--color-error);
 }
 
 /* Settings Panel */
 .settings-panel {
-  background: #141414;
-  border: 1px solid #222;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
   border-radius: 0;
   margin-bottom: 24px;
   overflow: hidden;
@@ -2212,21 +2265,21 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 10px;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 0.9rem;
   font-weight: 600;
   padding-bottom: 8px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .settings-section-title svg {
   width: 18px;
   height: 18px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .settings-section-hint {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.75rem;
   font-style: italic;
 }
@@ -2273,7 +2326,7 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
   transition: opacity 0.2s ease;
 }
@@ -2303,8 +2356,8 @@ a:hover {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: #1a1a1a;
-  border: 1px solid #333;
+  background-color: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   transition: 0.3s;
 }
@@ -2316,19 +2369,19 @@ a:hover {
   width: 20px;
   left: 2px;
   bottom: 2px;
-  background-color: #444;
+  background-color: var(--color-border-hover);
   border-radius: 0;
   transition: 0.3s;
 }
 
 .toggle input:checked + .toggle-slider {
-  background: #22c55e;
-  border-color: #22c55e;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .toggle input:checked + .toggle-slider.player-toggle {
-  background: #22c55e;
-  border-color: #22c55e;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .toggle input:checked + .toggle-slider.shuttle-toggle {
@@ -2354,17 +2407,17 @@ a:hover {
 }
 
 .pose-source-selector .source-label {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.8rem;
   margin-right: 8px;
 }
 
 .pose-source-select {
   padding: 6px 12px;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 0.8rem;
   cursor: pointer;
   transition: border-color 0.2s ease;
@@ -2380,8 +2433,8 @@ a:hover {
 }
 
 .pose-source-select option {
-  background: #1a1a1a;
-  color: #fff;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-heading);
 }
 
 /* Court toggle removed - automatic detection disabled, using manual keypoints only */
@@ -2411,7 +2464,7 @@ a:hover {
   width: 14px;
   height: 14px;
   animation: spin 1s linear infinite;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 @keyframes spin {
@@ -2455,14 +2508,14 @@ a:hover {
 
 /* Mini court toggle style */
 .toggle input:checked + .toggle-slider.minicourt-toggle {
-  background: #22c55e;
-  border-color: #22c55e;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 /* Player trails toggle style */
 .toggle input:checked + .toggle-slider.trails-toggle {
-  background: #f59e0b;
-  border-color: #f59e0b;
+  background: var(--color-warning);
+  border-color: var(--color-warning);
 }
 
 /* Hit markers toggle style */
@@ -2520,8 +2573,8 @@ a:hover {
 .footer {
   padding: 24px;
   text-align: center;
-  border-top: 1px solid #222;
-  color: #666;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-tertiary);
   font-size: 0.875rem;
 }
 
@@ -2575,7 +2628,7 @@ a:hover {
 
 /* Alpha Badge */
 .alpha-badge {
-  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-dark) 100%);
   color: #000;
   font-size: 0.65rem;
   font-weight: 600;
@@ -2589,7 +2642,7 @@ a:hover {
 }
 
 .alpha-badge:hover {
-  background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+  background: linear-gradient(135deg, var(--color-accent-hover) 0%, var(--color-accent) 100%);
   transform: translateY(-1px);
   box-shadow: 0 2px 8px rgba(34, 197, 94, 0.3);
 }
@@ -2611,8 +2664,8 @@ a:hover {
 }
 
 .changelog-modal {
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   max-width: 520px;
   width: 100%;
   max-height: 80vh;
@@ -2627,13 +2680,13 @@ a:hover {
   align-items: center;
   justify-content: space-between;
   padding: 20px 24px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--color-border-secondary);
 }
 
 .changelog-header h2 {
   font-size: 1.25rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--color-text-heading);
   margin: 0;
 }
 
@@ -2644,15 +2697,15 @@ a:hover {
   align-items: center;
   justify-content: center;
   background: transparent;
-  border: 1px solid #444;
-  color: #888;
+  border: 1px solid var(--color-border-hover);
+  color: var(--color-text-secondary);
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .modal-close-btn:hover {
-  background: #333;
-  color: #fff;
+  background: var(--color-border-secondary);
+  color: var(--color-text-heading);
   border-color: #555;
 }
 
@@ -2679,7 +2732,7 @@ a:hover {
 }
 
 .version-tag {
-  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-dark) 100%);
   color: #000;
   font-size: 0.75rem;
   font-weight: 700;
@@ -2687,14 +2740,14 @@ a:hover {
 }
 
 .version-date {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
 }
 
 .changelog-entry h3 {
   font-size: 1.125rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--color-text-heading);
   margin: 0;
 }
 
@@ -2722,16 +2775,16 @@ a:hover {
 }
 
 .changelog-list li strong {
-  color: #fff;
+  color: var(--color-text-heading);
 }
 
 .changelog-note {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.8rem;
   line-height: 1.5;
   margin: 8px 0 0 0;
   padding-top: 16px;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--color-border-secondary);
 }
 
 </style>

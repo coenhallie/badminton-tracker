@@ -447,8 +447,8 @@ function getFatigueColor(declinePercent: number): string {
 .advanced-analytics {
   width: 100%;
   padding: 24px;
-  background: #141414;
-  border: 1px solid #222;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
 }
 
 .aa-header {
@@ -456,14 +456,14 @@ function getFatigueColor(declinePercent: number): string {
 }
 
 .aa-header h2 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.5rem;
   font-weight: 600;
   margin: 0 0 4px 0;
 }
 
 .aa-subtitle {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.875rem;
   margin: 0;
 }
@@ -472,7 +472,7 @@ function getFatigueColor(declinePercent: number): string {
 .aa-tabs {
   display: flex;
   gap: 0;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--color-border-secondary);
   margin-bottom: 24px;
   overflow-x: auto;
 }
@@ -482,7 +482,7 @@ function getFatigueColor(declinePercent: number): string {
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
@@ -495,8 +495,8 @@ function getFatigueColor(declinePercent: number): string {
 }
 
 .aa-tab.active {
-  color: #22c55e;
-  border-bottom-color: #22c55e;
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
 }
 
 /* Content */
@@ -512,14 +512,14 @@ function getFatigueColor(declinePercent: number): string {
 
 /* Sections */
 .aa-section h3 {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.1rem;
   font-weight: 600;
   margin: 0 0 12px 0;
 }
 
 .section-desc {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.8rem;
   margin: -8px 0 12px 0;
 }
@@ -533,8 +533,8 @@ function getFatigueColor(declinePercent: number): string {
 
 .aa-stat-card {
   padding: 16px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
   text-align: center;
 }
 
@@ -547,7 +547,7 @@ function getFatigueColor(declinePercent: number): string {
 
 .aa-stat-value {
   display: block;
-  color: #22c55e;
+  color: var(--color-accent);
   font-size: 1.5rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -555,7 +555,7 @@ function getFatigueColor(declinePercent: number): string {
 
 .aa-stat-label {
   display: block;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.75rem;
   margin-top: 2px;
 }
@@ -587,7 +587,7 @@ function getFatigueColor(declinePercent: number): string {
   gap: 12px;
   margin-top: 4px;
   font-size: 0.7rem;
-  color: #666;
+  color: var(--color-text-tertiary);
 }
 
 /* Bar Chart */
@@ -616,7 +616,7 @@ function getFatigueColor(declinePercent: number): string {
 
 .bar-fill {
   width: 100%;
-  background: #22c55e;
+  background: var(--color-accent);
   min-height: 2px;
   transition: height 0.3s ease;
   opacity: 0.8;
@@ -624,21 +624,21 @@ function getFatigueColor(declinePercent: number): string {
 
 .bar-count {
   font-size: 0.7rem;
-  color: #22c55e;
+  color: var(--color-accent);
   margin-top: 4px;
   font-weight: 600;
 }
 
 .bar-label {
   font-size: 0.65rem;
-  color: #888;
+  color: var(--color-text-secondary);
   margin-top: 2px;
 }
 
 .chart-axis-label {
   text-align: center;
   font-size: 0.7rem;
-  color: #666;
+  color: var(--color-text-tertiary);
   margin-top: 8px;
 }
 
@@ -656,13 +656,13 @@ function getFatigueColor(declinePercent: number): string {
   align-items: center;
   gap: 16px;
   padding: 10px 12px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
   transition: border-color 0.2s;
 }
 
 .rally-item.is-current {
-  border-color: #22c55e;
+  border-color: var(--color-accent);
   background: #1a2a1a;
 }
 
@@ -674,13 +674,13 @@ function getFatigueColor(declinePercent: number): string {
 
 .rally-number {
   font-weight: 600;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 0.875rem;
 }
 
 .rally-time {
   font-size: 0.7rem;
-  color: #666;
+  color: var(--color-text-tertiary);
   font-variant-numeric: tabular-nums;
 }
 
@@ -697,7 +697,7 @@ function getFatigueColor(declinePercent: number): string {
 
 .rally-duration {
   font-size: 0.7rem;
-  color: #666;
+  color: var(--color-text-tertiary);
 }
 
 .rally-shot-types {
@@ -715,7 +715,7 @@ function getFatigueColor(declinePercent: number): string {
 
 .shot-more {
   font-size: 0.65rem;
-  color: #666;
+  color: var(--color-text-tertiary);
 }
 
 /* Shot Placement Heatmap */
@@ -728,9 +728,9 @@ function getFatigueColor(declinePercent: number): string {
 
 .filter-btn {
   padding: 4px 12px;
-  background: #1a1a1a;
-  border: 1px solid #333;
-  color: #888;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
+  color: var(--color-text-secondary);
   font-size: 0.75rem;
   cursor: pointer;
   transition: all 0.2s;
@@ -738,13 +738,13 @@ function getFatigueColor(declinePercent: number): string {
 }
 
 .filter-btn:hover {
-  border-color: #555;
+  border-color: var(--color-text-tertiary);
   color: #ccc;
 }
 
 .filter-btn.active {
-  background: #22c55e;
-  border-color: #22c55e;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
   color: #000;
   font-weight: 600;
 }
@@ -757,8 +757,8 @@ function getFatigueColor(declinePercent: number): string {
   position: relative;
   display: flex;
   flex-direction: column;
-  border: 2px solid #444;
-  background: #111;
+  border: 2px solid var(--color-border-hover);
+  background: var(--color-bg-input);
   aspect-ratio: 6.1 / 13.4;
   max-height: 280px;
 }
@@ -800,7 +800,7 @@ function getFatigueColor(declinePercent: number): string {
 
 .heatmap-total {
   font-size: 0.75rem;
-  color: #666;
+  color: var(--color-text-tertiary);
   margin-top: 6px;
 }
 
@@ -813,8 +813,8 @@ function getFatigueColor(declinePercent: number): string {
 
 .recovery-card {
   padding: 16px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
 }
 
 .recovery-header {
@@ -852,7 +852,7 @@ function getFatigueColor(declinePercent: number): string {
 .quality-bar-bg {
   flex: 1;
   height: 8px;
-  background: #222;
+  background: var(--color-border);
   overflow: hidden;
 }
 
@@ -863,7 +863,7 @@ function getFatigueColor(declinePercent: number): string {
 
 .quality-count {
   font-size: 0.7rem;
-  color: #888;
+  color: var(--color-text-secondary);
   width: 24px;
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -878,8 +878,8 @@ function getFatigueColor(declinePercent: number): string {
 
 .efficiency-card {
   padding: 16px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
   text-align: center;
 }
 
@@ -904,7 +904,7 @@ function getFatigueColor(declinePercent: number): string {
 
 .circle-bg {
   fill: none;
-  stroke: #222;
+  stroke: var(--color-border);
   stroke-width: 3;
 }
 
@@ -922,7 +922,7 @@ function getFatigueColor(declinePercent: number): string {
   transform: translate(-50%, -50%);
   font-size: 1rem;
   font-weight: 700;
-  color: #fff;
+  color: var(--color-text-heading);
 }
 
 /* Fatigue */
@@ -934,8 +934,8 @@ function getFatigueColor(declinePercent: number): string {
 
 .fatigue-card {
   padding: 16px;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
 }
 
 .fatigue-header {
@@ -978,13 +978,13 @@ function getFatigueColor(declinePercent: number): string {
 
 .fatigue-bar-label {
   font-size: 0.65rem;
-  color: #888;
+  color: var(--color-text-secondary);
   margin-top: 4px;
 }
 
 .fatigue-axis {
   font-size: 0.65rem;
-  color: #666;
+  color: var(--color-text-tertiary);
   text-align: center;
   display: block;
   margin-top: 6px;
@@ -1008,16 +1008,16 @@ function getFatigueColor(declinePercent: number): string {
 
 .metric-lbl {
   font-size: 0.65rem;
-  color: #888;
+  color: var(--color-text-secondary);
 }
 
 /* Empty state */
 .aa-empty {
   padding: 32px;
   text-align: center;
-  color: #555;
-  background: #1a1a1a;
-  border: 1px solid #222;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
 }
 
 .aa-empty p {

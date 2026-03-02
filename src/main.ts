@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import { convexVue } from 'convex-vue'
+import './app.css'
 import App from './App.vue'
 
 const app = createApp(App)

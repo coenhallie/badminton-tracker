@@ -1,0 +1,43 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-bg: #ffffff;
+  --color-bg-secondary: #f8f9fa;
+  --color-bg-tertiary: #f0f1f3;
+  --color-bg-hover: #e9ecef;
+  --color-bg-input: #f0f1f3;
+  --color-bg-modal: #ffffff;
+  --color-border: #e0e0e0;
+  --color-border-secondary: #d0d0d0;
+  --color-border-hover: #bbb;
+  --color-text: #1a1a2e;
+  --color-text-heading: #0d0d0d;
+  --color-text-secondary: #555;
+  --color-text-tertiary: #777;
+  --color-accent: #16a34a;
+  --color-accent-hover: #15803d;
+  --color-accent-dark: #166534;
+  --color-error: #ef4444;
+  --color-warning: #f59e0b;
+  --color-info: #3b82f6;
+}
+
+.dark {
+  --color-bg: #0d0d0d;
+  --color-bg-secondary: #141414;
+  --color-bg-tertiary: #1a1a1a;
+  --color-bg-hover: #252525;
+  --color-bg-input: #111;
+  --color-bg-modal: #0a0a0a;
+  --color-border: #222;
+  --color-border-secondary: #333;
+  --color-border-hover: #444;
+  --color-text: #e2e8f0;
+  --color-text-heading: #ffffff;
+  --color-text-secondary: #888;
+  --color-text-tertiary: #666;
+  --color-accent: #22c55e;
+  --color-accent-hover: #4ade80;
+  --color-accent-dark: #16a34a;
+}

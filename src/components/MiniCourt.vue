@@ -1920,10 +1920,10 @@ defineExpose({
 .mini-court-container {
   display: flex;
   flex-direction: column;
-  background: #141414;
+  background: var(--color-bg-secondary);
   border-radius: 0;
   padding: 12px;
-  border: 1px solid #222;
+  border: 1px solid var(--color-border);
 }
 
 .mini-court-header {
@@ -1937,7 +1937,7 @@ defineExpose({
 .title {
   font-size: 14px;
   font-weight: 600;
-  color: #fff;
+  color: var(--color-text-heading);
 }
 
 .status {
@@ -1948,21 +1948,21 @@ defineExpose({
 }
 
 .status.active {
-  background-color: #1a1a1a;
-  color: #22c55e;
-  border: 1px solid #333;
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-accent);
+  border: 1px solid var(--color-border-secondary);
 }
 
 .status.active.precision {
-  background-color: #1a1a1a;
-  color: #3b82f6;
-  border: 1px solid #333;
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-info);
+  border: 1px solid var(--color-border-secondary);
 }
 
 .status.inactive {
-  background-color: #1a1a1a;
-  color: #666;
-  border: 1px solid #333;
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-text-tertiary);
+  border: 1px solid var(--color-border-secondary);
 }
 
 .canvas-wrapper {
@@ -1984,7 +1984,7 @@ defineExpose({
   justify-content: center;
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid #222;
+  border-top: 1px solid var(--color-border);
 }
 
 .legend-item {
@@ -1997,12 +1997,12 @@ defineExpose({
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  border: 1px solid #444;
+  border: 1px solid var(--color-border-hover);
 }
 
 .legend-label {
   font-size: 11px;
-  color: #888;
+  color: var(--color-text-secondary);
   font-weight: 500;
 }
 

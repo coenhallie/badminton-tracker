@@ -400,9 +400,9 @@ onMounted(() => {
   max-width: 600px;
   margin: 0 auto;
   padding: 24px;
-  background: #141414;
+  background: var(--color-bg-secondary);
   border-radius: 0;
-  border: 1px solid #222;
+  border: 1px solid var(--color-border);
 }
 
 .progress-header {
@@ -416,13 +416,13 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  color: #fff;
+  color: var(--color-text-heading);
 }
 
 .file-info svg {
   width: 24px;
   height: 24px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .filename {
@@ -435,18 +435,18 @@ onMounted(() => {
 
 .cancel-btn {
   padding: 8px 16px;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
-  color: #ef4444;
+  color: var(--color-error);
   font-size: 0.875rem;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .cancel-btn:hover {
-  background: #222;
-  border-color: #ef4444;
+  background: var(--color-border);
+  border-color: var(--color-error);
 }
 
 .progress-content {
@@ -467,11 +467,11 @@ onMounted(() => {
 }
 
 .progress-ring-bg {
-  stroke: #222;
+  stroke: var(--color-border);
 }
 
 .progress-ring-fill {
-  stroke: #22c55e;
+  stroke: var(--color-accent);
   stroke-linecap: square;
   transition: stroke-dashoffset 0.3s ease;
 }
@@ -486,13 +486,13 @@ onMounted(() => {
 }
 
 .progress-value {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 1.75rem;
   font-weight: 700;
 }
 
 .progress-label {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.75rem;
 }
 
@@ -514,23 +514,23 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
 }
 
 .status-indicator.analyzing,
 .status-indicator.processing,
 .status-indicator.connecting {
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
 }
 
 .status-indicator.complete {
-  background: #1a1a1a;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
 }
 
 .status-indicator.error {
-  background: #1a1a1a;
-  color: #ef4444;
+  background: var(--color-bg-tertiary);
+  color: var(--color-error);
 }
 
 .status-indicator svg {
@@ -541,7 +541,7 @@ onMounted(() => {
 .pulse {
   width: 10px;
   height: 10px;
-  background: #22c55e;
+  background: var(--color-accent);
   border-radius: 50%;
   animation: pulse 1.5s ease-in-out infinite;
 }
@@ -552,7 +552,7 @@ onMounted(() => {
 }
 
 .status-text {
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
 }
 
@@ -568,12 +568,12 @@ onMounted(() => {
 }
 
 .stat-label {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.75rem;
 }
 
 .stat-value {
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 0.875rem;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -585,14 +585,14 @@ onMounted(() => {
 
 .progress-bar {
   height: 6px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   border-radius: 0;
   overflow: hidden;
 }
 
 .progress-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--color-accent);
   border-radius: 0;
   transition: width 0.3s ease;
 }
@@ -626,20 +626,20 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   border-radius: 50%;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.75rem;
   font-weight: 600;
 }
 
 .step.complete .step-icon {
-  background: #1a1a1a;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
 }
 
 .step span {
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.625rem;
   text-align: center;
 }
@@ -647,26 +647,26 @@ onMounted(() => {
 .step-connector {
   flex: 1;
   height: 2px;
-  background: #222;
+  background: var(--color-border);
   margin: 0 4px;
   margin-bottom: 18px;
   transition: background 0.3s ease;
 }
 
 .step-connector.active {
-  background: #22c55e;
+  background: var(--color-accent);
 }
 
 .progress-footer {
   padding-top: 16px;
-  border-top: 1px solid #222;
+  border-top: 1px solid var(--color-border);
 }
 
 .tip {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 0.75rem;
   margin: 0;
 }
@@ -681,10 +681,10 @@ onMounted(() => {
 .logs-section {
   margin-top: 20px;
   margin-bottom: 16px;
-  border: 1px solid #222;
+  border: 1px solid var(--color-border);
   border-radius: 0;
   overflow: hidden;
-  background: #0d0d0d;
+  background: var(--color-bg);
 }
 
 .logs-header {
@@ -692,20 +692,20 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   cursor: pointer;
   transition: background 0.2s ease;
 }
 
 .logs-header:hover {
-  background: #222;
+  background: var(--color-border);
 }
 
 .logs-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #888;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
   font-weight: 500;
 }
@@ -713,22 +713,22 @@ onMounted(() => {
 .logs-title svg {
   width: 16px;
   height: 16px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .log-count {
-  background: #1a1a1a;
-  color: #22c55e;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
   padding: 2px 8px;
   border-radius: 0;
   font-size: 0.75rem;
-  border: 1px solid #333;
+  border: 1px solid var(--color-border-secondary);
 }
 
 .chevron {
   width: 18px;
   height: 18px;
-  color: #666;
+  color: var(--color-text-tertiary);
   transition: transform 0.2s ease;
 }
 
@@ -749,20 +749,20 @@ onMounted(() => {
 }
 
 .logs-container::-webkit-scrollbar-track {
-  background: #0d0d0d;
+  background: var(--color-bg);
 }
 
 .logs-container::-webkit-scrollbar-thumb {
-  background: #333;
+  background: var(--color-border-secondary);
   border-radius: 0;
 }
 
 .logs-container::-webkit-scrollbar-thumb:hover {
-  background: #444;
+  background: var(--color-border-hover);
 }
 
 .logs-empty {
-  color: #666;
+  color: var(--color-text-tertiary);
   text-align: center;
   padding: 16px;
   font-style: italic;
@@ -775,7 +775,7 @@ onMounted(() => {
   padding: 6px 8px;
   border-radius: 0;
   margin-bottom: 2px;
-  background: #141414;
+  background: var(--color-bg-secondary);
   animation: fadeIn 0.3s ease;
 }
 
@@ -814,25 +814,25 @@ onMounted(() => {
 
 .log-time {
   flex-shrink: 0;
-  color: #444;
+  color: var(--color-border-hover);
   font-size: 0.625rem;
 }
 
 /* Log level colors */
 .log-info .log-icon {
-  color: #3b82f6;
+  color: var(--color-info);
 }
 
 .log-success .log-icon {
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .log-warning .log-icon {
-  color: #f59e0b;
+  color: var(--color-warning);
 }
 
 .log-error .log-icon {
-  color: #ef4444;
+  color: var(--color-error);
 }
 
 .log-debug .log-icon {
@@ -841,18 +841,18 @@ onMounted(() => {
 
 /* Log level backgrounds */
 .log-success {
-  background: #141414;
-  border-left: 2px solid #22c55e;
+  background: var(--color-bg-secondary);
+  border-left: 2px solid var(--color-accent);
 }
 
 .log-warning {
-  background: #141414;
-  border-left: 2px solid #f59e0b;
+  background: var(--color-bg-secondary);
+  border-left: 2px solid var(--color-warning);
 }
 
 .log-error {
-  background: #141414;
-  border-left: 2px solid #ef4444;
+  background: var(--color-bg-secondary);
+  border-left: 2px solid var(--color-error);
 }
 
 /* Category indicator */
@@ -865,14 +865,14 @@ onMounted(() => {
 }
 
 .category-detection .log-category-icon {
-  color: #3b82f6;
+  color: var(--color-info);
 }
 
 .category-court .log-category-icon {
-  color: #f59e0b;
+  color: var(--color-warning);
 }
 
 .category-processing .log-category-icon {
-  color: #888;
+  color: var(--color-text-secondary);
 }
 </style>

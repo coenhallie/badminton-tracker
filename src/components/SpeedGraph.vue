@@ -644,9 +644,9 @@ const getZoneName = (zone: SpeedZone): string => {
 
 <style scoped>
 .speed-graph-container {
-  background: #141414;
+  background: var(--color-bg-secondary);
   border-radius: 0;
-  border: 1px solid #222;
+  border: 1px solid var(--color-border);
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -660,14 +660,14 @@ const getZoneName = (zone: SpeedZone): string => {
   justify-content: space-between;
   align-items: center;
   padding-bottom: 8px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .header-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #fff;
+  color: var(--color-text-heading);
   font-weight: 600;
   font-size: 14px;
 }
@@ -675,7 +675,7 @@ const getZoneName = (zone: SpeedZone): string => {
 .header-title .icon {
   width: 18px;
   height: 18px;
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .header-controls {
@@ -685,9 +685,9 @@ const getZoneName = (zone: SpeedZone): string => {
 }
 
 .unit-toggle {
-  background: #1a1a1a;
-  color: #22c55e;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   padding: 4px 10px;
   font-size: 11px;
@@ -698,14 +698,14 @@ const getZoneName = (zone: SpeedZone): string => {
 
 .unit-toggle:hover,
 .unit-toggle.active {
-  background: #222;
-  border-color: #22c55e;
+  background: var(--color-border);
+  border-color: var(--color-accent);
 }
 
 .window-select {
-  background: #1a1a1a;
-  color: #fff;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-heading);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   padding: 4px 8px;
   font-size: 11px;
@@ -714,12 +714,12 @@ const getZoneName = (zone: SpeedZone): string => {
 
 .toggle-btn,
 .close-btn {
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   padding: 4px;
   cursor: pointer;
-  color: #666;
+  color: var(--color-text-tertiary);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -728,15 +728,15 @@ const getZoneName = (zone: SpeedZone): string => {
 
 .toggle-btn:hover,
 .close-btn:hover {
-  background: #222;
-  color: #fff;
-  border-color: #444;
+  background: var(--color-border);
+  color: var(--color-text-heading);
+  border-color: var(--color-border-hover);
 }
 
 .toggle-btn.active {
-  background: #1a1a1a;
-  color: #22c55e;
-  border-color: #22c55e;
+  background: var(--color-bg-tertiary);
+  color: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .icon-sm {
@@ -754,7 +754,7 @@ const getZoneName = (zone: SpeedZone): string => {
 .player-stats {
   flex: 1;
   min-width: 180px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   border-radius: 0;
   padding: 10px;
   border-left: 3px solid;
@@ -764,7 +764,7 @@ const getZoneName = (zone: SpeedZone): string => {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #fff;
+  color: var(--color-text-heading);
   font-weight: 600;
   font-size: 12px;
   margin-bottom: 8px;
@@ -788,7 +788,7 @@ const getZoneName = (zone: SpeedZone): string => {
 
 .stat-label {
   display: block;
-  color: #666;
+  color: var(--color-text-tertiary);
   font-size: 10px;
   text-transform: uppercase;
   margin-bottom: 2px;
@@ -796,7 +796,7 @@ const getZoneName = (zone: SpeedZone): string => {
 
 .stat-value {
   display: block;
-  color: #fff;
+  color: var(--color-text-heading);
   font-size: 14px;
   font-weight: 600;
 }
@@ -816,7 +816,7 @@ const getZoneName = (zone: SpeedZone): string => {
 .zone-name {
   display: block;
   font-size: 9px;
-  color: #666;
+  color: var(--color-text-tertiary);
   margin-top: 2px;
 }
 
@@ -834,7 +834,7 @@ const getZoneName = (zone: SpeedZone): string => {
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #666;
+  color: var(--color-text-tertiary);
   gap: 8px;
 }
 
@@ -851,7 +851,7 @@ const getZoneName = (zone: SpeedZone): string => {
   width: 32px;
   height: 32px;
   animation: spin 1s linear infinite;
-  color: #22c55e;
+  color: var(--color-accent);
   margin-bottom: 8px;
 }
 
@@ -863,7 +863,7 @@ const getZoneName = (zone: SpeedZone): string => {
 .no-data.pending .icon-large {
   width: 40px;
   height: 40px;
-  color: #f59e0b;
+  color: var(--color-warning);
   margin-bottom: 8px;
 }
 
@@ -873,9 +873,9 @@ const getZoneName = (zone: SpeedZone): string => {
   gap: 8px;
   margin: 12px 0;
   padding: 12px 16px;
-  background: #1a1a1a;
+  background: var(--color-bg-tertiary);
   border-radius: 0;
-  border: 1px solid #333;
+  border: 1px solid var(--color-border-secondary);
 }
 
 .prereq-item {
@@ -883,7 +883,7 @@ const getZoneName = (zone: SpeedZone): string => {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-tertiary);
 }
 
 .prereq-item svg {
@@ -893,11 +893,11 @@ const getZoneName = (zone: SpeedZone): string => {
 }
 
 .prereq-item.done {
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 .prereq-item.done svg {
-  color: #22c55e;
+  color: var(--color-accent);
 }
 
 /* Zone Legend */
@@ -907,7 +907,7 @@ const getZoneName = (zone: SpeedZone): string => {
   flex-wrap: wrap;
   justify-content: center;
   padding-top: 8px;
-  border-top: 1px solid #222;
+  border-top: 1px solid var(--color-border);
 }
 
 .zone-item {
@@ -915,7 +915,7 @@ const getZoneName = (zone: SpeedZone): string => {
   align-items: center;
   gap: 4px;
   font-size: 10px;
-  color: #666;
+  color: var(--color-text-tertiary);
 }
 
 .zone-color {
