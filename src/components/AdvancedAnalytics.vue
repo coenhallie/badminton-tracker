@@ -7,6 +7,7 @@ import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
 const props = defineProps<{
   result: AnalysisResult
   currentFrame: number
+  courtKeypoints?: number[][] | null
 }>()
 
 const {
@@ -15,14 +16,12 @@ const {
   currentRally,
   shotPlacementsByType,
   recoveryStats,
-  fatigueProfiles,
-  videoDuration,
   reactionStats,
   movementEfficiency,
-  pressureEvents,
 } = useAdvancedAnalytics(
   computed(() => props.result),
-  computed(() => props.currentFrame)
+  computed(() => props.currentFrame),
+  computed(() => props.courtKeypoints ?? null)
 )
 
 type Tab = 'rallies' | 'shots' | 'movement'
@@ -71,12 +70,6 @@ function getQualityColor(quality: string): string {
     case 'poor': return '#ef4444'
     default: return '#666'
   }
-}
-
-function getFatigueColor(declinePercent: number): string {
-  if (declinePercent < 5) return '#22c55e'
-  if (declinePercent < 15) return '#f59e0b'
-  return '#ef4444'
 }
 </script>
 
@@ -313,20 +306,6 @@ function getFatigueColor(declinePercent: number): string {
           </div>
         </section>
 
-        <!-- Pressure Index -->
-        <section class="aa-section" v-if="pressureEvents.length > 0">
-          <h3>Pressure Index</h3>
-          <p class="section-desc">How much pressure each shot puts on the opponent (0-100)</p>
-          <div class="aa-stat-row">
-            <div class="aa-stat-card" v-for="pid in [0, 1]" :key="pid">
-              <span class="aa-stat-value" :style="{ color: getPlayerColor(pid) }">
-                {{ (pressureEvents.filter(e => e.playerId === pid).reduce((s, e) => s + e.pressureScore, 0) / Math.max(1, pressureEvents.filter(e => e.playerId === pid).length)).toFixed(0) }}
-              </span>
-              <span class="aa-stat-label">P{{ pid + 1 }} Avg Pressure</span>
-            </div>
-          </div>
-        </section>
-
         <!-- Movement Efficiency -->
         <section class="aa-section" v-if="movementEfficiency.length > 0">
           <h3>Movement Efficiency</h3>
@@ -361,80 +340,7 @@ function getFatigueColor(declinePercent: number): string {
           </div>
         </section>
 
-        <!-- Fatigue Detection - Too Short Notice -->
-        <section class="aa-section" v-if="fatigueProfiles.length === 0 && videoDuration > 0 && videoDuration < 600">
-          <h3>Fatigue Analysis</h3>
-          <div class="aa-empty">
-            <p>Video too short for fatigue analysis. Fatigue patterns require at least 10 minutes of footage (current: {{ Math.floor(videoDuration / 60) }}m {{ Math.floor(videoDuration % 60) }}s).</p>
-          </div>
-        </section>
-
-        <!-- Fatigue Detection -->
-        <section class="aa-section" v-if="fatigueProfiles.length > 0">
-          <h3>Fatigue Analysis</h3>
-          <div class="fatigue-grid">
-            <div
-              v-for="profile in fatigueProfiles"
-              :key="profile.playerId"
-              class="fatigue-card"
-            >
-              <div class="fatigue-header">
-                <div class="player-badge" :style="{ background: getPlayerColor(profile.playerId) }">
-                  P{{ profile.playerId + 1 }}
-                </div>
-                <span
-                  class="fatigue-verdict"
-                  :style="{ color: getFatigueColor(profile.speedDeclinePercent) }"
-                >
-                  {{ profile.speedDeclinePercent < 5 ? 'Consistent' : profile.speedDeclinePercent < 15 ? 'Mild Fatigue' : 'Significant Fatigue' }}
-                </span>
-              </div>
-
-              <!-- Speed by segment -->
-              <div class="fatigue-chart">
-                <div class="fatigue-bars">
-                  <div
-                    v-for="seg in profile.segments"
-                    :key="seg.segmentIndex"
-                    class="fatigue-bar-col"
-                  >
-                    <div
-                      class="fatigue-bar"
-                      :style="{
-                        height: `${profile.segments[0]!.avgSpeed > 0 ? (seg.avgSpeed / profile.segments[0]!.avgSpeed) * 100 : 0}%`,
-                        background: getPlayerColor(profile.playerId),
-                        opacity: 0.4 + (1 - seg.segmentIndex / profile.segments.length) * 0.6
-                      }"
-                    />
-                    <span class="fatigue-bar-label">Q{{ seg.segmentIndex + 1 }}</span>
-                  </div>
-                </div>
-                <span class="fatigue-axis">Avg Speed by Quarter</span>
-              </div>
-
-              <div class="fatigue-metrics">
-                <div class="fatigue-metric">
-                  <span class="metric-val" :style="{ color: getFatigueColor(profile.speedDeclinePercent) }">
-                    {{ profile.speedDeclinePercent > 0 ? '-' : '+' }}{{ Math.abs(profile.speedDeclinePercent).toFixed(0) }}%
-                  </span>
-                  <span class="metric-lbl">Speed Change</span>
-                </div>
-                <div class="fatigue-metric">
-                  <span class="metric-val" :style="{ color: getFatigueColor(profile.recoveryDeclinePercent) }">
-                    {{ profile.recoveryDeclinePercent > 0 ? '+' : '' }}{{ profile.recoveryDeclinePercent.toFixed(0) }}%
-                  </span>
-                  <span class="metric-lbl">Recovery Time Change</span>
-                </div>
-                <div class="fatigue-metric" v-if="profile.fatigueOnsetSegment !== null">
-                  <span class="metric-val">Q{{ profile.fatigueOnsetSegment + 1 }}</span>
-                  <span class="metric-lbl">Fatigue Onset</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <div v-if="!reactionStats && !recoveryStats && movementEfficiency.length === 0 && fatigueProfiles.length === 0" class="aa-empty">
+        <div v-if="!reactionStats && !recoveryStats && movementEfficiency.length === 0" class="aa-empty">
           <p>Movement analytics require player tracking data with speed calculations. Minimum sample thresholds must be met.</p>
         </div>
       </div>
@@ -923,92 +829,6 @@ function getFatigueColor(declinePercent: number): string {
   font-size: 1rem;
   font-weight: 700;
   color: var(--color-text-heading);
-}
-
-/* Fatigue */
-.fatigue-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 12px;
-}
-
-.fatigue-card {
-  padding: 16px;
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-}
-
-.fatigue-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-
-.fatigue-verdict {
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
-.fatigue-chart {
-  margin-bottom: 12px;
-}
-
-.fatigue-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  height: 80px;
-}
-
-.fatigue-bar-col {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  height: 100%;
-  justify-content: flex-end;
-}
-
-.fatigue-bar {
-  width: 100%;
-  transition: height 0.3s;
-  min-height: 4px;
-}
-
-.fatigue-bar-label {
-  font-size: 0.65rem;
-  color: var(--color-text-secondary);
-  margin-top: 4px;
-}
-
-.fatigue-axis {
-  font-size: 0.65rem;
-  color: var(--color-text-tertiary);
-  text-align: center;
-  display: block;
-  margin-top: 6px;
-}
-
-.fatigue-metrics {
-  display: flex;
-  gap: 16px;
-}
-
-.fatigue-metric {
-  display: flex;
-  flex-direction: column;
-}
-
-.metric-val {
-  font-size: 0.9rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.metric-lbl {
-  font-size: 0.65rem;
-  color: var(--color-text-secondary);
 }
 
 /* Empty state */

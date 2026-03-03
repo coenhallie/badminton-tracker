@@ -724,7 +724,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.4
+            alpha v1.5
           </button>
         </div>
 
@@ -772,6 +772,25 @@ watch(videoSectionRef, () => {
             </button>
           </div>
           <div class="changelog-content">
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.5-alpha</span>
+                <span class="version-date">March 3, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - Shot placement heatmap now uses homography to map to real court coordinates instead of raw video pixels</li>
+                <li> - Heatmap uses fixed court grid (6x8) aligned to actual court dimensions (6.1m x 13.4m)</li>
+                <li> - Shots without shuttle data now included using player position as fallback</li>
+                <li> - Recovery analysis measures distance from court center in meters instead of pixel averages</li>
+                <li> - Recovery quality now factors in both time (60%) and position accuracy (40%)</li>
+                <li> - Reaction time filters out anticipatory movement for more accurate measurements</li>
+                <li> - Removed Pressure Index and Fatigue Detection due to insufficient data accuracy</li>
+                <li> - Extracted shared homography utilities for consistent coordinate transforms</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
             <div class="changelog-entry">
               <div class="changelog-version">
                 <span class="version-tag">v1.4-alpha</span>
@@ -1434,6 +1453,7 @@ watch(videoSectionRef, () => {
               <AdvancedAnalytics
                 :result="analysisResult"
                 :current-frame="currentFrame"
+                :court-keypoints="courtCornersForMiniCourt"
               />
             </div>
           </div>
