@@ -403,22 +403,31 @@ const currentFrame = computed(() => {
 watch(() => props.skeletonData, (newData) => {
   // Reset progressive heatmap when skeleton data changes
   progressiveHeatmapState = null
-  
+
   if (!newData || newData.length === 0) {
     frameIndex.value = new Map()
     timestampIndex.value = []
     return
   }
-  
+
   // Build frame number -> index map
   const fIndex = new Map<number, number>()
   const tIndex: number[] = []
-  
+
+  // Detect and correct off-by-one timestamp offset from old backend data.
+  // Old backend used `frame_count / fps` where frame_count starts at 1,
+  // producing timestamps starting at 1/fps instead of 0.
+  // New backend uses actual PTS from the video container (starts at ~0).
+  // If the first frame's timestamp is suspiciously close to 1/fps, shift all
+  // timestamps back so the first frame aligns with video currentTime = 0.
+  const firstTs = newData[0]!.timestamp
+  const timeOffset = firstTs > 0.01 ? firstTs : 0
+
   newData.forEach((frame, idx) => {
     fIndex.set(frame.frame, idx)
-    tIndex.push(frame.timestamp)
+    tIndex.push(frame.timestamp - timeOffset)
   })
-  
+
   frameIndex.value = fIndex
   timestampIndex.value = tIndex
   
@@ -1990,8 +1999,8 @@ defineExpose({
   width: 100%;
   max-width: 1200px;
   margin: 0 auto;
-  background: #000;
-  border: 1px solid #222;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
   border-radius: 0;
   overflow: hidden;
 }
@@ -2039,7 +2048,7 @@ video.video-dimmed {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #22c55e;
+  background: var(--color-accent);
   border-radius: 0;
   color: white;
   transition: transform 0.2s ease, background 0.2s ease;
@@ -2047,7 +2056,7 @@ video.video-dimmed {
 
 .play-button:hover {
   transform: scale(1.05);
-  background: #16a34a;
+  background: var(--color-accent-dark);
 }
 
 .play-button svg {
@@ -2095,7 +2104,7 @@ video.video-dimmed {
 
 .progress-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--color-accent);
   border-radius: 0;
 }
 
@@ -2184,13 +2193,13 @@ video.video-dimmed {
 
 .rate-btn:hover {
   background: #222;
-  border-color: #22c55e;
+  border-color: var(--color-accent);
   color: white;
 }
 
 .rate-btn.active {
-  background: #22c55e;
-  border-color: #22c55e;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
   color: white;
 }
 
@@ -2224,8 +2233,8 @@ video.video-dimmed {
   align-items: center;
   gap: 12px;
   padding: 16px 24px;
-  background: #0d0d0d;
-  border: 2px solid #22c55e;
+  background: var(--color-bg);
+  border: 2px solid var(--color-accent);
   border-radius: 0;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   z-index: 20;
@@ -2239,7 +2248,7 @@ video.video-dimmed {
 }
 
 .keypoint-title {
-  color: #22c55e;
+  color: var(--color-accent);
   font-weight: bold;
   font-size: 1rem;
 }
@@ -2256,7 +2265,7 @@ video.video-dimmed {
 
 .keypoint-btn {
   padding: 8px 16px;
-  border: 1px solid #333;
+  border: 1px solid var(--color-border-secondary);
   border-radius: 0;
   font-weight: bold;
   font-size: 0.875rem;
@@ -2270,14 +2279,14 @@ video.video-dimmed {
 }
 
 .keypoint-btn.undo {
-  background: #1a1a1a;
-  border-color: #333;
-  color: white;
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-border-secondary);
+  color: var(--color-text-heading);
 }
 
 .keypoint-btn.undo:hover:not(:disabled) {
-  background: #222;
-  border-color: #22c55e;
+  background: var(--color-bg-hover);
+  border-color: var(--color-accent);
 }
 
 .keypoint-btn.cancel {
@@ -2302,8 +2311,8 @@ video.video-dimmed {
 
 .control-btn.keypoint-toggle.active {
   background: #001a00;
-  border: 1px solid #22c55e;
-  color: #22c55e;
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
 }
 
 .control-btn.keypoint-toggle.active:hover {

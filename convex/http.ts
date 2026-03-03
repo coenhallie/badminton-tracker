@@ -817,94 +817,213 @@ interface ManualCourtKeypoints {
 // Standard badminton court dimensions (meters)
 const COURT_LENGTH = 13.4
 const COURT_WIDTH = 6.1
+const SERVICE_LINE = 1.98 // Distance from net to short service line
+
+// Standard court keypoint positions in meters (matches 12-point calibration system)
+// Order: TL, TR, BR, BL, NL, NR, SNL, SNR, SFL, SFR, CTN, CTF
+const COURT_KEYPOINT_POSITIONS: number[][] = [
+  [0, 0],                                             // 0: TL
+  [COURT_WIDTH, 0],                                   // 1: TR
+  [COURT_WIDTH, COURT_LENGTH],                        // 2: BR
+  [0, COURT_LENGTH],                                  // 3: BL
+  [0, COURT_LENGTH / 2],                              // 4: NL - Net left
+  [COURT_WIDTH, COURT_LENGTH / 2],                    // 5: NR - Net right
+  [0, COURT_LENGTH / 2 - SERVICE_LINE],               // 6: SNL - Service near left
+  [COURT_WIDTH, COURT_LENGTH / 2 - SERVICE_LINE],     // 7: SNR - Service near right
+  [0, COURT_LENGTH / 2 + SERVICE_LINE],               // 8: SFL - Service far left
+  [COURT_WIDTH, COURT_LENGTH / 2 + SERVICE_LINE],     // 9: SFR - Service far right
+  [COURT_WIDTH / 2, COURT_LENGTH / 2 - SERVICE_LINE], // 10: CTN - Center near
+  [COURT_WIDTH / 2, COURT_LENGTH / 2 + SERVICE_LINE], // 11: CTF - Center far
+]
+
+// =============================================================================
+// Homography computation with Hartley normalization (supports 4-12 point DLT)
+// =============================================================================
 
 /**
- * Compute a 3x3 homography matrix from 4 source points (pixel space)
- * to 4 destination points (court-meter space).
- *
- * Uses Direct Linear Transform (DLT) with 4 point correspondences.
- * Returns a 9-element flat array representing the 3x3 matrix [h0..h8],
- * or null if the computation fails.
- *
- * The homography maps: [x', y', w] = H * [x, y, 1]
- * Court coords: real_x = x'/w, real_y = y'/w
+ * Normalize a set of 2D points for numerical stability (Hartley normalization).
+ * Translates centroid to origin and scales so average distance = sqrt(2).
  */
-function computeHomography(
-  srcPts: number[][],  // 4 pixel points [[x,y], ...]
-  dstPts: number[][]   // 4 court-meter points [[x,y], ...]
-): number[] | null {
-  if (srcPts.length < 4 || dstPts.length < 4) return null
-
-  // Build 8x8 linear system: A * h = b
-  // For each point pair (sx, sy) -> (dx, dy):
-  //   [sx, sy, 1, 0,  0,  0, -dx*sx, -dx*sy] [h0]   [dx]
-  //   [0,  0,  0, sx, sy, 1, -dy*sx, -dy*sy] [h1] = [dy]
-  const A: number[][] = []
-  const b: number[] = []
-
-  for (let i = 0; i < 4; i++) {
-    const sx = srcPts[i]![0]!, sy = srcPts[i]![1]!
-    const dx = dstPts[i]![0]!, dy = dstPts[i]![1]!
-
-    A.push([sx, sy, 1, 0, 0, 0, -dx * sx, -dx * sy])
-    b.push(dx)
-    A.push([0, 0, 0, sx, sy, 1, -dy * sx, -dy * sy])
-    b.push(dy)
+function normalizePoints(points: number[][]): { normalized: number[][]; T: number[][] } {
+  let sumX = 0, sumY = 0, count = 0
+  for (const p of points) {
+    if (p && p.length >= 2) {
+      sumX += p[0]!
+      sumY += p[1]!
+      count++
+    }
   }
+  if (count === 0) return { normalized: points, T: [[1,0,0],[0,1,0],[0,0,1]] }
 
-  // Solve via Gaussian elimination with partial pivoting
-  const n = 8
-  const M: number[][] = A.map((row, i) => [...row, b[i]!])
+  const meanX = sumX / count
+  const meanY = sumY / count
+
+  let sumDist = 0
+  for (const p of points) {
+    if (p && p.length >= 2) {
+      const dx = p[0]! - meanX
+      const dy = p[1]! - meanY
+      sumDist += Math.sqrt(dx * dx + dy * dy)
+    }
+  }
+  const avgDist = sumDist / count
+  const scale = avgDist > 0 ? Math.sqrt(2) / avgDist : 1
+
+  const normalized: number[][] = points.map(p =>
+    (p && p.length >= 2) ? [(p[0]! - meanX) * scale, (p[1]! - meanY) * scale] : [0, 0]
+  )
+
+  const T: number[][] = [
+    [scale, 0, -scale * meanX],
+    [0, scale, -scale * meanY],
+    [0, 0, 1]
+  ]
+
+  return { normalized, T }
+}
+
+/** Invert a 3x3 matrix */
+function invertMatrix3x3(M: number[][]): number[][] | null {
+  const a = M[0]![0]!, b = M[0]![1]!, c = M[0]![2]!
+  const d = M[1]![0]!, e = M[1]![1]!, f = M[1]![2]!
+  const g = M[2]![0]!, h = M[2]![1]!, i = M[2]![2]!
+  const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
+  if (Math.abs(det) < 1e-12) return null
+  const inv = 1.0 / det
+  return [
+    [(e*i - f*h)*inv, (c*h - b*i)*inv, (b*f - c*e)*inv],
+    [(f*g - d*i)*inv, (a*i - c*g)*inv, (c*d - a*f)*inv],
+    [(d*h - e*g)*inv, (b*g - a*h)*inv, (a*e - b*d)*inv]
+  ]
+}
+
+/** Multiply two 3x3 matrices */
+function multiplyMatrix3x3(A: number[][], B: number[][]): number[][] {
+  const R: number[][] = [[0,0,0],[0,0,0],[0,0,0]]
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      let sum = 0
+      for (let k = 0; k < 3; k++) sum += A[i]![k]! * B[k]![j]!
+      R[i]![j] = sum
+    }
+  }
+  return R
+}
+
+/** Solve linear system Ax = b via Gaussian elimination with partial pivoting */
+function solveLinearSystem(A: number[][], b: number[]): number[] | null {
+  const n = A.length
+  const aug: number[][] = A.map((row, i) => [...row, b[i]!])
 
   for (let col = 0; col < n; col++) {
-    // Partial pivot
     let maxRow = col
-    let maxVal = Math.abs(M[col]![col]!)
     for (let row = col + 1; row < n; row++) {
-      const val = Math.abs(M[row]![col]!)
-      if (val > maxVal) {
-        maxVal = val
-        maxRow = row
-      }
+      if (Math.abs(aug[row]![col]!) > Math.abs(aug[maxRow]![col]!)) maxRow = row
     }
-    if (maxVal < 1e-12) return null // Singular matrix
+    if (Math.abs(aug[maxRow]![col]!) < 1e-10) return null
+    ;[aug[col], aug[maxRow]] = [aug[maxRow]!, aug[col]!]
 
-    // Swap rows
-    if (maxRow !== col) {
-      const tmp = M[col]!
-      M[col] = M[maxRow]!
-      M[maxRow] = tmp
-    }
-
-    // Eliminate below
-    const pivot = M[col]![col]!
     for (let row = col + 1; row < n; row++) {
-      const factor = M[row]![col]! / pivot
-      for (let j = col; j <= n; j++) {
-        M[row]![j] = M[row]![j]! - factor * M[col]![j]!
-      }
+      const factor = aug[row]![col]! / aug[col]![col]!
+      for (let j = col; j <= n; j++) aug[row]![j]! -= factor * aug[col]![j]!
     }
   }
 
-  // Back substitution
-  const h = new Array(n).fill(0)
-  for (let row = n - 1; row >= 0; row--) {
-    let sum = M[row]![n]!
-    for (let j = row + 1; j < n; j++) {
-      sum -= M[row]![j]! * h[j]!
+  const x = new Array<number>(n)
+  for (let i = n - 1; i >= 0; i--) {
+    x[i] = aug[i]![n]!
+    for (let j = i + 1; j < n; j++) x[i]! -= aug[i]![j]! * x[j]!
+    x[i]! /= aug[i]![i]!
+  }
+  return x
+}
+
+/** Solve overdetermined system via normal equations: x = (A^T A)^-1 A^T b */
+function solveLeastSquares(A: number[][], b: number[]): number[] | null {
+  const m = A.length, n = A[0]?.length ?? 0
+  if (n === 0) return null
+
+  const AtA: number[][] = Array.from({ length: n }, () => new Array<number>(n).fill(0))
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      let sum = 0
+      for (let k = 0; k < m; k++) sum += A[k]![i]! * A[k]![j]!
+      AtA[i]![j] = sum
     }
-    h[row] = sum / M[row]![row]!
   }
 
-  // h[0..7] are h0-h7, h8 = 1
-  return [...h, 1.0]
+  const Atb = new Array<number>(n).fill(0)
+  for (let i = 0; i < n; i++) {
+    let sum = 0
+    for (let k = 0; k < m; k++) sum += A[k]![i]! * b[k]!
+    Atb[i] = sum
+  }
+
+  return solveLinearSystem(AtA, Atb)
+}
+
+/**
+ * Compute a 3x3 homography matrix using DLT with Hartley normalization.
+ * Supports 4 points (exact) or more (least-squares for better accuracy).
+ * Returns a 9-element flat array [h0..h8] representing the 3x3 matrix.
+ */
+function computeHomography(
+  srcPts: number[][],
+  dstPts: number[][]
+): number[] | null {
+  const count = Math.min(srcPts.length, dstPts.length)
+  if (count < 4) return null
+
+  // Filter valid point pairs
+  const validSrc: number[][] = []
+  const validDst: number[][] = []
+  for (let i = 0; i < count; i++) {
+    if (srcPts[i]?.length! >= 2 && dstPts[i]?.length! >= 2) {
+      validSrc.push(srcPts[i]!)
+      validDst.push(dstPts[i]!)
+    }
+  }
+  if (validSrc.length < 4) return null
+
+  // Normalize coordinates for numerical stability
+  const { normalized: normSrc, T: T_src } = normalizePoints(validSrc)
+  const { normalized: normDst, T: T_dst } = normalizePoints(validDst)
+
+  // Build DLT matrix equation
+  const A: number[][] = []
+  const b: number[] = []
+  for (let i = 0; i < normSrc.length; i++) {
+    const sx = normSrc[i]![0]!, sy = normSrc[i]![1]!
+    const dx = normDst[i]![0]!, dy = normDst[i]![1]!
+    A.push([sx, sy, 1, 0, 0, 0, -dx * sx, -dx * sy])
+    A.push([0, 0, 0, sx, sy, 1, -dy * sx, -dy * sy])
+    b.push(dx)
+    b.push(dy)
+  }
+  if (A.length < 8) return null
+
+  // Solve: exact for 4 points, least-squares for overdetermined
+  const h = A.length === 8 ? solveLinearSystem(A, b) : solveLeastSquares(A, b)
+  if (!h) return null
+
+  // Construct normalized homography and denormalize: H = T_dst^-1 * H_norm * T_src
+  const H_norm: number[][] = [
+    [h[0]!, h[1]!, h[2]!],
+    [h[3]!, h[4]!, h[5]!],
+    [h[6]!, h[7]!, 1]
+  ]
+  const T_dst_inv = invertMatrix3x3(T_dst)
+  if (!T_dst_inv) return null
+
+  const H = multiplyMatrix3x3(T_dst_inv, multiplyMatrix3x3(H_norm, T_src))
+
+  // Flatten to 9-element array
+  return [H[0]![0]!, H[0]![1]!, H[0]![2]!, H[1]![0]!, H[1]![1]!, H[1]![2]!, H[2]![0]!, H[2]![1]!, H[2]![2]!]
 }
 
 /**
  * Apply a 3x3 homography to transform a pixel point to court-meter coordinates.
- *
- * H is a 9-element flat array [h0, h1, h2, h3, h4, h5, h6, h7, h8].
- * Returns [courtX, courtY] in meters, or null if the transform degenerates.
+ * H is a 9-element flat array [h0..h8].
  */
 function applyHomography(H: number[], px: number, py: number): [number, number] | null {
   const w = H[6]! * px + H[7]! * py + H[8]!
@@ -916,7 +1035,8 @@ function applyHomography(H: number[], px: number, py: number): [number, number] 
 
 /**
  * Build a homography matrix from manual court keypoints.
- * Maps the 4 pixel corners to standard badminton court coordinates in meters.
+ * Uses ALL available keypoints (up to 12) for maximum accuracy via least-squares DLT.
+ * Falls back gracefully to 4-point if optional keypoints are missing.
  *
  * Court coordinate system:
  *   Origin (0,0) = top-left corner
@@ -926,34 +1046,50 @@ function applyHomography(H: number[], px: number, py: number): [number, number] 
 function buildHomographyFromKeypoints(
   keypoints: ManualCourtKeypoints
 ): number[] | null {
-  const srcPts = [
+  // Required 4 corners
+  const requiredPts = [
     keypoints.top_left,
     keypoints.top_right,
     keypoints.bottom_right,
     keypoints.bottom_left,
   ]
-
-  // Validate all points exist
-  for (const pt of srcPts) {
+  for (const pt of requiredPts) {
     if (!pt || pt.length < 2) return null
   }
 
-  const dstPts = [
-    [0, 0],                     // top_left → (0, 0)
-    [COURT_WIDTH, 0],           // top_right → (6.1, 0)
-    [COURT_WIDTH, COURT_LENGTH], // bottom_right → (6.1, 13.4)
-    [0, COURT_LENGTH],          // bottom_left → (0, 13.4)
+  // Build source (pixel) and destination (court meters) point arrays
+  // using all available keypoints for better accuracy
+  const srcPts: number[][] = [...requiredPts]
+  const dstPts: number[][] = [
+    COURT_KEYPOINT_POSITIONS[0]!, // TL
+    COURT_KEYPOINT_POSITIONS[1]!, // TR
+    COURT_KEYPOINT_POSITIONS[2]!, // BR
+    COURT_KEYPOINT_POSITIONS[3]!, // BL
   ]
 
+  // Optional keypoints - add each one that exists
+  const optionalMappings: Array<{ field: keyof ManualCourtKeypoints; idx: number }> = [
+    { field: "net_left", idx: 4 },
+    { field: "net_right", idx: 5 },
+    { field: "service_line_near_left", idx: 6 },
+    { field: "service_line_near_right", idx: 7 },
+    { field: "service_line_far_left", idx: 8 },
+    { field: "service_line_far_right", idx: 9 },
+    { field: "center_near", idx: 10 },
+    { field: "center_far", idx: 11 },
+  ]
+
+  for (const { field, idx } of optionalMappings) {
+    const pt = keypoints[field]
+    if (pt && Array.isArray(pt) && pt.length >= 2) {
+      srcPts.push(pt)
+      dstPts.push(COURT_KEYPOINT_POSITIONS[idx]!)
+    }
+  }
+
+  console.log(`[Speed] Building homography from ${srcPts.length} keypoints (4 required + ${srcPts.length - 4} optional)`)
   return computeHomography(srcPts, dstPts)
 }
-
-// Typical maximum speed for badminton (km/h) - for summary stats cap
-// Most badminton movement is 5-18 km/h, with rare bursts to 25 km/h
-const TYPICAL_MAX_SPEED_KMH = 15.0
-
-// Suspicious speed threshold - above this is flagged as potential outlier
-const SUSPICIOUS_SPEED_KMH = 20.0
 
 // Median filter window size
 const SPEED_MEDIAN_WINDOW = 5
@@ -1092,12 +1228,14 @@ function calculateSpeedFromSkeleton(
             isValidMeasurement = false
           }
           // STEP 4: Median filter — reject outlier spikes
+          // Use 3x threshold (not 2x) to allow legitimate quick accelerations
+          // common in badminton (e.g., standing → lunge)
           else {
             const window = playerStats[pid].speedWindow
             if (window.length >= 3) {
               const sortedWindow = [...window].sort((a, b) => a - b)
               const medianSpeed = sortedWindow[Math.floor(sortedWindow.length / 2)]!
-              if (medianSpeed > 1.0 && speed_kmh > medianSpeed * 2.0) {
+              if (medianSpeed > 2.0 && speed_kmh > medianSpeed * 3.0) {
                 medianFilteredCount++
                 speed_kmh = 0
                 isValidMeasurement = false
@@ -1137,49 +1275,22 @@ function calculateSpeedFromSkeleton(
     console.log(`[Speed] Filtered out ${medianFilteredCount} speed values by median filter`)
   }
   
-  // Calculate statistics per player with multi-stage filtering
-  // (matches modal_convex_processor.py summary calculation)
+  // Calculate statistics per player
+  // Per-frame filtering already handles outliers; only apply hard cap here
   const statistics: Record<string, SpeedStatistics> = {}
   for (const [pid, stats] of Object.entries(playerStats)) {
-    // Stage 1: Hard filter — already done during per-frame processing
-    let filtered = stats.speeds.filter(s => s <= MAX_REALISTIC_SPEED_KMH)
-    
-    // Stage 2: IQR-based outlier removal (if enough data)
-    if (filtered.length >= 5) {
-      const sorted = [...filtered].sort((a, b) => a - b)
-      const q1Idx = Math.floor(sorted.length / 4)
-      const q3Idx = Math.floor(3 * sorted.length / 4)
-      const q1 = sorted[q1Idx] ?? 0
-      const q3 = sorted[q3Idx] ?? 0
-      const iqr = q3 - q1
-      const upperBound = Math.min(q3 + 1.5 * iqr, SUSPICIOUS_SPEED_KMH)
-      filtered = filtered.filter(s => s <= upperBound)
-    }
-    
-    // Stage 3: Remove top 5% as final safety measure
-    if (filtered.length >= 5) {
-      const sorted = [...filtered].sort((a, b) => a - b)
-      const cutoffIdx = Math.floor(sorted.length * 0.95)
-      if (cutoffIdx > 0) {
-        filtered = sorted.slice(0, cutoffIdx)
-      }
-    }
-    
-    // Calculate stats from filtered data
+    const filtered = stats.speeds.filter(s => s > 0 && s <= MAX_REALISTIC_SPEED_KMH)
+
     const avgSpeed = filtered.length > 0
       ? filtered.reduce((a, b) => a + b, 0) / filtered.length
       : 0
     const maxSpeed = filtered.length > 0
       ? Math.max(...filtered)
       : 0
-    
-    // Apply final physiological caps (safety net) — matches backend
-    const cappedAvg = Math.min(avgSpeed, TYPICAL_MAX_SPEED_KMH)
-    const cappedMax = Math.min(maxSpeed, MAX_REALISTIC_SPEED_KMH)
-    
+
     statistics[pid] = {
-      avg: { speed_kmh: cappedAvg },
-      max: { speed_kmh: cappedMax },
+      avg: { speed_kmh: avgSpeed },
+      max: { speed_kmh: Math.min(maxSpeed, MAX_REALISTIC_SPEED_KMH) },
       total_distance_m: stats.distance,
     }
   }

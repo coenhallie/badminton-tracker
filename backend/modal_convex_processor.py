@@ -1069,10 +1069,15 @@ with_reid: False
         last_progress_update = time.time()
 
         while True:
+            # Read actual presentation timestamp BEFORE reading the frame
+            # This matches what the HTML video element's currentTime reports,
+            # preventing skeleton drift on VFR videos or 29.97fps content
+            frame_pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+
             ret, frame = cap.read()
             if not ret:
                 break
-            
+
             frame_count += 1
             
             # Sample rate (process every Nth frame)
@@ -1195,7 +1200,7 @@ with_reid: False
             # Extract skeleton data from pose model with tracking
             frame_data = {
                 "frame": frame_count,
-                "timestamp": frame_count / fps,
+                "timestamp": frame_pts,  # Use actual PTS from video container
                 "players": [],
                 "badminton_detections": badminton_detections,
                 "shuttle_position": shuttle_position,
@@ -1608,9 +1613,11 @@ with_reid: False
                                                     if len(window) >= 3:
                                                         sorted_window = sorted(window)
                                                         median_speed = sorted_window[len(sorted_window) // 2]
-                                                        
-                                                        # If current speed is >2x the recent median, reject entirely
-                                                        if current_speed > median_speed * 2.0 and median_speed > 1.0:
+
+                                                        # If current speed is >3x the recent median, reject entirely
+                                                        # Use 3x (not 2x) to allow legitimate quick accelerations
+                                                        # common in badminton (e.g., standing → lunge)
+                                                        if current_speed > median_speed * 3.0 and median_speed > 2.0:
                                                             # This is an outlier spike - discard it
                                                             is_valid_measurement = False
                                                             is_valid_tracking = False
