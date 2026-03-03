@@ -175,6 +175,8 @@ const HIT_DETECTION_CONFIG = {
   COOLDOWN_FRAMES: 25,       // Min frames between consecutive hits (~0.8s at 30fps)
   CONFIDENCE_THRESHOLD: 0.3, // Min keypoint confidence to use wrist position
   MAX_SPEED_HISTORY: 10,     // Number of recent speeds to keep for baseline & peak detection
+  SHUTTLE_SEARCH_WINDOW: 10, // Frames to search around hit for shuttle position (±10 frames)
+  SHUTTLE_PROXIMITY_PX: 200, // Max pixel distance between shuttle and player for a valid hit
 } as const
 
 // Pose types that indicate an active stroke (used for cross-referencing)
@@ -283,6 +285,39 @@ function median(arr: number[]): number {
   const sorted = [...arr].sort((a, b) => a - b)
   const mid = Math.floor(sorted.length / 2)
   return sorted.length % 2 !== 0 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2
+}
+
+/**
+ * Find the nearest shuttle position to a player within a frame window.
+ * Searches skeletonData for shuttle_position within ±SHUTTLE_SEARCH_WINDOW frames
+ * of the target frame. Returns the distance in video pixels, or null if no shuttle
+ * was detected in the search window.
+ */
+function findNearestShuttleDistance(
+  targetFrame: number,
+  playerCenter: { x: number; y: number }
+): number | null {
+  if (!props.skeletonData || props.skeletonData.length === 0) return null
+
+  const window = HIT_DETECTION_CONFIG.SHUTTLE_SEARCH_WINDOW
+  let closestDist: number | null = null
+
+  for (const frame of props.skeletonData) {
+    if (frame.frame < targetFrame - window) continue
+    if (frame.frame > targetFrame + window) break
+
+    if (frame.shuttle_position && frame.shuttle_position.x != null && frame.shuttle_position.y != null) {
+      const dx = frame.shuttle_position.x - playerCenter.x
+      const dy = frame.shuttle_position.y - playerCenter.y
+      const dist = Math.sqrt(dx * dx + dy * dy)
+
+      if (closestDist === null || dist < closestDist) {
+        closestDist = dist
+      }
+    }
+  }
+
+  return closestDist
 }
 
 /**
@@ -408,7 +443,13 @@ function detectHits(): boolean {
       // --- Layer 5: Cooldown between hits ---
       const cooldownPassed = (skFrame.frame - state.lastHitFrame) >= HIT_DETECTION_CONFIG.COOLDOWN_FRAMES
       if (!cooldownPassed) continue
-      
+
+      // --- Layer 6: Shuttle proximity ---
+      // The shuttle must be detected near the player within a frame window.
+      // This filters out false positives from arm swing during running/movement.
+      const shuttleDist = findNearestShuttleDistance(skFrame.frame, player.center)
+      if (shuttleDist !== null && shuttleDist > HIT_DETECTION_CONFIG.SHUTTLE_PROXIMITY_PX) continue
+
       // All checks passed — register hit
       const feetPos = getFeetPosition(player)
       if (!feetPos) continue
