@@ -1492,7 +1492,7 @@ function drawSkeleton(
 
     // Draw skeleton connections
     ctx.strokeStyle = color
-    ctx.lineWidth = 3
+    ctx.lineWidth = 5
     ctx.lineCap = 'round'
 
     let connectionsDrawn = 0
@@ -1519,11 +1519,11 @@ function drawSkeleton(
     for (const kp of keypoints) {
       if (kp && kp.x !== null && kp.y !== null && kp.confidence > KEYPOINT_CONFIDENCE_THRESHOLD) {
         ctx.beginPath()
-        ctx.arc(kp.x * scaleX, kp.y * scaleY, 5, 0, Math.PI * 2)
+        ctx.arc(kp.x * scaleX, kp.y * scaleY, 6, 0, Math.PI * 2)
         ctx.fillStyle = color
         ctx.fill()
         ctx.strokeStyle = '#ffffff'
-        ctx.lineWidth = 2
+        ctx.lineWidth = 2.5
         ctx.stroke()
         keypointsDrawn++
       }

@@ -724,7 +724,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.3
+            alpha v1.4
           </button>
         </div>
 
@@ -772,6 +772,21 @@ watch(videoSectionRef, () => {
             </button>
           </div>
           <div class="changelog-content">
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.4-alpha</span>
+                <span class="version-date">March 3, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - Accurate speed measurement using 12-point court calibration with perspective-corrected homography</li>
+                <li> - Fixed skeleton-video synchronization using actual video timestamps</li>
+                <li> - Improved speed filtering to capture fast movements like lunges and recoveries</li>
+                <li> - Thicker skeleton overlay lines for better visibility</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
             <div class="changelog-entry">
               <div class="changelog-version">
                 <span class="version-tag">v1.3-alpha</span>
