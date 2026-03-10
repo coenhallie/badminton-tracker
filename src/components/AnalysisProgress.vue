@@ -116,6 +116,8 @@ watch(videoStatus, async (newStatus) => {
           court_detection: (results.court_detection as AnalysisResult['court_detection']) ?? null,
           shuttle_analytics: (results.shuttle_analytics as AnalysisResult['shuttle_analytics']) ?? null,
           player_zone_analytics: (results.player_zone_analytics as AnalysisResult['player_zone_analytics']) ?? null,
+          rallies: (results.rallies as AnalysisResult['rallies']) ?? null,
+          rally_stats: (results.rally_stats as AnalysisResult['rally_stats']) ?? null,
         }
         emit('complete', analysisResult)
       } catch (err) {

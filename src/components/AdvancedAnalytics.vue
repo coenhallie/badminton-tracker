@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { AnalysisResult } from '@/types/analysis'
+import type { AnalysisResult, Rally } from '@/types/analysis'
 import { PLAYER_COLORS } from '@/types/analysis'
 import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
 
@@ -8,6 +8,10 @@ const props = defineProps<{
   result: AnalysisResult
   currentFrame: number
   courtKeypoints?: number[][] | null
+}>()
+
+const emit = defineEmits<{
+  seekToTime: [time: number]
 }>()
 
 const {
@@ -33,6 +37,33 @@ const tabs: { id: Tab; label: string }[] = [
   { id: 'movement', label: 'Movement' },
 ]
 
+// Selected rally filter: null = show all, number = focus on specific rally
+const selectedRallyId = ref<number | null>(null)
+
+const selectedRally = computed(() => {
+  if (selectedRallyId.value === null) return null
+  return rallies.value.find(r => r.id === selectedRallyId.value) ?? null
+})
+
+// Backend rally stats (from TrackNet + gradient detection)
+const backendRallyStats = computed(() => props.result.rally_stats ?? null)
+const hasBackendRallies = computed(() => (props.result.rallies?.length ?? 0) > 0)
+
+function selectRally(rally: Rally) {
+  if (selectedRallyId.value === rally.id) {
+    // Clicking the already-selected rally deselects it
+    selectedRallyId.value = null
+  } else {
+    selectedRallyId.value = rally.id
+    // Seek video to rally start
+    emit('seekToTime', rally.startTimestamp)
+  }
+}
+
+function clearRallySelection() {
+  selectedRallyId.value = null
+}
+
 // Selected shot type filter for placement heatmap
 const selectedShotType = ref('all')
 const availableShotTypes = computed(() =>
@@ -41,6 +72,27 @@ const availableShotTypes = computed(() =>
 const activePlacementHeatmap = computed(() =>
   shotPlacementsByType.value.find(s => s.shotType === selectedShotType.value)
 )
+
+// Rally timeline: compute what percentage of the video each rally covers
+const videoTimeline = computed(() => {
+  const duration = props.result.duration
+  if (!duration || duration <= 0 || rallies.value.length === 0) return []
+  return rallies.value.map(r => ({
+    id: r.id,
+    leftPct: (r.startTimestamp / duration) * 100,
+    widthPct: (r.durationSeconds / duration) * 100,
+    rally: r,
+  }))
+})
+
+// Current playback position as percentage
+const playbackPct = computed(() => {
+  const duration = props.result.duration
+  if (!duration || duration <= 0) return 0
+  const fps = props.result.fps || 30
+  const currentTime = props.currentFrame / fps
+  return (currentTime / duration) * 100
+})
 
 function getPlayerColor(index: number): string {
   return PLAYER_COLORS[index % PLAYER_COLORS.length] ?? '#FF6B6B'
@@ -109,23 +161,116 @@ function getQualityColor(quality: string): string {
               <span class="aa-stat-value">{{ rallies.length }}</span>
               <span class="aa-stat-label">Total Rallies</span>
             </div>
+            <div class="aa-stat-card" v-if="backendRallyStats">
+              <span class="aa-stat-value">{{ backendRallyStats.rally_percentage }}%</span>
+              <span class="aa-stat-label">Active Play</span>
+            </div>
+            <div class="aa-stat-card">
+              <span class="aa-stat-value">{{ (backendRallyStats?.avg_rally_duration_s ?? rallyLengthDistribution.avgDuration).toFixed(1) }}s</span>
+              <span class="aa-stat-label">Avg Rally Duration</span>
+            </div>
             <div class="aa-stat-card">
               <span class="aa-stat-value">{{ rallyLengthDistribution.avgShots.toFixed(1) }}</span>
               <span class="aa-stat-label">Avg Shots/Rally</span>
             </div>
-            <div class="aa-stat-card">
-              <span class="aa-stat-value">{{ rallyLengthDistribution.avgDuration.toFixed(1) }}s</span>
-              <span class="aa-stat-label">Avg Rally Duration</span>
-            </div>
             <div class="aa-stat-card" v-if="rallies.length > 0">
-              <span class="aa-stat-value">{{ Math.max(...rallies.map(r => r.shotCount)) }}</span>
-              <span class="aa-stat-label">Longest Rally (shots)</span>
+              <span class="aa-stat-value">{{ Math.max(...rallies.map(r => r.durationSeconds)).toFixed(1) }}s</span>
+              <span class="aa-stat-label">Longest Rally</span>
+            </div>
+          </div>
+          <p v-if="hasBackendRallies" class="detection-source">
+            Detected via shuttle trajectory tracking
+          </p>
+        </section>
+
+        <!-- Rally Timeline -->
+        <section class="aa-section" v-if="rallies.length > 0">
+          <div class="timeline-header">
+            <h3>Rally Timeline</h3>
+            <button
+              v-if="selectedRallyId !== null"
+              class="clear-selection-btn"
+              @click="clearRallySelection"
+            >
+              Show all
+            </button>
+          </div>
+          <div class="rally-timeline">
+            <div class="timeline-bar">
+              <div
+                v-for="seg in videoTimeline"
+                :key="seg.id"
+                class="timeline-rally-segment"
+                :class="{
+                  'is-active': currentRally?.id === seg.id,
+                  'is-selected': selectedRallyId === seg.id,
+                  'is-dimmed': selectedRallyId !== null && selectedRallyId !== seg.id,
+                }"
+                :style="{
+                  left: seg.leftPct + '%',
+                  width: Math.max(seg.widthPct, 0.4) + '%',
+                }"
+                :title="`Rally #${seg.id} — ${formatTime(seg.rally.startTimestamp)} (${seg.rally.durationSeconds.toFixed(1)}s)`"
+                @click="selectRally(seg.rally)"
+              />
+              <!-- Playback position indicator -->
+              <div
+                class="timeline-playhead"
+                :style="{ left: playbackPct + '%' }"
+              />
+            </div>
+            <div class="timeline-labels">
+              <span>0:00</span>
+              <span>{{ formatTime(result.duration / 2) }}</span>
+              <span>{{ formatTime(result.duration) }}</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Selected Rally Detail -->
+        <section class="aa-section" v-if="selectedRally">
+          <div class="selected-rally-header">
+            <h3>Rally #{{ selectedRally.id }}</h3>
+            <div class="selected-rally-meta">
+              <span class="selected-rally-time">{{ formatTime(selectedRally.startTimestamp) }} — {{ formatTime(selectedRally.endTimestamp) }}</span>
+              <span class="selected-rally-duration">{{ selectedRally.durationSeconds.toFixed(1) }}s</span>
+            </div>
+          </div>
+          <div class="selected-rally-stats">
+            <div class="aa-stat-card compact">
+              <span class="aa-stat-value">{{ selectedRally.shotCount }}</span>
+              <span class="aa-stat-label">Shots</span>
+            </div>
+            <div class="aa-stat-card compact">
+              <span class="aa-stat-value">{{ selectedRally.durationSeconds.toFixed(1) }}s</span>
+              <span class="aa-stat-label">Duration</span>
+            </div>
+            <div class="aa-stat-card compact" v-if="selectedRally.shotCount > 0 && selectedRally.durationSeconds > 0">
+              <span class="aa-stat-value">{{ (selectedRally.durationSeconds / selectedRally.shotCount).toFixed(1) }}s</span>
+              <span class="aa-stat-label">Avg Shot Interval</span>
+            </div>
+          </div>
+          <!-- Shot sequence for selected rally -->
+          <div class="selected-rally-shots" v-if="selectedRally.shots.length > 0">
+            <div
+              v-for="(shot, i) in selectedRally.shots"
+              :key="i"
+              class="shot-item"
+              @click="emit('seekToTime', shot.timestamp)"
+            >
+              <span class="shot-index">{{ i + 1 }}</span>
+              <span
+                class="shot-player-dot"
+                :style="{ background: getPlayerColor(shot.playerId) }"
+              />
+              <span class="shot-type-label">{{ shot.shotType }}</span>
+              <span class="shot-timestamp">{{ formatTime(shot.timestamp) }}</span>
             </div>
           </div>
         </section>
 
         <!-- Rally Length Distribution -->
-        <section class="aa-section" v-if="rallyLengthDistribution.bins.length > 0">
+        <section class="aa-section" v-if="rallyLengthDistribution.bins.length > 0 && !selectedRally">
           <h3>Rally Length Distribution</h3>
           <div class="bar-chart">
             <div
@@ -149,14 +294,18 @@ function getQualityColor(quality: string): string {
         </section>
 
         <!-- Rally List -->
-        <section class="aa-section" v-if="rallies.length > 0">
-          <h3>Rally Details</h3>
+        <section class="aa-section" v-if="rallies.length > 0 && !selectedRally">
+          <h3>All Rallies</h3>
           <div class="rally-list">
             <div
-              v-for="rally in rallies.slice(0, 20)"
+              v-for="rally in rallies"
               :key="rally.id"
               class="rally-item"
-              :class="{ 'is-current': currentRally?.id === rally.id }"
+              :class="{
+                'is-current': currentRally?.id === rally.id,
+                'is-selected': selectedRallyId === rally.id,
+              }"
+              @click="selectRally(rally)"
             >
               <div class="rally-meta">
                 <span class="rally-number">#{{ rally.id }}</span>
@@ -181,7 +330,7 @@ function getQualityColor(quality: string): string {
         </section>
 
         <div v-if="rallies.length === 0" class="aa-empty">
-          <p>No rallies detected. At least 2 shots must be detected via shuttle trajectory, player pose, or movement deceleration.</p>
+          <p>No rallies detected. Rallies are segmented from shuttlecock trajectory data. Upload TrackNet weights for improved detection.</p>
         </div>
       </div>
 
@@ -548,12 +697,205 @@ function getQualityColor(quality: string): string {
   margin-top: 8px;
 }
 
+/* Detection source label */
+.detection-source {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  margin-top: 8px;
+  opacity: 0.7;
+}
+
+/* Timeline Header */
+.timeline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.timeline-header h3 {
+  margin: 0;
+}
+
+.clear-selection-btn {
+  padding: 4px 12px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.clear-selection-btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* Rally Timeline */
+.rally-timeline {
+  margin-bottom: 4px;
+}
+
+.timeline-bar {
+  position: relative;
+  height: 32px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+}
+
+.timeline-rally-segment {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background: var(--color-accent);
+  opacity: 0.6;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s;
+  min-width: 3px;
+}
+
+.timeline-rally-segment:hover {
+  opacity: 1;
+}
+
+.timeline-rally-segment.is-active {
+  opacity: 0.9;
+  background: var(--color-accent);
+}
+
+.timeline-rally-segment.is-selected {
+  opacity: 1;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-bg), 0 0 0 2px var(--color-accent);
+}
+
+.timeline-rally-segment.is-dimmed {
+  opacity: 0.2;
+}
+
+.timeline-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-text-heading);
+  pointer-events: none;
+  z-index: 2;
+  transition: left 0.1s linear;
+}
+
+.timeline-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 0.65rem;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Selected Rally Detail */
+.selected-rally-header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.selected-rally-header h3 {
+  margin: 0;
+}
+
+.selected-rally-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.selected-rally-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.selected-rally-duration {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.selected-rally-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.aa-stat-card.compact {
+  padding: 10px 12px;
+}
+
+.aa-stat-card.compact .aa-stat-value {
+  font-size: 1.2rem;
+}
+
+/* Shot sequence in selected rally */
+.selected-rally-shots {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.shot-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.shot-item:hover {
+  border-color: var(--color-accent);
+}
+
+.shot-index {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  width: 20px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.shot-player-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.shot-type-label {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  text-transform: capitalize;
+  flex: 1;
+}
+
+.shot-timestamp {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Rally List */
 .rally-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 300px;
+  max-height: 400px;
   overflow-y: auto;
 }
 
@@ -564,12 +906,21 @@ function getQualityColor(quality: string): string {
   padding: 10px 12px;
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
-  transition: border-color 0.2s;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.rally-item:hover {
+  border-color: var(--color-text-tertiary);
 }
 
 .rally-item.is-current {
   border-color: var(--color-accent);
-  background: #1a2a1a;
+}
+
+.rally-item.is-selected {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-bg-tertiary));
 }
 
 .rally-meta {
@@ -598,7 +949,7 @@ function getQualityColor(quality: string): string {
 
 .rally-shots {
   font-size: 0.8rem;
-  color: #ccc;
+  color: var(--color-text-secondary);
 }
 
 .rally-duration {

@@ -29,6 +29,9 @@ export default defineSchema({
       player_count: v.optional(v.number()),
       has_court_detection: v.optional(v.boolean()),
       has_shuttle_analytics: v.optional(v.boolean()),
+      has_rally_detection: v.optional(v.boolean()),
+      rally_count: v.optional(v.number()),
+      tracknet_used: v.optional(v.boolean()),
     })),
     
     // Full results stored as file (for large data like skeleton_data)

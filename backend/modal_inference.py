@@ -840,19 +840,30 @@ def upload_model(model_type: str, model_data: bytes):
         upload_fn = modal.Function.from_name('badminton-tracker-inference', 'upload_model')
         with open('models/court_keypoint/weights/best.pt', 'rb') as f:
             result = upload_fn.remote(model_type='court_keypoint', model_data=f.read())
-        
+
         # For pose classification model:
         with open('backend/models/badminton_pose/weights/best.pt', 'rb') as f:
             result = upload_fn.remote(model_type='pose', model_data=f.read())
+
+        # For TrackNet shuttle tracking (upload both checkpoints):
+        with open('ckpts/TrackNet_best.pt', 'rb') as f:
+            result = upload_fn.remote(model_type='tracknet', model_data=f.read())
+        # Then rename on volume or use upload_tracknet_model()
     """
-    valid_types = ["court", "court_keypoint", "badminton", "shuttle", "pose"]
+    valid_types = ["court", "court_keypoint", "badminton", "shuttle", "pose", "tracknet"]
     if model_type not in valid_types:
         raise ValueError(f"Invalid model type: {model_type}. Must be one of: {', '.join(valid_types)}")
-    
+
     dest_dir = VOLUME_PATH / model_type
     dest_dir.mkdir(parents=True, exist_ok=True)
-    
-    dest_path = dest_dir / "best.pt"
+
+    # TrackNet uses original checkpoint filenames, not best.pt
+    if model_type == "tracknet":
+        # Caller should specify the filename via a separate parameter,
+        # but for backwards compat default to best.pt
+        dest_path = dest_dir / "best.pt"
+    else:
+        dest_path = dest_dir / "best.pt"
     
     # Write the bytes directly to the volume
     with open(dest_path, 'wb') as f:
@@ -863,3 +874,52 @@ def upload_model(model_type: str, model_data: bytes):
     
     print(f"Uploaded {len(model_data)} bytes to {dest_path}")
     return {"path": str(dest_path), "size_bytes": len(model_data), "model_type": model_type}
+
+
+@app.function()
+def upload_tracknet_model(tracknet_data: bytes, inpaintnet_data: Optional[bytes] = None):
+    """
+    Upload TrackNetV3 checkpoints to Modal Volume.
+
+    TrackNet uses two separate checkpoint files (TrackNet + InpaintNet),
+    stored under /models/tracknet/.
+
+    Usage:
+        import modal
+        upload_fn = modal.Function.from_name('badminton-tracker-inference', 'upload_tracknet_model')
+
+        with open('ckpts/TrackNet_best.pt', 'rb') as f:
+            tracknet_bytes = f.read()
+        with open('ckpts/InpaintNet_best.pt', 'rb') as f:
+            inpaintnet_bytes = f.read()
+
+        result = upload_fn.remote(
+            tracknet_data=tracknet_bytes,
+            inpaintnet_data=inpaintnet_bytes
+        )
+    """
+    dest_dir = VOLUME_PATH / "tracknet"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Upload TrackNet checkpoint
+    tracknet_path = dest_dir / "TrackNet_best.pt"
+    with open(tracknet_path, 'wb') as f:
+        f.write(tracknet_data)
+    print(f"Uploaded TrackNet: {len(tracknet_data)} bytes to {tracknet_path}")
+
+    result = {
+        "tracknet_path": str(tracknet_path),
+        "tracknet_size_bytes": len(tracknet_data),
+    }
+
+    # Upload InpaintNet checkpoint (optional)
+    if inpaintnet_data:
+        inpaintnet_path = dest_dir / "InpaintNet_best.pt"
+        with open(inpaintnet_path, 'wb') as f:
+            f.write(inpaintnet_data)
+        print(f"Uploaded InpaintNet: {len(inpaintnet_data)} bytes to {inpaintnet_path}")
+        result["inpaintnet_path"] = str(inpaintnet_path)
+        result["inpaintnet_size_bytes"] = len(inpaintnet_data)
+
+    volume.commit()
+    return result

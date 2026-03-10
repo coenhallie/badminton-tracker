@@ -9,6 +9,7 @@ This module provides GPU-accelerated video processing that:
 """
 
 import os
+import sys
 import asyncio
 import json
 import tempfile
@@ -801,6 +802,8 @@ models_vol = modal.Volume.from_name("badminton-tracker-models", create_if_missin
 MODELS_PATH = "/models"
 
 # Image with all dependencies
+# Add local backend modules (tracknet, rally_detection) to the container
+_backend_dir = Path(__file__).parent
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install(
@@ -818,8 +821,41 @@ image = (
         "ultralytics>=8.2.0",
         "httpx",
         "python-dotenv",
+        "torch>=2.0.0",
+        "torchvision>=0.15.0",
     )
+    .add_local_dir(str(_backend_dir / "tracknet"), remote_path="/root/tracknet")
+    .add_local_file(str(_backend_dir / "rally_detection.py"), remote_path="/root/rally_detection.py")
 )
+
+
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name("convex-secrets")],
+)
+@modal.fastapi_endpoint(method="POST")
+async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Lightweight endpoint that validates the request and spawns GPU processing
+    in the background. Returns immediately so Convex action doesn't time out.
+    """
+    video_id = request.get("videoId")
+    video_url = request.get("videoUrl")
+    callback_url = request.get("callbackUrl")
+    manual_court_keypoints = request.get("manualCourtKeypoints")
+
+    if not all([video_id, video_url, callback_url]):
+        return {"error": "Missing required fields: videoId, videoUrl, callbackUrl"}
+
+    # Spawn the GPU worker in the background — returns immediately
+    _process_video_worker.spawn(
+        video_id=video_id,
+        video_url=video_url,
+        callback_url=callback_url,
+        manual_court_keypoints=manual_court_keypoints,
+    )
+
+    return {"status": "accepted", "videoId": video_id}
 
 
 @app.function(
@@ -829,38 +865,21 @@ image = (
     volumes={"/cache": vol, MODELS_PATH: models_vol},
     secrets=[modal.Secret.from_name("convex-secrets")],
 )
-@modal.fastapi_endpoint(method="POST")
-async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
+async def _process_video_worker(
+    video_id: str,
+    video_url: str,
+    callback_url: str,
+    manual_court_keypoints: Optional[Dict] = None,
+) -> Dict[str, Any]:
     """
-    Process a video from Convex storage.
-    
-    Request format:
-    {
-        "videoId": "...",
-        "videoUrl": "https://...",  # Temporary URL from Convex
-        "callbackUrl": "https://....convex.site"  # Convex HTTP endpoint base URL
-        "manualCourtKeypoints": {  # Optional - for court ROI filtering
-            "top_left": [x, y],
-            "top_right": [x, y],
-            "bottom_right": [x, y],
-            "bottom_left": [x, y],
-            ...
-        }
-    }
+    GPU worker that does the actual video processing.
+    Spawned in the background by process_video endpoint.
     """
     import httpx
     import cv2
     import numpy as np
     from ultralytics import YOLO
-    
-    video_id = request.get("videoId")
-    video_url = request.get("videoUrl")
-    callback_url = request.get("callbackUrl")
-    manual_court_keypoints = request.get("manualCourtKeypoints")  # Optional court keypoints
-    
-    if not all([video_id, video_url, callback_url]):
-        return {"error": "Missing required fields: videoId, videoUrl, callbackUrl"}
-    
+
     print(f"[MODAL] Starting processing for video: {video_id}")
     print(f"[MODAL] Video URL: {video_url[:100]}...")
     print(f"[MODAL] Callback URL: {callback_url}")
@@ -993,7 +1012,63 @@ with_reid: False
         _ = pose_model(dummy_frame, verbose=False)
         _ = detection_model(dummy_frame, verbose=False)
         await send_log("Models ready (GPU accelerated)", "success", "model")
-        
+
+        # =================================================================
+        # TRACKNET SHUTTLE TRACKING PASS (separate full-video pass)
+        # =================================================================
+        # TrackNetV3 needs 8 consecutive frames + median background,
+        # so it runs as a batch pass over the entire video before the
+        # per-frame YOLO loop.
+        tracknet_positions = {}  # frame_num -> {"x", "y", "visible"}
+        tracknet_available = False
+
+        tracknet_model_path = f"{MODELS_PATH}/tracknet/TrackNet_best.pt"
+        inpaintnet_model_path = f"{MODELS_PATH}/tracknet/InpaintNet_best.pt"
+
+        if os.path.exists(tracknet_model_path):
+            try:
+                # Add tracknet module to path (mounted at /root)
+                sys.path.insert(0, "/root")
+                from tracknet.inference import TrackNetInference
+
+                await send_log("Loading TrackNetV3 for shuttle tracking...", "info", "model")
+                tracker = TrackNetInference(device="cuda")
+                tracker.load_weights(
+                    tracknet_model_path,
+                    inpaintnet_model_path if os.path.exists(inpaintnet_model_path) else None,
+                )
+                await send_log("TrackNetV3 loaded, running shuttle tracking pass...", "info", "model")
+
+                # Sync log callback for TrackNet progress (track_video is synchronous)
+                import asyncio
+                _loop = asyncio.get_event_loop()
+                def tracknet_log(msg: str):
+                    _loop.run_until_complete(send_log(msg, "info", "model"))
+
+                tracknet_positions = tracker.track_video(
+                    str(video_path),
+                    batch_size=16,
+                    log_callback=tracknet_log,
+                )
+                tracknet_available = True
+
+                visible_count = sum(1 for p in tracknet_positions.values() if p.get("visible"))
+                total_tracked = len(tracknet_positions)
+                pct = 100 * visible_count / max(total_tracked, 1)
+                await send_log(
+                    f"TrackNet: shuttle detected in {visible_count}/{total_tracked} frames ({pct:.1f}%)",
+                    "success", "model"
+                )
+            except Exception as e:
+                await send_log(f"TrackNet unavailable: {e}", "warning", "model")
+                print(f"[MODAL] TrackNet error: {e}")
+        else:
+            await send_log(
+                "TrackNet model not found - using YOLO shuttle detection only. "
+                "Upload TrackNet weights to /tracknet/ for improved shuttle tracking.",
+                "info", "model"
+            )
+
         # Process frames
         await send_log("Starting frame-by-frame analysis...", "info", "processing")
         
@@ -1150,9 +1225,18 @@ with_reid: False
                         # Skip all other classes (chairs, tables, person, etc.)
                         # Person detections are also skipped as players come from pose model
             
-            # Extract best shuttle position with static false-positive filtering
+            # Extract best shuttle position
+            # Priority: TrackNet (continuous, high accuracy) > YOLO (sparse, fallback)
             shuttle_position = None
-            if badminton_detections["shuttlecocks"]:
+
+            # Try TrackNet first (if available)
+            if tracknet_available and frame_count in tracknet_positions:
+                tn_pos = tracknet_positions[frame_count]
+                if tn_pos.get("visible"):
+                    shuttle_position = {"x": tn_pos["x"], "y": tn_pos["y"]}
+
+            # Fall back to YOLO detection with static false-positive filtering
+            if shuttle_position is None and badminton_detections["shuttlecocks"]:
                 candidates = sorted(badminton_detections["shuttlecocks"], key=lambda s: s["confidence"], reverse=True)
 
                 for candidate in candidates:
@@ -1766,6 +1850,57 @@ with_reid: False
         await send_log(f"Player 1: {len(player_positions[0])} positions, {player_distances[0]:.1f}m", "info", "processing")
         await send_log(f"Player 2: {len(player_positions[1])} positions, {player_distances[1]:.1f}m", "info", "processing")
         
+        # =================================================================
+        # RALLY DETECTION (from shuttle positions)
+        # =================================================================
+        detected_rallies = []
+        rally_stats = {}
+
+        # Build shuttle positions dict for rally detection
+        # Use TrackNet data if available (much denser), otherwise fall back to
+        # the per-frame shuttle_position from skeleton_frames
+        rally_shuttle_positions = {}
+        if tracknet_available and tracknet_positions:
+            rally_shuttle_positions = tracknet_positions
+            await send_log("Running rally detection using TrackNet data...", "info", "processing")
+        else:
+            # Build from skeleton_frames shuttle_position data
+            for sf in skeleton_frames:
+                fn = sf["frame"]
+                sp = sf.get("shuttle_position")
+                if sp and sp.get("x") is not None:
+                    rally_shuttle_positions[fn] = {"x": sp["x"], "y": sp["y"], "visible": True}
+                else:
+                    rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
+            await send_log("Running rally detection using YOLO shuttle data...", "info", "processing")
+
+        if rally_shuttle_positions:
+            try:
+                sys.path.insert(0, "/root")
+                from rally_detection import detect_rallies, compute_rally_stats
+
+                detected_rallies = detect_rallies(
+                    rally_shuttle_positions,
+                    fps=fps,
+                    total_frames=total_frames,
+                )
+                rally_stats = compute_rally_stats(
+                    detected_rallies, rally_shuttle_positions, fps
+                )
+
+                if detected_rallies:
+                    await send_log(
+                        f"Detected {len(detected_rallies)} rallies "
+                        f"(avg {rally_stats.get('avg_rally_duration_s', 0):.1f}s, "
+                        f"{rally_stats.get('rally_percentage', 0):.0f}% active play)",
+                        "success", "processing"
+                    )
+                else:
+                    await send_log("No rallies detected from shuttle data", "warning", "processing")
+            except Exception as e:
+                await send_log(f"Rally detection error: {e}", "warning", "processing")
+                print(f"[MODAL] Rally detection error: {e}")
+
         # Build results
         results_data = {
             "video_id": video_id,
@@ -1781,6 +1916,8 @@ with_reid: False
             "court_detection": None,
             "shuttle_analytics": None,
             "player_zone_analytics": None,
+            "rallies": detected_rallies,
+            "rally_stats": rally_stats,
         }
         
         # Upload full results as JSON file to Convex storage (avoids 1MB document limit)
@@ -1828,6 +1965,9 @@ with_reid: False
                         "player_count": 2,
                         "has_court_detection": False,
                         "has_shuttle_analytics": False,
+                        "has_rally_detection": len(detected_rallies) > 0,
+                        "rally_count": len(detected_rallies),
+                        "tracknet_used": tracknet_available,
                     },
                     "resultsStorageId": results_storage_id,
                 },

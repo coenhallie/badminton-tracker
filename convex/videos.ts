@@ -167,6 +167,9 @@ export const updateResults = mutation({
       player_count: v.optional(v.number()),
       has_court_detection: v.optional(v.boolean()),
       has_shuttle_analytics: v.optional(v.boolean()),
+      has_rally_detection: v.optional(v.boolean()),
+      rally_count: v.optional(v.number()),
+      tracknet_used: v.optional(v.boolean()),
     })),
     // Storage ID for the full results JSON file
     resultsStorageId: v.optional(v.id("_storage")),
@@ -407,7 +410,8 @@ export const processVideo = action({
         })
       }
       
-      // Modal endpoint URL already includes the full path
+      // Modal endpoint returns immediately after spawning GPU worker.
+      // Actual processing happens in background with HTTP callbacks for progress.
       const response = await fetch(modalUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -419,12 +423,12 @@ export const processVideo = action({
           manualCourtKeypoints: hasCourtKeypoints ? keypointsData.keypoints : null,
         }),
       })
-      
+
       if (!response.ok) {
         const errorText = await response.text()
         throw new Error(`Modal processing failed: ${errorText}`)
       }
-      
+
       await ctx.runMutation(api.videos.addLog, {
         videoId,
         message: "Video processing started on Modal GPU",

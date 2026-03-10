@@ -1663,26 +1663,6 @@ defineExpose({
         class="mini-court-canvas"
       />
     </div>
-    <div v-if="players && players.length > 0" class="player-legend">
-      <div
-        v-for="(player, index) in players"
-        :key="player.player_id"
-        class="legend-item"
-      >
-        <span
-          class="legend-dot"
-          :style="{ backgroundColor: PLAYER_COLORS[index % PLAYER_COLORS.length] }"
-        />
-        <span class="legend-label">P{{ player.player_id + 1 }}</span>
-        <span
-          v-if="showHitMarkers && hitMarkers.get(player.player_id)?.length"
-          class="hit-count"
-          :style="{ color: HIT_MARKER_COLORS[index % HIT_MARKER_COLORS.length] }"
-        >
-          {{ hitMarkers.get(player.player_id)?.length }} hits
-        </span>
-      </div>
-    </div>
   </div>
 </template>
 

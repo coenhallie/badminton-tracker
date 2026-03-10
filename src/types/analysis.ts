@@ -255,6 +255,27 @@ export interface PlayersZoneAnalytics {
   [playerId: string]: PlayerZoneAnalytics
 }
 
+// Backend-detected rally (from TrackNet shuttle tracking + gradient analysis)
+export interface BackendRally {
+  id: number
+  start_frame: number
+  end_frame: number
+  start_timestamp: number
+  end_timestamp: number
+  duration_seconds: number
+}
+
+// Rally detection statistics from backend
+export interface RallyStats {
+  total_rallies: number
+  total_rally_time_s: number
+  total_idle_time_s: number
+  rally_percentage: number
+  avg_rally_duration_s: number
+  min_rally_duration_s: number
+  max_rally_duration_s: number
+}
+
 export interface AnalysisResult {
   video_id: string
   duration: number // seconds
@@ -267,6 +288,8 @@ export interface AnalysisResult {
   court_detection: CourtDetection | null
   shuttle_analytics?: ShuttleAnalytics | null
   player_zone_analytics?: PlayersZoneAnalytics | null
+  rallies?: BackendRally[] | null        // Backend-detected rallies (TrackNet + gradient)
+  rally_stats?: RallyStats | null        // Summary statistics for rallies
 }
 
 export interface UploadResponse {

@@ -10,6 +10,7 @@ import MiniCourt from '@/components/MiniCourt.vue'
 import SpeedGraph from '@/components/SpeedGraph.vue'
 import ShotSpeedList from '@/components/ShotSpeedList.vue'
 import AdvancedAnalytics from '@/components/AdvancedAnalytics.vue'
+import RallyTimeline from '@/components/RallyTimeline.vue'
 import {
   checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
   getHeatmap, preloadHeatmap, triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
@@ -37,7 +38,7 @@ let healthCheckInterval: ReturnType<typeof setInterval> | null = null
 // Overlay visibility toggles
 const showSkeleton = ref(true)
 const showBoundingBoxes = ref(true)
-const showPoseOverlay = ref(true)
+const showPoseOverlay = ref(false)
 // Pose source: 'skeleton' (YOLO-pose keypoints), 'trained' (custom AI model), 'both'
 const poseSource = ref<'skeleton' | 'trained' | 'both'>('both')
 // NOTE: Court overlay removed - automatic court detection disabled, using manual keypoints only
@@ -59,7 +60,7 @@ const showMiniCourt = ref(true)
 const showPlayerTrails = ref(true)
 
 // Hit marker visibility toggle (shuttlecock strike locations on mini court)
-const showHitMarkers = ref(true)
+const showHitMarkers = ref(false)
 
 // Speed graph visibility toggle
 const showSpeedGraph = ref(false)
@@ -244,6 +245,13 @@ function handleSeekToSegment(startTime: number, _endTime: number) {
     videoPlayerRef.value.seekTo(startTime)
     // Optionally set a slower playback rate for detailed analysis
     videoPlayerRef.value.setPlaybackRate(0.5)
+  }
+}
+
+// Handle seek from rally/shot selection in AdvancedAnalytics
+function handleRallySeek(time: number) {
+  if (videoPlayerRef.value) {
+    videoPlayerRef.value.seekTo(time)
   }
 }
 
@@ -724,7 +732,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.5
+            alpha v1.6
           </button>
         </div>
 
@@ -772,6 +780,22 @@ watch(videoSectionRef, () => {
             </button>
           </div>
           <div class="changelog-content">
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.6-alpha</span>
+                <span class="version-date">March 10, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - TrackNetV3 shuttle tracking for accurate shuttlecock trajectory detection across the full video</li>
+                <li> - Rally timeline visualization showing detected rallies with click-to-seek navigation</li>
+                <li> - Gradient-based rally segmentation from shuttle trajectory data</li>
+                <li> - Toggle to show/hide player skeleton overlay and pose estimation</li>
+                <li> - Backend-detected rallies preferred over client-side heuristic for improved accuracy</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
             <div class="changelog-entry">
               <div class="changelog-version">
                 <span class="version-tag">v1.5-alpha</span>
@@ -1384,7 +1408,7 @@ watch(videoSectionRef, () => {
                   @keypoint-selection-change="handleKeypointSelectionChange"
                 />
               </div>
-              
+
               <!-- Mini Court Panel -->
               <Transition name="slide-fade">
                 <div v-if="showMiniCourt || isKeypointSelectionActive" class="minicourt-section">
@@ -1407,8 +1431,16 @@ watch(videoSectionRef, () => {
                   />
                 </div>
               </Transition>
+
+              <!-- Rally Timeline — directly below video -->
+              <RallyTimeline
+                v-if="analysisResult?.rallies?.length"
+                :result="analysisResult"
+                :current-time="currentVideoTime"
+                @seek-to-time="handleRallySeek"
+              />
             </div>
-            
+
             <!-- Speed Graph Panel -->
             <Transition name="slide-fade">
               <div v-if="showSpeedGraph && analysisResult" class="speedgraph-section">
@@ -1454,6 +1486,7 @@ watch(videoSectionRef, () => {
                 :result="analysisResult"
                 :current-frame="currentFrame"
                 :court-keypoints="courtCornersForMiniCourt"
+                @seek-to-time="handleRallySeek"
               />
             </div>
           </div>
@@ -2520,10 +2553,15 @@ a:hover {
   display: flex;
   gap: 16px;
   align-items: flex-start;
+  flex-wrap: wrap;
 }
 
 .video-with-minicourt {
   width: 100%;
+}
+
+.video-with-minicourt > :deep(.rally-tl) {
+  flex-basis: 100%;
 }
 
 .video-section {

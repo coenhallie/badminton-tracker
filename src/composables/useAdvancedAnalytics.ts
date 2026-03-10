@@ -28,6 +28,7 @@ import type {
   RecoveryEvent,
   ReactionEvent,
   MovementEfficiency,
+  BackendRally,
 } from '@/types/analysis'
 import { COURT_DIMENSIONS } from '@/types/analysis'
 import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
@@ -300,12 +301,42 @@ export function useAdvancedAnalytics(
   // 2. RALLY SEGMENTATION
   // =========================================================================
 
+  /**
+   * Prefer backend-detected rallies (TrackNet shuttle tracking + gradient analysis)
+   * over client-side shot-gap heuristic. Backend rallies are more accurate because
+   * they use continuous shuttle trajectory data rather than sparse shot detection.
+   */
   const rallies = computed<Rally[]>(() => {
     const result = analysisResult.value
     if (!result?.skeleton_data || result.skeleton_data.length < 10) return []
 
     const frames = result.skeleton_data
     const fps = result.fps || 30
+
+    // --- Try backend rallies first (from TrackNet + gradient detection) ---
+    const backendRallies = result.rallies
+    if (backendRallies && backendRallies.length > 0) {
+      const shots = detectAllShots(frames, fps)
+      return backendRallies.map((br: BackendRally) => {
+        // Assign shots to this rally based on timestamp overlap
+        const rallyShots = shots.filter(
+          s => s.timestamp >= br.start_timestamp && s.timestamp <= br.end_timestamp
+        )
+        return {
+          id: br.id,
+          startFrame: br.start_frame,
+          endFrame: br.end_frame,
+          startTimestamp: br.start_timestamp,
+          endTimestamp: br.end_timestamp,
+          durationSeconds: br.duration_seconds,
+          shotCount: rallyShots.length,
+          shots: rallyShots,
+          winner: null,
+        } as Rally
+      })
+    }
+
+    // --- Fallback: client-side shot-gap heuristic ---
     const shots = detectAllShots(frames, fps)
     if (shots.length < 2) return []
 
