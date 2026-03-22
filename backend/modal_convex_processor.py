@@ -21,6 +21,23 @@ import time
 import modal
 
 
+def compute_homography_matrix(corners, court_width=6.1, court_length=13.4):
+    try:
+        import cv2
+        import numpy as np
+        src = np.array(corners, dtype=np.float32)
+        dst = np.array([
+            [0, 0],
+            [court_width, 0],
+            [court_width, court_length],
+            [0, court_length],
+        ], dtype=np.float32)
+        matrix = cv2.getPerspectiveTransform(src, dst)
+        return matrix
+    except Exception:
+        return None
+
+
 # =============================================================================
 # POSE CLASSIFICATION HELPERS
 # =============================================================================
@@ -379,24 +396,30 @@ def classify_pose(keypoints: List[Dict]) -> Dict[str, Any]:
 class PlayerIdentityTracker:
     """
     Maintains consistent player_id ↔ skeleton mapping throughout a video session.
-    
+
     Design principles:
-    1. CALIBRATION PHASE: First N frames establish baseline positions & court sides
+    1. CALIBRATION PHASE: First frame locks initial assignment by Y-sort,
+       subsequent calibration frames use track-ID continuity (no re-sorting)
     2. VELOCITY PREDICTION: Predict expected position using exponential moving average
-    3. COMPOSITE COST MATCHING: Combine distance, velocity, court-side, and area similarity
-    4. SWAP DETECTION: Detect when assignments violate court-side consistency
-    5. SWAP CORRECTION: Immediately re-associate when swap detected
-    
+    3. COMPOSITE COST MATCHING: Combine distance, velocity, court-side, area,
+       track-ID, and assignment-stickiness costs
+    4. MAJORITY-VOTE SMOOTHING: Only switch assignment when the new mapping
+       dominates a sliding window (prevents single-frame flicker)
+    5. SWAP DETECTION: Detect when both assignments violate court-side consistency
+    6. SWAP CORRECTION: Re-associate when swap confirmed over 2 consecutive frames
+
     Convention:
     - Player 0 = top of video (far side of court, smaller Y)
     - Player 1 = bottom of video (near side of court, larger Y)
     """
-    
-    def __init__(self, video_height: float, fps: float):
+
+    def __init__(self, video_height: float, fps: float, video_width: float = 1920.0):
         self.video_height = video_height
+        self.video_width = video_width
         self.fps = fps
-        self.court_midline_y = video_height / 2.0  # Default midline
-        
+        self.court_midline_y = video_height / 2.0
+        self.MAX_INST_VEL = max(40.0, 0.035 * max(video_width, video_height))
+
         # Per-player state (indexed by player_id: 0 or 1)
         self.positions: Dict[int, List[Dict]] = {0: [], 1: []}  # history of {x, y, frame}
         self.velocities: Dict[int, Tuple[float, float]] = {0: (0.0, 0.0), 1: (0.0, 0.0)}
@@ -404,30 +427,42 @@ class PlayerIdentityTracker:
         self.calibrated: Dict[int, bool] = {0: False, 1: False}
         self.last_track_ids: Dict[int, int] = {}  # player_id -> last YOLO track_id
         self.court_sides: Dict[int, str] = {0: "top", 1: "bottom"}  # locked court side
-        
+
         # Calibration parameters
         self.CALIBRATION_FRAMES = 15  # Frames to establish baseline
         self.calibration_observations: Dict[int, List[Tuple[float, float]]] = {0: [], 1: []}
         self.calibration_complete = False
+        self.calibration_initial_locked = False  # True after first 2-player frame locks assignment
         self.frames_processed = 0
-        
+
         # Tracking parameters
         self.VELOCITY_SMOOTHING = 0.3  # EMA alpha for velocity (lower = smoother)
         self.POSITION_HISTORY_LEN = 30  # Keep last N positions
         self.MAX_MATCH_DISTANCE = 250.0  # Max pixels for valid match
         self.AREA_SMOOTHING = 0.1  # EMA alpha for area
-        
+
         # Swap detection parameters
-        self.SWAP_CONSECUTIVE_THRESHOLD = 3  # Consecutive violations needed to confirm swap
+        self.SWAP_CONSECUTIVE_THRESHOLD = 2  # Consecutive violations needed to confirm swap
         self.swap_violation_count = 0  # Running count of consecutive court-side violations
         self.total_swaps_corrected = 0
-        
+
         # Cost weights for composite matching
         self.W_DISTANCE = 1.0       # Weight for Euclidean distance cost
         self.W_VELOCITY = 0.6       # Weight for velocity-predicted distance
         self.W_COURT_SIDE = 0.8     # Weight for court-side consistency
         self.W_AREA = 0.2           # Weight for bbox area similarity
-        self.W_TRACK_ID = 0.4       # Weight for YOLO track ID continuity
+        self.W_TRACK_ID = 0.15      # Weight for YOLO track ID continuity (low — far player IDs are unreliable)
+        self.W_STICKINESS = 0.5     # Weight for keeping same assignment as previous frame (hysteresis)
+
+        # Previous-frame assignment map: skeleton_index -> player_id
+        # Used for stickiness cost and majority-vote smoothing
+        self.prev_assignment: Dict[int, int] = {}  # skel_idx -> pid last frame
+        self.prev_skel_centers: List[Tuple[float, float]] = []  # centres from previous frame
+
+        # Majority-vote sliding window: list of recent assignment tuples
+        # Each entry is a tuple of (pid_for_skel0, pid_for_skel1) — the "raw" best assignment
+        self.VOTE_WINDOW_SIZE = 5
+        self.assignment_vote_history: List[Tuple[int, int]] = []  # (pid_for_skel0, pid_for_skel1)
     
     def _predict_position(self, player_id: int) -> Optional[Tuple[float, float]]:
         """
@@ -449,11 +484,9 @@ class PlayerIdentityTracker:
         # Instantaneous velocity (pixels per frame)
         inst_vx = (new_x - last["x"]) / dt_frames
         inst_vy = (new_y - last["y"]) / dt_frames
-        # Cap instantaneous velocity to avoid tracking jumps corrupting the EMA
-        MAX_INST_VEL = 40.0  # pixels per frame
         speed = (inst_vx**2 + inst_vy**2)**0.5
-        if speed > MAX_INST_VEL:
-            scale = MAX_INST_VEL / speed
+        if speed > self.MAX_INST_VEL:
+            scale = self.MAX_INST_VEL / speed
             inst_vx *= scale
             inst_vy *= scale
         # EMA update
@@ -486,22 +519,24 @@ class PlayerIdentityTracker:
         self,
         player_id: int,
         skeleton: Dict,
-        skeleton_center: Tuple[float, float]
+        skeleton_center: Tuple[float, float],
+        skeleton_index: int = -1,
     ) -> float:
         """
         Compute composite cost of assigning a skeleton to a player_id.
         Lower cost = better match.
-        
+
         Components:
         1. Distance to last known position (or predicted position)
         2. Distance to velocity-predicted position
         3. Court-side consistency penalty
         4. Bounding box area similarity
-        5. YOLO track ID continuity bonus
+        5. YOLO track ID continuity bonus (low weight — unreliable for far player)
+        6. Assignment stickiness — bonus for keeping same pid↔skeleton as last frame
         """
         cost = 0.0
         sx, sy = skeleton_center
-        
+
         # --- Component 1: Distance to last known position ---
         if self.positions[player_id]:
             last = self.positions[player_id][-1]
@@ -511,13 +546,13 @@ class PlayerIdentityTracker:
         else:
             # No history - use court-side prior only
             cost += self.W_DISTANCE * 1.0  # Neutral cost
-        
+
         # --- Component 2: Distance to velocity-predicted position ---
         predicted = self._predict_position(player_id)
         if predicted is not None:
             pred_dist = ((sx - predicted[0])**2 + (sy - predicted[1])**2)**0.5
             cost += self.W_VELOCITY * min(pred_dist / self.MAX_MATCH_DISTANCE, 2.0)
-        
+
         # --- Component 3: Court-side consistency ---
         if self.calibrated[player_id]:
             expected_side = self.court_sides[player_id]
@@ -532,38 +567,104 @@ class PlayerIdentityTracker:
             else:
                 # Player 1 should be near bottom (large Y) - penalize small Y
                 cost += self.W_COURT_SIDE * (1.0 - sy / self.video_height)
-        
+
         # --- Component 4: Bounding box area similarity ---
         if self.avg_areas[player_id] > 0 and skeleton.get("area", 0) > 0:
             area_ratio = skeleton["area"] / self.avg_areas[player_id]
             # Penalize large deviations from expected area
             area_diff = abs(1.0 - area_ratio)
             cost += self.W_AREA * min(area_diff, 2.0)
-        
+
         # --- Component 5: YOLO track ID continuity ---
         if player_id in self.last_track_ids and skeleton.get("track_id", -1) >= 0:
             if skeleton["track_id"] == self.last_track_ids[player_id]:
                 cost -= self.W_TRACK_ID * 0.5  # Bonus for same track ID
             # No penalty for different track ID (YOLO may reassign)
-        
+
+        # --- Component 6: Assignment stickiness (hysteresis) ---
+        # Match this skeleton to a previous-frame skeleton by proximity,
+        # then reward keeping the same player_id assignment.
+        if skeleton_index >= 0 and self.prev_skel_centers:
+            matched_prev_idx = self._match_to_prev_skeleton(sx, sy)
+            if matched_prev_idx is not None and matched_prev_idx in self.prev_assignment:
+                if self.prev_assignment[matched_prev_idx] == player_id:
+                    cost -= self.W_STICKINESS  # Reward keeping same assignment
+                else:
+                    cost += self.W_STICKINESS * 0.3  # Small penalty for switching
+
         return cost
+
+    def _match_to_prev_skeleton(self, sx: float, sy: float) -> Optional[int]:
+        """Find the closest previous-frame skeleton to (sx, sy). Returns index or None."""
+        if not self.prev_skel_centers:
+            return None
+        best_idx = None
+        best_dist = float("inf")
+        for idx, (px, py) in enumerate(self.prev_skel_centers):
+            d = ((sx - px)**2 + (sy - py)**2)**0.5
+            if d < best_dist:
+                best_dist = d
+                best_idx = idx
+        # Only match if reasonably close (half the max match distance)
+        if best_dist < self.MAX_MATCH_DISTANCE:
+            return best_idx
+        return None
     
     def _run_calibration(self, skeletons: List[Dict]) -> None:
         """
         During calibration phase, collect position observations and establish
         court-side assignments based on consistent Y-position patterns.
+
+        IMPORTANT: The very first frame with >=2 skeletons uses Y-sort to lock
+        the initial player_id -> track_id mapping. All subsequent calibration
+        frames use track-ID / proximity continuity instead of re-sorting by Y,
+        which prevents frame-to-frame flicker when players are at similar heights.
         """
         if len(skeletons) < 2:
             return
-        
-        # Sort by Y to identify top (far) and bottom (near) players
-        sorted_skels = sorted(skeletons[:2], key=lambda s: s["center"][1])
-        
-        # Top player -> candidate for Player 0
-        self.calibration_observations[0].append(sorted_skels[0]["center"])
-        # Bottom player -> candidate for Player 1
-        self.calibration_observations[1].append(sorted_skels[1]["center"])
-        
+
+        if not self.calibration_initial_locked:
+            # --- FIRST 2-PLAYER FRAME: sort by Y to establish initial mapping ---
+            sorted_skels = sorted(skeletons[:2], key=lambda s: s["center"][1])
+            for pid, skel in enumerate(sorted_skels):
+                center = skel["center"]
+                self.calibration_observations[pid].append(center)
+                self._add_position(pid, center[0], center[1], self.frames_processed)
+                self._update_area(pid, skel.get("area", 0))
+                if skel.get("track_id", -1) >= 0:
+                    self.last_track_ids[pid] = skel["track_id"]
+            self.calibration_initial_locked = True
+        else:
+            # --- SUBSEQUENT CALIBRATION FRAMES: match by proximity to last known position ---
+            # This avoids re-sorting by Y which causes flicker when players are close
+            for pid in range(2):
+                best_skel = None
+                best_dist = float("inf")
+                last_pos = self.positions[pid][-1] if self.positions[pid] else None
+
+                for skel in skeletons[:4]:  # check up to 4 candidates
+                    cx, cy = skel["center"]
+                    # Prefer matching by YOLO track_id first
+                    if (pid in self.last_track_ids and
+                            skel.get("track_id", -1) >= 0 and
+                            skel["track_id"] == self.last_track_ids[pid]):
+                        best_skel = skel
+                        break
+                    # Fall back to proximity
+                    if last_pos is not None:
+                        d = ((cx - last_pos["x"])**2 + (cy - last_pos["y"])**2)**0.5
+                        if d < best_dist:
+                            best_dist = d
+                            best_skel = skel
+
+                if best_skel is not None:
+                    center = best_skel["center"]
+                    self.calibration_observations[pid].append(center)
+                    self._add_position(pid, center[0], center[1], self.frames_processed)
+                    self._update_area(pid, best_skel.get("area", 0))
+                    if best_skel.get("track_id", -1) >= 0:
+                        self.last_track_ids[pid] = best_skel["track_id"]
+
         # Check if calibration is complete
         if self.frames_processed >= self.CALIBRATION_FRAMES:
             for pid in [0, 1]:
@@ -573,16 +674,13 @@ class PlayerIdentityTracker:
                     avg_x = sum(o[0] for o in obs) / len(obs)
                     self.court_sides[pid] = self._get_court_side(avg_y)
                     self.calibrated[pid] = True
-                    # Initialize position history from calibration
-                    self._add_position(pid, avg_x, avg_y, self.frames_processed)
-                    # Initialize area from most recent observation
-            
+
             # Refine court midline based on observed positions
             if self.calibration_observations[0] and self.calibration_observations[1]:
                 avg_y_top = sum(o[1] for o in self.calibration_observations[0]) / len(self.calibration_observations[0])
                 avg_y_bot = sum(o[1] for o in self.calibration_observations[1]) / len(self.calibration_observations[1])
                 self.court_midline_y = (avg_y_top + avg_y_bot) / 2.0
-            
+
             self.calibration_complete = True
     
     def _detect_and_correct_swap(self, assignments: List[Tuple[int, int]],
@@ -631,6 +729,72 @@ class PlayerIdentityTracker:
         
         return assignments
     
+    def _apply_majority_vote(self, raw_assignments: List[Tuple[int, int]],
+                             active_skeletons: List[Dict]) -> List[Tuple[int, int]]:
+        """
+        Majority-vote smoothing over a sliding window of recent assignments.
+        Prevents single-frame cost fluctuations from flipping the assignment.
+
+        We represent each assignment as a canonical tuple:
+          (pid_assigned_to_skel0, pid_assigned_to_skel1)
+        and pick whichever mapping appeared most often in the last VOTE_WINDOW_SIZE frames.
+        """
+        if len(raw_assignments) != 2 or len(active_skeletons) < 2:
+            return raw_assignments
+
+        # Build the current mapping tuple
+        # Match each skeleton to a previous-frame skeleton by proximity so
+        # "skel 0" / "skel 1" labels are spatially consistent across frames
+        skel_centers = [s["center"] for s in active_skeletons[:2]]
+
+        # Map current skel indices to "canonical" slots via proximity to
+        # the first two prev_skel_centers (if available)
+        if len(self.prev_skel_centers) >= 2:
+            # Compute which ordering of current skeletons best matches
+            # the previous frame's skeleton positions
+            d00 = ((skel_centers[0][0] - self.prev_skel_centers[0][0])**2 +
+                    (skel_centers[0][1] - self.prev_skel_centers[0][1])**2)
+            d01 = ((skel_centers[0][0] - self.prev_skel_centers[1][0])**2 +
+                    (skel_centers[0][1] - self.prev_skel_centers[1][1])**2)
+            swapped_order = d01 < d00  # current skel 0 is closer to prev skel 1
+        else:
+            swapped_order = False
+
+        # Build mapping: canonical_slot -> pid
+        slot_to_pid: Dict[int, int] = {}
+        for pid, skel_idx in raw_assignments:
+            canonical_slot = skel_idx
+            if swapped_order:
+                canonical_slot = 1 - skel_idx if skel_idx < 2 else skel_idx
+            slot_to_pid[canonical_slot] = pid
+
+        vote_tuple = (slot_to_pid.get(0, 0), slot_to_pid.get(1, 1))
+
+        # Append to history
+        self.assignment_vote_history.append(vote_tuple)
+        if len(self.assignment_vote_history) > self.VOTE_WINDOW_SIZE:
+            self.assignment_vote_history.pop(0)
+
+        # Count votes
+        from collections import Counter
+        counts = Counter(self.assignment_vote_history)
+        winner = counts.most_common(1)[0][0]
+
+        # If majority agrees with raw, keep raw. Otherwise override.
+        if winner == vote_tuple:
+            return raw_assignments
+
+        # Reconstruct assignments from winner tuple, undoing the canonical swap
+        result_slot_to_pid = {0: winner[0], 1: winner[1]}
+        corrected = []
+        for canonical_slot, pid in result_slot_to_pid.items():
+            skel_idx = canonical_slot
+            if swapped_order:
+                skel_idx = 1 - canonical_slot if canonical_slot < 2 else canonical_slot
+            corrected.append((pid, skel_idx))
+
+        return corrected
+
     def match_skeletons(
         self,
         active_skeletons: List[Dict],
@@ -638,77 +802,92 @@ class PlayerIdentityTracker:
     ) -> List[Tuple[int, Dict, Any]]:
         """
         Main entry point: match active skeletons to player IDs.
-        
+
         Returns list of (player_id, keypoints, confidences) tuples.
         Uses composite cost matching with velocity prediction, court-side priors,
-        swap detection/correction, and YOLO track ID continuity.
+        swap detection/correction, YOLO track ID continuity, assignment stickiness,
+        and majority-vote smoothing.
         """
         self.frames_processed = frame_number
-        
+
         if not active_skeletons:
             return []
-        
+
         # --- CALIBRATION PHASE ---
         if not self.calibration_complete:
             self._run_calibration(active_skeletons)
-            
-            # During calibration, do simple Y-based assignment
-            sorted_skels = sorted(active_skeletons, key=lambda s: s["center"][1])
+
+            # During calibration, return assignments from calibration state
+            # (which already used track-ID continuity after the first frame)
             result = []
-            for i, skel in enumerate(sorted_skels[:2]):
-                pid = i  # 0 = top, 1 = bottom
-                center = skel["center"]
-                self._update_area(pid, skel.get("area", 0))
-                if skel.get("track_id", -1) >= 0:
-                    self.last_track_ids[pid] = skel["track_id"]
-                result.append((pid, skel["kpts"], skel.get("conf")))
+            for pid in range(2):
+                if self.positions[pid]:
+                    last = self.positions[pid][-1]
+                    # Find the skeleton closest to this player's last known position
+                    best_skel = None
+                    best_dist = float("inf")
+                    for skel in active_skeletons:
+                        cx, cy = skel["center"]
+                        d = ((cx - last["x"])**2 + (cy - last["y"])**2)**0.5
+                        if d < best_dist:
+                            best_dist = d
+                            best_skel = skel
+                    if best_skel is not None:
+                        result.append((pid, best_skel["kpts"], best_skel.get("conf")))
+
+            # Update prev state for stickiness in next frame
+            self.prev_skel_centers = [s["center"] for s in active_skeletons[:2]]
+            self.prev_assignment = {}
+            for pid, _, _ in result:
+                for idx, skel in enumerate(active_skeletons[:2]):
+                    if self.positions[pid]:
+                        last = self.positions[pid][-1]
+                        if abs(skel["center"][0] - last["x"]) < 1 and abs(skel["center"][1] - last["y"]) < 1:
+                            self.prev_assignment[idx] = pid
+                            break
+
             return result
-        
+
         # --- MAIN MATCHING (post-calibration) ---
-        skeleton_centers = [s["center"] for s in active_skeletons]
         n_skeletons = len(active_skeletons)
-        
+
         if n_skeletons == 1:
             # Only one skeleton visible - find best matching player
             skel = active_skeletons[0]
             center = skel["center"]
-            
-            cost_0 = self._compute_assignment_cost(0, skel, center)
-            cost_1 = self._compute_assignment_cost(1, skel, center)
-            
+
+            cost_0 = self._compute_assignment_cost(0, skel, center, skeleton_index=0)
+            cost_1 = self._compute_assignment_cost(1, skel, center, skeleton_index=0)
+
             pid = 0 if cost_0 <= cost_1 else 1
-            
+
             # Update state
             self._update_velocity(pid, center[0], center[1])
             self._add_position(pid, center[0], center[1], frame_number)
             self._update_area(pid, skel.get("area", 0))
             if skel.get("track_id", -1) >= 0:
                 self.last_track_ids[pid] = skel["track_id"]
-            
+
+            # Update prev state
+            self.prev_skel_centers = [center]
+            self.prev_assignment = {0: pid}
+
             return [(pid, skel["kpts"], skel.get("conf"))]
-        
+
         # Two or more skeletons: compute cost matrix and find optimal assignment
         # Build 2 x N cost matrix (2 players, N skeletons)
         cost_matrix = []
         for pid in range(2):
             row = []
             for skel_idx, skel in enumerate(active_skeletons):
-                cost = self._compute_assignment_cost(pid, skel, skel["center"])
+                cost = self._compute_assignment_cost(pid, skel, skel["center"], skeleton_index=skel_idx)
                 row.append(cost)
             cost_matrix.append(row)
-        
-        # Solve assignment using greedy approach with constraint checking
-        # (Hungarian algorithm overkill for 2x2, and we avoid scipy dependency)
+
+        # Solve assignment (exhaustive for 2-player case)
         assignments = []  # List of (player_id, skeleton_index)
-        
+
         if n_skeletons >= 2:
-            # Try both possible assignments for player 0 and 1
-            # Option A: player 0 -> skel 0, player 1 -> skel 1
-            # Option B: player 0 -> skel 1, player 1 -> skel 0
-            # Pick whichever has lower total cost
-            
-            # For N > 2, first find the 2 best skeleton candidates
-            # by minimum total cost across both players
             if n_skeletons > 2:
                 # Evaluate all pairs
                 best_pair = None
@@ -721,41 +900,41 @@ class PlayerIdentityTracker:
                         if pair_cost < best_pair_cost:
                             best_pair_cost = pair_cost
                             best_pair = (i, j)
-                
+
                 if best_pair:
                     assignments = [(0, best_pair[0]), (1, best_pair[1])]
             else:
                 # Exactly 2 skeletons - compare both options
                 cost_a = cost_matrix[0][0] + cost_matrix[1][1]
                 cost_b = cost_matrix[0][1] + cost_matrix[1][0]
-                
+
                 if cost_a <= cost_b:
                     assignments = [(0, 0), (1, 1)]
                 else:
                     assignments = [(0, 1), (1, 0)]
-        
+
+        # --- MAJORITY-VOTE SMOOTHING ---
+        assignments = self._apply_majority_vote(assignments, active_skeletons)
+
         # --- SWAP DETECTION AND CORRECTION ---
         assignments = self._detect_and_correct_swap(assignments, active_skeletons)
-        
+
         # --- BUILD RESULTS AND UPDATE STATE ---
         result = []
+        new_prev_assignment: Dict[int, int] = {}
         for pid, skel_idx in assignments:
             if skel_idx < len(active_skeletons):
                 skel = active_skeletons[skel_idx]
                 center = skel["center"]
-                
+
                 # Validate match distance before updating state
                 predicted = self._predict_position(pid)
                 if predicted is not None:
                     dist = ((center[0] - predicted[0])**2 + (center[1] - predicted[1])**2)**0.5
                     if dist > self.MAX_MATCH_DISTANCE * 2:
-                        # Extremely large jump - likely a tracking error
-                        # Use predicted position for state, but still return this skeleton
-                        # so the frame isn't missing data
                         print(f"[TRACKER] Large jump for Player {pid} at frame {frame_number}: "
                               f"{dist:.0f}px (keeping assignment but not updating velocity)")
                         self._add_position(pid, center[0], center[1], frame_number)
-                        # Don't update velocity to avoid corrupting prediction
                     else:
                         # Normal update
                         self._update_velocity(pid, center[0], center[1])
@@ -763,13 +942,18 @@ class PlayerIdentityTracker:
                 else:
                     # First match after calibration
                     self._add_position(pid, center[0], center[1], frame_number)
-                
+
                 self._update_area(pid, skel.get("area", 0))
                 if skel.get("track_id", -1) >= 0:
                     self.last_track_ids[pid] = skel["track_id"]
-                
+
+                new_prev_assignment[skel_idx] = pid
                 result.append((pid, skel["kpts"], skel.get("conf")))
-        
+
+        # Update previous-frame state for next iteration
+        self.prev_skel_centers = [s["center"] for s in active_skeletons[:max(new_prev_assignment.keys()) + 1]] if new_prev_assignment else []
+        self.prev_assignment = new_prev_assignment
+
         return result
     
     def get_last_position(self, player_id: int) -> Optional[Dict]:
@@ -843,6 +1027,7 @@ async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
     video_url = request.get("videoUrl")
     callback_url = request.get("callbackUrl")
     manual_court_keypoints = request.get("manualCourtKeypoints")
+    analysis_mode = request.get("analysisMode", "full")
 
     if not all([video_id, video_url, callback_url]):
         return {"error": "Missing required fields: videoId, videoUrl, callbackUrl"}
@@ -853,6 +1038,7 @@ async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
         video_url=video_url,
         callback_url=callback_url,
         manual_court_keypoints=manual_court_keypoints,
+        analysis_mode=analysis_mode,
     )
 
     return {"status": "accepted", "videoId": video_id}
@@ -860,7 +1046,8 @@ async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.function(
     gpu="T4",
-    timeout=1800,  # 30 minutes max
+    timeout=3600,  # 60 minutes max (large videos need headroom)
+    memory=8192,   # 8 GB RAM (skeleton data + JSON serialization for long videos)
     image=image,
     volumes={"/cache": vol, MODELS_PATH: models_vol},
     secrets=[modal.Secret.from_name("convex-secrets")],
@@ -870,6 +1057,7 @@ async def _process_video_worker(
     video_url: str,
     callback_url: str,
     manual_court_keypoints: Optional[Dict] = None,
+    analysis_mode: str = "full",
 ) -> Dict[str, Any]:
     """
     GPU worker that does the actual video processing.
@@ -880,11 +1068,21 @@ async def _process_video_worker(
     import numpy as np
     from ultralytics import YOLO
 
+    import resource
+
     print(f"[MODAL] Starting processing for video: {video_id}")
     print(f"[MODAL] Video URL: {video_url[:100]}...")
     print(f"[MODAL] Callback URL: {callback_url}")
-    
-    # Helper function to send updates to Convex
+
+    def get_memory_mb() -> float:
+        """Get current RSS memory usage in MB."""
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
+
+    # Shared httpx client — reused for all HTTP calls to avoid per-request
+    # TCP/SSL overhead (status updates fire every 2 seconds)
+    http_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0))
+    status_update_failures = 0
+
     async def send_status_update(
         status: str = "processing",
         progress: float = 0,
@@ -892,9 +1090,10 @@ async def _process_video_worker(
         total_frames: int = 0,
         error: Optional[str] = None
     ):
-        async with httpx.AsyncClient() as client:
+        nonlocal status_update_failures
+        for attempt in range(3):
             try:
-                await client.post(
+                await http_client.post(
                     f"{callback_url}/updateStatus",
                     json={
                         "videoId": video_id,
@@ -904,19 +1103,25 @@ async def _process_video_worker(
                         "totalFrames": total_frames,
                         "error": error,
                     },
-                    timeout=10.0,
                 )
+                status_update_failures = 0
+                return
             except Exception as e:
-                print(f"[MODAL] Warning: Failed to send status update: {e}")
-    
+                if attempt < 2:
+                    await asyncio.sleep(2.0 ** attempt)
+                else:
+                    status_update_failures += 1
+                    print(f"[MODAL] Warning: Status update failed after 3 attempts: {e} "
+                          f"(total failures: {status_update_failures})")
+
     async def send_log(
         message: str,
         level: str = "info",
         category: str = "processing"
     ):
-        async with httpx.AsyncClient() as client:
+        for attempt in range(2):
             try:
-                await client.post(
+                await http_client.post(
                     f"{callback_url}/addLog",
                     json={
                         "videoId": video_id,
@@ -924,27 +1129,57 @@ async def _process_video_worker(
                         "level": level,
                         "category": category,
                     },
-                    timeout=10.0,
                 )
+                return
             except Exception as e:
-                print(f"[MODAL] Warning: Failed to send log: {e}")
+                if attempt == 0:
+                    await asyncio.sleep(2.0)
+                else:
+                    print(f"[MODAL] Warning: Failed to send log: {e}")
     
     try:
-        # Download video from Convex
+        pipeline_start = time.time()
+        phase_start = time.time()
+
+        # Download video from Convex (streamed to disk to handle large files)
         await send_log("Downloading video from storage...", "info", "processing")
-        
+
         video_path = Path(f"/cache/{video_id}.mp4")
-        
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.get(video_url)
-            response.raise_for_status()
-            
-            with open(video_path, "wb") as f:
-                f.write(response.content)
-        
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=600.0)) as client:
+            async with client.stream("GET", video_url) as response:
+                response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                total_bytes = int(content_length) if content_length else None
+                downloaded = 0
+                last_log = time.time()
+
+                with open(video_path, "wb") as f:
+                    async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        # Log download progress every 5 seconds
+                        now = time.time()
+                        if now - last_log >= 5.0:
+                            if total_bytes:
+                                pct = downloaded / total_bytes * 100
+                                await send_log(
+                                    f"Downloading... {downloaded / (1024*1024):.0f}/{total_bytes / (1024*1024):.0f} MB ({pct:.0f}%)",
+                                    "info", "processing"
+                                )
+                            else:
+                                await send_log(
+                                    f"Downloading... {downloaded / (1024*1024):.0f} MB",
+                                    "info", "processing"
+                                )
+                            last_log = now
+
         file_size_mb = video_path.stat().st_size / (1024 * 1024)
-        await send_log(f"Video downloaded: {file_size_mb:.1f} MB", "success", "processing")
-        print(f"[MODAL] Video downloaded: {video_path} ({file_size_mb:.1f} MB)")
+        download_time = time.time() - phase_start
+        await send_log(f"Video downloaded: {file_size_mb:.1f} MB in {download_time:.1f}s", "success", "processing")
+        print(f"[MODAL] Video downloaded: {video_path} ({file_size_mb:.1f} MB) in {download_time:.1f}s")
+        phase_start = time.time()
         
         # Load video
         cap = cv2.VideoCapture(str(video_path))
@@ -959,37 +1194,40 @@ async def _process_video_worker(
         
         await send_log(f"Video loaded: {width}x{height} @ {fps:.1f}fps", "success", "processing")
         await send_log(f"Total frames: {total_frames} ({duration:.1f}s duration)", "info", "processing")
-        
+
+        sample_rate = 1  # Process every frame for full accuracy
+
         await send_status_update("processing", 0, 0, total_frames)
-        
-        # Load YOLO26 pose model (latest version)
-        await send_log("Loading YOLO26 pose model...", "info", "model")
-        pose_model = YOLO("yolo26n-pose.pt")  # Using YOLO26 pose model
-        
-        # Load badminton detection model (for shuttlecock, racket detection)
-        await send_log("Loading badminton detection model...", "info", "model")
-        badminton_model_path = f"{MODELS_PATH}/badminton/best.pt"
-        if os.path.exists(badminton_model_path):
-            detection_model = YOLO(badminton_model_path)
-            await send_log("Custom badminton model loaded", "success", "model")
-        else:
-            # Fallback to COCO model for general detection
-            detection_model = YOLO("yolo11n.pt")
-            await send_log("Using COCO model (custom model not found)", "info", "model")
-        
-        # Create custom BoT-SORT tracker config optimized for badminton (2 players)
-        # Key changes from defaults:
-        # - track_buffer: 90 (3 seconds at 30fps) instead of 30 (1 second)
-        #   → Far player's track survives longer occlusions/low-confidence gaps
-        # - track_high_thresh: 0.3 instead of 0.5
-        #   → Far player (small, low-confidence) gets tracked more consistently
-        # - new_track_thresh: 0.4 instead of 0.6
-        #   → Faster track creation when far player reappears
-        # - match_thresh: 0.9 instead of 0.8
-        #   → More lenient matching to prevent track fragmentation
-        tracker_config_path = Path("/cache/botsort_badminton.yaml")
-        tracker_config_path.parent.mkdir(parents=True, exist_ok=True)
-        tracker_config_content = """# BoT-SORT tracker config optimized for badminton (2 players)
+
+        if analysis_mode != "rally_only":
+            # Load YOLO26 pose model (latest version)
+            await send_log("Loading YOLO26m pose model (medium)...", "info", "model")
+            pose_model = YOLO("yolo26m-pose.pt")  # Using YOLO26 small pose model (better far-player accuracy)
+
+            # Load badminton detection model (for shuttlecock, racket detection)
+            await send_log("Loading badminton detection model...", "info", "model")
+            badminton_model_path = f"{MODELS_PATH}/badminton/best.pt"
+            if os.path.exists(badminton_model_path):
+                detection_model = YOLO(badminton_model_path)
+                await send_log("Custom badminton model loaded", "success", "model")
+            else:
+                # Fallback to COCO model for general detection
+                detection_model = YOLO("yolo11n.pt")
+                await send_log("Using COCO model (custom model not found)", "info", "model")
+
+            # Create custom BoT-SORT tracker config optimized for badminton (2 players)
+            # Key changes from defaults:
+            # - track_buffer: 90 (3 seconds at 30fps) instead of 30 (1 second)
+            #   → Far player's track survives longer occlusions/low-confidence gaps
+            # - track_high_thresh: 0.3 instead of 0.5
+            #   → Far player (small, low-confidence) gets tracked more consistently
+            # - new_track_thresh: 0.4 instead of 0.6
+            #   → Faster track creation when far player reappears
+            # - match_thresh: 0.9 instead of 0.8
+            #   → More lenient matching to prevent track fragmentation
+            tracker_config_path = Path("/cache/botsort_badminton.yaml")
+            tracker_config_path.parent.mkdir(parents=True, exist_ok=True)
+            tracker_config_content = """# BoT-SORT tracker config optimized for badminton (2 players)
 tracker_type: botsort
 track_high_thresh: 0.3
 track_low_thresh: 0.1
@@ -1004,14 +1242,20 @@ proximity_thresh: 0.5
 appearance_thresh: 0.25
 with_reid: False
 """
-        tracker_config_path.write_text(tracker_config_content)
-        await send_log("Custom BoT-SORT tracker config created (track_buffer=90, track_high=0.3)", "info", "model")
-        
-        # Warmup both models
-        dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
-        _ = pose_model(dummy_frame, verbose=False)
-        _ = detection_model(dummy_frame, verbose=False)
-        await send_log("Models ready (GPU accelerated)", "success", "model")
+            tracker_config_path.write_text(tracker_config_content)
+            await send_log("Custom BoT-SORT tracker config created (track_buffer=90, track_high=0.3)", "info", "model")
+
+            # Warmup both models
+            dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
+            _ = pose_model(dummy_frame, verbose=False)
+            _ = detection_model(dummy_frame, verbose=False)
+            model_load_time = time.time() - phase_start
+            mem_mb = get_memory_mb()
+            await send_log(f"Models ready in {model_load_time:.1f}s (GPU accelerated, RAM: {mem_mb:.0f} MB)", "success", "model")
+            phase_start = time.time()
+        else:
+            await send_log("Rally-only mode: skipping YOLO model loading", "info", "model")
+            phase_start = time.time()
 
         # =================================================================
         # TRACKNET SHUTTLE TRACKING PASS (separate full-video pass)
@@ -1040,7 +1284,6 @@ with_reid: False
                 await send_log("TrackNetV3 loaded, running shuttle tracking pass...", "info", "model")
 
                 # Sync log callback for TrackNet progress (track_video is synchronous)
-                import asyncio
                 _loop = asyncio.get_event_loop()
                 def tracknet_log(msg: str):
                     _loop.run_until_complete(send_log(msg, "info", "model"))
@@ -1070,799 +1313,1029 @@ with_reid: False
             )
 
         # Process frames
-        await send_log("Starting frame-by-frame analysis...", "info", "processing")
-        
-        # Initialize robust player identity tracker
-        identity_tracker = PlayerIdentityTracker(
-            video_height=float(height),
-            fps=fps
-        )
-        await send_log("Player identity tracker initialized (calibration phase: first 15 frames)", "info", "processing")
-        
-        skeleton_frames = []
-        player_tracks: Dict[int, Dict] = {}
-        # Player positions for summary metrics (aggregated from all frames)
-        player_positions: Dict[int, list] = {0: [], 1: []}
-        player_distances: Dict[int, float] = {0: 0.0, 1: 0.0}
-        player_speeds: Dict[int, list] = {0: [], 1: []}
-        # Sliding window for median filtering per player
-        player_speed_windows: Dict[int, list] = {0: [], 1: []}
-        SPEED_WINDOW_SIZE = 5  # Use median of last 5 readings
-        frame_count = 0
-        processed_count = 0
-        sample_rate = 1  # Process every frame
-        
-        # Movement-based filtering using YOLO tracking IDs
-        # Track cumulative movement per track ID to distinguish players from stationary judges
-        track_positions: Dict[int, Dict] = {}  # track_id -> {x, y, frame}
-        track_cumulative_movement: Dict[int, float] = {}  # track_id -> total movement
-        # Minimum cumulative movement (pixels) to be considered a real player
-        # Lowered from 500 to 100 to improve far-side player detection
-        # (far players are detected intermittently and may not accumulate much tracked movement)
-        MIN_CUMULATIVE_MOVEMENT = 100
-        
-        # Court polygon ROI filter setup (if manual keypoints provided)
-        court_polygon = None
-        court_roi_active = False
-        
-        if manual_court_keypoints:
-            try:
-                # Extract the 4 corners for the court polygon
-                corners = []
-                for key in ["top_left", "top_right", "bottom_right", "bottom_left"]:
-                    if key in manual_court_keypoints and manual_court_keypoints[key]:
-                        pt = manual_court_keypoints[key]
-                        corners.append([float(pt[0]), float(pt[1])])
-                
-                if len(corners) == 4:
-                    # Expand the polygon by 2% margin to include players at court edges
-                    # REDUCED from 5% to 2% to prevent including judges sitting near the net
-                    # 2% of court width (~6.1m) = ~0.12m which allows for lunges but not outside court
-                    corners_np = np.array(corners, dtype=np.float32)
-                    center = corners_np.mean(axis=0)
-                    MARGIN_FACTOR = 1.02  # 2% margin (reduced from 5% to strictly filter judges)
-                    expanded = center + (corners_np - center) * MARGIN_FACTOR
-                    court_polygon = expanded.astype(np.int32)
-                    court_roi_active = True
-                    await send_log(f"Court ROI filter active (4-corner polygon + 2% margin)", "success", "court")
-                    print(f"[MODAL] Court ROI polygon: {court_polygon.tolist()}")
-                else:
-                    await send_log(f"Manual keypoints incomplete ({len(corners)}/4 corners), using position filter", "warning", "court")
-            except Exception as e:
-                await send_log(f"Failed to initialize court ROI: {e}", "warning", "court")
-                print(f"[MODAL] Court ROI init error: {e}")
-        MOVEMENT_WARMUP_FRAMES = 45  # Build movement history for 1.5 seconds before filtering
-        
-        # Shuttle false-positive filter: suppress static objects misidentified as shuttles
-        # A real shuttle is always moving; static detections are court markings/logos
-        shuttle_static_clusters = []  # List of {x, y, count} for positions that keep appearing
-        SHUTTLE_STATIC_DIST_THRESHOLD = 15  # pixels — detections within this distance are "same spot"
-        SHUTTLE_STATIC_COUNT_THRESHOLD = 5   # if a position appears 5+ times statically, it's a false positive
-        prev_shuttle_pos = None  # previous frame's accepted shuttle position
-        SHUTTLE_MIN_MOVEMENT = 10  # pixels — minimum movement between frames to count as "moving"
+        tracknet_time = time.time() - phase_start
+        mem_mb = get_memory_mb()
+        await send_log(f"TrackNet phase complete in {tracknet_time:.1f}s (RAM: {mem_mb:.0f} MB)", "info", "processing")
 
-        last_progress_update = time.time()
+        if analysis_mode != "rally_only":
+            await send_log("Starting frame-by-frame analysis...", "info", "processing")
+            phase_start = time.time()
 
-        while True:
-            # Read actual presentation timestamp BEFORE reading the frame
-            # This matches what the HTML video element's currentTime reports,
-            # preventing skeleton drift on VFR videos or 29.97fps content
-            frame_pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            frame_count += 1
-            
-            # Sample rate (process every Nth frame)
-            if frame_count % sample_rate != 0:
-                continue
-            
-            processed_count += 1
-            
-            # Run pose estimation WITH TRACKING for consistent person IDs
-            # Uses custom BoT-SORT config with 3-second track buffer for far player persistence
-            pose_results = pose_model.track(
-                frame,
-                persist=True,
-                verbose=False,
-                tracker=str(tracker_config_path),
-                conf=0.15,  # Very low confidence to catch far player detections
-                iou=0.5,    # Moderate IoU for NMS
+            # Initialize robust player identity tracker
+            identity_tracker = PlayerIdentityTracker(
+                video_height=float(height),
+                fps=fps,
+                video_width=float(width)
             )
+            await send_log("Player identity tracker initialized (calibration phase: first 15 frames)", "info", "processing")
             
-            # Run object detection for shuttlecock, racket, etc. (NOT for players)
-            detection_results = detection_model(frame, verbose=False)
+            # Write skeleton frames incrementally to a temp file to avoid
+            # accumulating hundreds of MB in RAM for long videos.
+            # Each frame is written as a JSON line; read back after the loop.
+            skeleton_frames_path = Path(f"/cache/{video_id}_skeleton.jsonl")
+            skeleton_frames_file = open(skeleton_frames_path, "w")
+            skeleton_frame_count = 0
+    
+            player_tracks: Dict[int, Dict] = {}
+            # Player positions for summary metrics (aggregated from all frames)
+            player_positions: Dict[int, list] = {0: [], 1: []}
+            player_distances: Dict[int, float] = {0: 0.0, 1: 0.0}
+            player_speeds: Dict[int, list] = {0: [], 1: []}
+            # Sliding window for median filtering per player
+            player_speed_windows: Dict[int, list] = {0: [], 1: []}
+            SPEED_WINDOW_SIZE = 5  # Use median of last 5 readings
+            frame_count = 0
+            processed_count = 0
             
-            # Extract bounding box detections (shuttlecock, racket only - players come from pose model)
-            badminton_detections = {
-                "frame": frame_count,
-                "players": [],  # Will be populated from pose model with tracking
-                "shuttlecocks": [],
-                "rackets": [],
-                "other": []
-            }
+            # Movement-based filtering using YOLO tracking IDs
+            # Track cumulative movement per track ID to distinguish players from stationary judges
+            track_positions: Dict[int, Dict] = {}  # track_id -> {x, y, frame}
+            track_cumulative_movement: Dict[int, float] = {}  # track_id -> total movement
+            # Minimum cumulative movement (pixels) to be considered a real player
+            # Lowered from 500 to 100 to improve far-side player detection
+            # (far players are detected intermittently and may not accumulate much tracked movement)
+            MIN_CUMULATIVE_MOVEMENT = 100
             
-            if detection_results and len(detection_results) > 0:
-                det_result = detection_results[0]
-                if det_result.boxes is not None and len(det_result.boxes) > 0:
-                    boxes = det_result.boxes
-                    for i in range(len(boxes)):
-                        box = boxes[i]
-                        cls_id = int(box.cls.cpu().numpy()[0])
-                        conf = float(box.conf.cpu().numpy()[0])
-                        xyxy = box.xyxy.cpu().numpy()[0]
-                        
-                        # Convert to center format
-                        x_center = (xyxy[0] + xyxy[2]) / 2
-                        y_center = (xyxy[1] + xyxy[3]) / 2
-                        box_width = xyxy[2] - xyxy[0]
-                        box_height = xyxy[3] - xyxy[1]
-                        
-                        class_name = detection_model.names.get(cls_id, f"class_{cls_id}")
-                        
-                        det_entry = {
-                            "class": class_name,
-                            "confidence": conf,
-                            "x": float(x_center),
-                            "y": float(y_center),
-                            "width": float(box_width),
-                            "height": float(box_height),
-                            "class_id": cls_id,
-                            "detection_id": None
-                        }
-                        
-                        # Only categorize known badminton objects - skip chairs, tables, etc.
-                        # Players come from pose model, so we only need shuttle and racket here
-                        class_lower = class_name.lower()
-                        if class_lower in ["shuttle", "shuttlecock", "birdie", "ball"] or \
-                           any(s in class_lower for s in ["shuttle", "birdie", "ball"]):
-                            # Matches custom model names AND COCO's "sports ball"
-                            badminton_detections["shuttlecocks"].append(det_entry)
-                        elif class_lower in ["racket", "racquet"] or "racket" in class_lower or "racquet" in class_lower:
-                            badminton_detections["rackets"].append(det_entry)
-                        # Skip all other classes (chairs, tables, person, etc.)
-                        # Person detections are also skipped as players come from pose model
-            
-            # Extract best shuttle position
-            # Priority: TrackNet (continuous, high accuracy) > YOLO (sparse, fallback)
-            shuttle_position = None
-
-            # Try TrackNet first (if available)
-            if tracknet_available and frame_count in tracknet_positions:
-                tn_pos = tracknet_positions[frame_count]
-                if tn_pos.get("visible"):
-                    shuttle_position = {"x": tn_pos["x"], "y": tn_pos["y"]}
-
-            # Fall back to YOLO detection with static false-positive filtering
-            if shuttle_position is None and badminton_detections["shuttlecocks"]:
-                candidates = sorted(badminton_detections["shuttlecocks"], key=lambda s: s["confidence"], reverse=True)
-
-                for candidate in candidates:
-                    cx, cy = candidate["x"], candidate["y"]
-
-                    # Check if this position is near a known static cluster
-                    is_static = False
-                    for cluster in shuttle_static_clusters:
-                        if math.sqrt((cx - cluster["x"])**2 + (cy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD:
-                            cluster["count"] += 1
-                            cluster["x"] = (cluster["x"] * (cluster["count"] - 1) + cx) / cluster["count"]
-                            cluster["y"] = (cluster["y"] * (cluster["count"] - 1) + cy) / cluster["count"]
-                            is_static = True
-                            break
-
-                    if is_static:
-                        continue
-
-                    # Check if it moved relative to previous shuttle position
-                    if prev_shuttle_pos is not None:
-                        movement = math.sqrt((cx - prev_shuttle_pos["x"])**2 + (cy - prev_shuttle_pos["y"])**2)
-                        if movement < SHUTTLE_MIN_MOVEMENT:
-                            found_cluster = False
-                            for cluster in shuttle_static_clusters:
-                                if math.sqrt((cx - cluster["x"])**2 + (cy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD * 2:
-                                    cluster["count"] += 1
-                                    found_cluster = True
-                                    break
-                            if not found_cluster:
-                                shuttle_static_clusters.append({"x": cx, "y": cy, "count": 1})
-                            continue
-
-                    shuttle_position = {"x": cx, "y": cy}
+            court_polygon = None
+            court_roi_active = False
+            manual_court_corners = []
+    
+            if manual_court_keypoints:
+                try:
+                    corners = []
+                    for key in ["top_left", "top_right", "bottom_right", "bottom_left"]:
+                        if key in manual_court_keypoints and manual_court_keypoints[key]:
+                            pt = manual_court_keypoints[key]
+                            corners.append([float(pt[0]), float(pt[1])])
+    
+                    if len(corners) == 4:
+                        manual_court_corners = corners
+                        # Expand the polygon by 2% margin to include players at court edges
+                        # REDUCED from 5% to 2% to prevent including judges sitting near the net
+                        # 2% of court width (~6.1m) = ~0.12m which allows for lunges but not outside court
+                        corners_np = np.array(corners, dtype=np.float32)
+                        center = corners_np.mean(axis=0)
+                        MARGIN_FACTOR = 1.02  # 2% margin (reduced from 5% to strictly filter judges)
+                        expanded = center + (corners_np - center) * MARGIN_FACTOR
+                        court_polygon = expanded.astype(np.int32)
+                        court_roi_active = True
+                        await send_log(f"Court ROI filter active (4-corner polygon + 2% margin)", "success", "court")
+                        print(f"[MODAL] Court ROI polygon: {court_polygon.tolist()}")
+                    else:
+                        await send_log(f"Manual keypoints incomplete ({len(corners)}/4 corners), using position filter", "warning", "court")
+                except Exception as e:
+                    await send_log(f"Failed to initialize court ROI: {e}", "warning", "court")
+                    print(f"[MODAL] Court ROI init error: {e}")
+            MOVEMENT_WARMUP_FRAMES = 45
+    
+            homography_matrix = None
+            if manual_court_corners and len(manual_court_corners) >= 4:
+                homography_matrix = compute_homography_matrix(manual_court_corners[:4])
+    
+            shuttle_static_clusters = []
+            # A real shuttle is always moving; static detections are court markings/logos/lights
+            shuttle_static_clusters = []  # List of {x, y, count} for positions that keep appearing
+            # Scale movement thresholds by fps: per-frame pixel displacement is
+            # inversely proportional to frame rate, so thresholds must shrink at
+            # higher fps to avoid filtering out valid in-flight shuttle positions.
+            _shuttle_fps_scale = 30.0 / fps
+            SHUTTLE_STATIC_DIST_THRESHOLD = max(4, int(0.013 * max(width, height) * _shuttle_fps_scale))
+            SHUTTLE_STATIC_COUNT_THRESHOLD = 3
+            prev_shuttle_pos = None
+            SHUTTLE_MIN_MOVEMENT = max(2, int(0.007 * max(width, height) * _shuttle_fps_scale))
+    
+            # Court ROI for shuttle filtering — expanded polygon to reject far-off detections (lights, etc.)
+            shuttle_court_polygon = None
+            if court_polygon is not None:
+                # Expand court polygon by 40% for shuttle — shuttle can fly outside court lines
+                # but never as far as stadium ceiling lights
+                court_center = court_polygon.astype(np.float32).mean(axis=0)
+                SHUTTLE_MARGIN = 1.40  # 40% expansion
+                shuttle_court_polygon = (court_center + (court_polygon.astype(np.float32) - court_center) * SHUTTLE_MARGIN).astype(np.int32)
+                await send_log("Shuttle court ROI filter active (40% expanded court polygon)", "success", "court")
+    
+            def _shuttle_in_court(sx, sy):
+                """Check if shuttle position is within the expanded court ROI."""
+                if shuttle_court_polygon is None:
+                    return True  # No court info — allow all
+                result = cv2.pointPolygonTest(shuttle_court_polygon, (float(sx), float(sy)), measureDist=False)
+                return result >= 0
+    
+            def _is_static_cluster(sx, sy):
+                """Check if position matches a known static false-positive cluster."""
+                for cluster in shuttle_static_clusters:
+                    if math.sqrt((sx - cluster["x"])**2 + (sy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD:
+                        cluster["count"] += 1
+                        cluster["x"] = (cluster["x"] * (cluster["count"] - 1) + sx) / cluster["count"]
+                        cluster["y"] = (cluster["y"] * (cluster["count"] - 1) + sy) / cluster["count"]
+                        return True
+                return False
+    
+            def _add_to_static(sx, sy):
+                """Register position as potentially static."""
+                for cluster in shuttle_static_clusters:
+                    if math.sqrt((sx - cluster["x"])**2 + (sy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD * 2:
+                        cluster["count"] += 1
+                        return
+                shuttle_static_clusters.append({"x": sx, "y": sy, "count": 1})
+    
+            last_progress_update = time.time()
+    
+            while True:
+                # Read actual presentation timestamp BEFORE reading the frame
+                # This matches what the HTML video element's currentTime reports,
+                # preventing skeleton drift on VFR videos or 29.97fps content
+                frame_pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+    
+                ret, frame = cap.read()
+                if not ret:
                     break
-
-                if shuttle_position:
+    
+                frame_count += 1
+                
+                # Sample rate (process every Nth frame)
+                if frame_count % sample_rate != 0:
+                    continue
+                
+                processed_count += 1
+                
+                # Run pose estimation WITH TRACKING for consistent person IDs
+                # Uses custom BoT-SORT config with 3-second track buffer for far player persistence
+                pose_results = pose_model.track(
+                    frame,
+                    persist=True,
+                    verbose=False,
+                    tracker=str(tracker_config_path),
+                    conf=0.15,  # Very low confidence to catch far player detections
+                    iou=0.5,    # Moderate IoU for NMS
+                    imgsz=960,  # Larger input for better far-player keypoint detection
+                )
+                
+                # Run object detection for shuttlecock, racket, etc. (NOT for players)
+                detection_results = detection_model(frame, verbose=False)
+                
+                # Extract bounding box detections (shuttlecock, racket only - players come from pose model)
+                badminton_detections = {
+                    "frame": frame_count,
+                    "players": [],  # Will be populated from pose model with tracking
+                    "shuttlecocks": [],
+                    "rackets": [],
+                    "other": []
+                }
+                
+                if detection_results and len(detection_results) > 0:
+                    det_result = detection_results[0]
+                    if det_result.boxes is not None and len(det_result.boxes) > 0:
+                        boxes = det_result.boxes
+                        for i in range(len(boxes)):
+                            box = boxes[i]
+                            cls_id = int(box.cls.cpu().numpy()[0])
+                            conf = float(box.conf.cpu().numpy()[0])
+                            xyxy = box.xyxy.cpu().numpy()[0]
+                            
+                            # Convert to center format
+                            x_center = (xyxy[0] + xyxy[2]) / 2
+                            y_center = (xyxy[1] + xyxy[3]) / 2
+                            box_width = xyxy[2] - xyxy[0]
+                            box_height = xyxy[3] - xyxy[1]
+                            
+                            class_name = detection_model.names.get(cls_id, f"class_{cls_id}")
+                            
+                            det_entry = {
+                                "class": class_name,
+                                "confidence": conf,
+                                "x": float(x_center),
+                                "y": float(y_center),
+                                "width": float(box_width),
+                                "height": float(box_height),
+                                "class_id": cls_id,
+                                "detection_id": None
+                            }
+                            
+                            # Only categorize known badminton objects - skip chairs, tables, etc.
+                            # Players come from pose model, so we only need shuttle and racket here
+                            class_lower = class_name.lower()
+                            if class_lower in ["shuttle", "shuttlecock", "birdie", "ball"] or \
+                               any(s in class_lower for s in ["shuttle", "birdie", "ball"]):
+                                # Matches custom model names AND COCO's "sports ball"
+                                badminton_detections["shuttlecocks"].append(det_entry)
+                            elif class_lower in ["racket", "racquet"] or "racket" in class_lower or "racquet" in class_lower:
+                                badminton_detections["rackets"].append(det_entry)
+                            # Skip all other classes (chairs, tables, person, etc.)
+                            # Person detections are also skipped as players come from pose model
+                
+                # Extract best shuttle position
+                # Priority: TrackNet (continuous, high accuracy) > YOLO (sparse, fallback)
+                shuttle_position = None
+    
+                # Try TrackNet first (if available) — with static + court filtering
+                if tracknet_available and frame_count in tracknet_positions:
+                    tn_pos = tracknet_positions[frame_count]
+                    if tn_pos.get("visible"):
+                        tx, ty = tn_pos["x"], tn_pos["y"]
+                        # Reject if outside expanded court area (e.g. stadium lights)
+                        if not _shuttle_in_court(tx, ty):
+                            pass  # Skip — outside court bounds
+                        elif _is_static_cluster(tx, ty):
+                            pass  # Skip — known static false positive
+                        elif prev_shuttle_pos is not None:
+                            movement = math.sqrt((tx - prev_shuttle_pos["x"])**2 + (ty - prev_shuttle_pos["y"])**2)
+                            if movement < SHUTTLE_MIN_MOVEMENT:
+                                _add_to_static(tx, ty)
+                            else:
+                                shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
+                        else:
+                            shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
+    
+                # Fall back to YOLO detection with static false-positive filtering
+                if shuttle_position is None and badminton_detections["shuttlecocks"]:
+                    candidates = sorted(badminton_detections["shuttlecocks"], key=lambda s: s["confidence"], reverse=True)
+    
+                    for candidate in candidates:
+                        cx, cy = candidate["x"], candidate["y"]
+    
+                        # Reject if outside expanded court area
+                        if not _shuttle_in_court(cx, cy):
+                            continue
+    
+                        # Check if this position is near a known static cluster
+                        is_static = False
+                        for cluster in shuttle_static_clusters:
+                            if math.sqrt((cx - cluster["x"])**2 + (cy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD:
+                                cluster["count"] += 1
+                                cluster["x"] = (cluster["x"] * (cluster["count"] - 1) + cx) / cluster["count"]
+                                cluster["y"] = (cluster["y"] * (cluster["count"] - 1) + cy) / cluster["count"]
+                                is_static = True
+                                break
+    
+                        if is_static:
+                            continue
+    
+                        # Check if it moved relative to previous shuttle position
+                        if prev_shuttle_pos is not None:
+                            movement = math.sqrt((cx - prev_shuttle_pos["x"])**2 + (cy - prev_shuttle_pos["y"])**2)
+                            if movement < SHUTTLE_MIN_MOVEMENT:
+                                found_cluster = False
+                                for cluster in shuttle_static_clusters:
+                                    if math.sqrt((cx - cluster["x"])**2 + (cy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD * 2:
+                                        cluster["count"] += 1
+                                        found_cluster = True
+                                        break
+                                if not found_cluster:
+                                    shuttle_static_clusters.append({"x": cx, "y": cy, "count": 1})
+                                continue
+    
+                        shuttle_position = {"x": cx, "y": cy, "source": "yolo"}
+                        break
+    
+                    if shuttle_position:
+                        prev_shuttle_pos = shuttle_position
+    
+                # Update prev_shuttle_pos for TrackNet detections too
+                if shuttle_position and shuttle_position.get("source") == "tracknet":
                     prev_shuttle_pos = shuttle_position
-
+    
                 # Prune: only keep confirmed static clusters
                 shuttle_static_clusters = [
                     c for c in shuttle_static_clusters
                     if c["count"] >= SHUTTLE_STATIC_COUNT_THRESHOLD
                 ]
-            
-            # Extract skeleton data from pose model with tracking
-            frame_data = {
-                "frame": frame_count,
-                "timestamp": frame_pts,  # Use actual PTS from video container
-                "players": [],
-                "badminton_detections": badminton_detections,
-                "shuttle_position": shuttle_position,
-            }
-            
-            # COCO keypoint names
-            keypoint_names = [
-                "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-                "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-                "left_wrist", "right_wrist", "left_hip", "right_hip",
-                "left_knee", "right_knee", "left_ankle", "right_ankle"
-            ]
-            
-            if pose_results and len(pose_results) > 0:
-                result = pose_results[0]
-                
-                # Get tracking IDs and boxes from pose model
-                has_tracking = result.boxes is not None and result.boxes.is_track
-                track_ids = result.boxes.id.int().cpu().tolist() if has_tracking and result.boxes.id is not None else None
-                boxes = result.boxes.xyxy.cpu().numpy() if result.boxes is not None and len(result.boxes) > 0 else None
-                
-                if result.keypoints is not None and result.keypoints.xy is not None:
-                    kpts_data = result.keypoints.xy.cpu().numpy()
-                    kpts_conf = result.keypoints.conf.cpu().numpy() if result.keypoints.conf is not None else None
-                    
-                    # Process each detected person
-                    skeleton_data = []  # List of {track_id, center, kpts, conf, bbox, area}
-                    
-                    for person_idx in range(len(kpts_data)):
-                        kpts = kpts_data[person_idx]
-                        conf = kpts_conf[person_idx] if kpts_conf is not None else None
-                        
-                        # Get track ID (or use -1 if no tracking)
-                        track_id = track_ids[person_idx] if track_ids and person_idx < len(track_ids) else -1
-                        
-                        # Calculate center position
-                        center = skeleton_center_from_keypoints(kpts)
-                        if center is None:
+    
+                # Filter raw shuttlecock detections so the frontend doesn't draw false positives
+                # Remove detections that are outside court ROI or match a static cluster
+                if badminton_detections["shuttlecocks"]:
+                    filtered_shuttles = []
+                    for det in badminton_detections["shuttlecocks"]:
+                        dx, dy = det["x"], det["y"]
+                        if not _shuttle_in_court(dx, dy):
                             continue
-                        
-                        # Get bounding box from pose model (more accurate than calculating from keypoints)
-                        bbox = None
-                        area = 0
-                        if boxes is not None and person_idx < len(boxes):
-                            box = boxes[person_idx]
-                            bbox = {"x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3]}
-                            area = (box[2] - box[0]) * (box[3] - box[1])
-                        else:
-                            # Fallback to keypoint-based bbox
-                            bbox = skeleton_bbox_from_keypoints(kpts)
-                            if bbox:
-                                area = (bbox["x2"] - bbox["x1"]) * (bbox["y2"] - bbox["y1"])
-                        
-                        if bbox is None:
+                        is_known_static = False
+                        for cluster in shuttle_static_clusters:
+                            if math.sqrt((dx - cluster["x"])**2 + (dy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD:
+                                is_known_static = True
+                                break
+                        if is_known_static:
                             continue
+                        filtered_shuttles.append(det)
+                    badminton_detections["shuttlecocks"] = filtered_shuttles
+    
+                # Extract skeleton data from pose model with tracking
+                frame_data = {
+                    "frame": frame_count,
+                    "timestamp": frame_pts,  # Use actual PTS from video container
+                    "players": [],
+                    "badminton_detections": badminton_detections,
+                    "shuttle_position": shuttle_position,
+                }
+                
+                # COCO keypoint names
+                keypoint_names = [
+                    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+                    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+                    "left_wrist", "right_wrist", "left_hip", "right_hip",
+                    "left_knee", "right_knee", "left_ankle", "right_ankle"
+                ]
+                
+                if pose_results and len(pose_results) > 0:
+                    result = pose_results[0]
+                    
+                    # Get tracking IDs and boxes from pose model
+                    has_tracking = result.boxes is not None and result.boxes.is_track
+                    track_ids = result.boxes.id.int().cpu().tolist() if has_tracking and result.boxes.id is not None else None
+                    boxes = result.boxes.xyxy.cpu().numpy() if result.boxes is not None and len(result.boxes) > 0 else None
+                    
+                    if result.keypoints is not None and result.keypoints.xy is not None:
+                        kpts_data = result.keypoints.xy.cpu().numpy()
+                        kpts_conf = result.keypoints.conf.cpu().numpy() if result.keypoints.conf is not None else None
                         
-                        # Track cumulative movement per track ID
-                        if track_id >= 0:
-                            if track_id in track_positions:
-                                prev = track_positions[track_id]
-                                dx = center[0] - prev["x"]
-                                dy = center[1] - prev["y"]
-                                movement = (dx**2 + dy**2)**0.5
-                                track_cumulative_movement[track_id] = track_cumulative_movement.get(track_id, 0.0) + movement
+                        # Process each detected person
+                        skeleton_data = []  # List of {track_id, center, kpts, conf, bbox, area}
+                        
+                        for person_idx in range(len(kpts_data)):
+                            kpts = kpts_data[person_idx]
+                            conf = kpts_conf[person_idx] if kpts_conf is not None else None
                             
-                            track_positions[track_id] = {"x": center[0], "y": center[1], "frame": frame_count}
+                            # Get track ID (or use -1 if no tracking)
+                            track_id = track_ids[person_idx] if track_ids and person_idx < len(track_ids) else -1
+                            
+                            # Calculate center position
+                            center = skeleton_center_from_keypoints(kpts)
+                            if center is None:
+                                continue
+                            
+                            # Get bounding box from pose model (more accurate than calculating from keypoints)
+                            bbox = None
+                            area = 0
+                            if boxes is not None and person_idx < len(boxes):
+                                box = boxes[person_idx]
+                                bbox = {"x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3]}
+                                area = (box[2] - box[0]) * (box[3] - box[1])
+                            else:
+                                # Fallback to keypoint-based bbox
+                                bbox = skeleton_bbox_from_keypoints(kpts)
+                                if bbox:
+                                    area = (bbox["x2"] - bbox["x1"]) * (bbox["y2"] - bbox["y1"])
+                            
+                            if bbox is None:
+                                continue
+                            
+                            # Track cumulative movement per track ID
+                            if track_id >= 0:
+                                if track_id in track_positions:
+                                    prev = track_positions[track_id]
+                                    dx = center[0] - prev["x"]
+                                    dy = center[1] - prev["y"]
+                                    movement = (dx**2 + dy**2)**0.5
+                                    track_cumulative_movement[track_id] = track_cumulative_movement.get(track_id, 0.0) + movement
+                                
+                                track_positions[track_id] = {"x": center[0], "y": center[1], "frame": frame_count}
+                            
+                            skeleton_data.append({
+                                "track_id": track_id,
+                                "center": center,
+                                "kpts": kpts,
+                                "conf": conf,
+                                "bbox": bbox,
+                                "area": area,
+                                "cumulative_movement": track_cumulative_movement.get(track_id, 0.0) if track_id >= 0 else 0.0
+                            })
                         
-                        skeleton_data.append({
-                            "track_id": track_id,
-                            "center": center,
-                            "kpts": kpts,
-                            "conf": conf,
-                            "bbox": bbox,
-                            "area": area,
-                            "cumulative_movement": track_cumulative_movement.get(track_id, 0.0) if track_id >= 0 else 0.0
-                        })
-                    
-                    # POSITION-BASED FILTERING: Only include skeletons in the court region
-                    # Use court polygon if available (from manual keypoints), otherwise fall back to rectangular
-                    
-                    # Helper function to detect if a person is sitting/crouching (likely a judge)
-                    def is_sitting_pose(kpts, bbox, conf=None) -> bool:
-                        """
-                        Detect if a skeleton represents a sitting/crouching person (likely judge).
+                        # POSITION-BASED FILTERING: Only include skeletons in the court region
+                        # Use court polygon if available (from manual keypoints), otherwise fall back to rectangular
                         
-                        Key indicators:
-                        1. Low height-to-width bbox aspect ratio (<1.3 = sitting)
-                        2. Knees at or above hip level
-                        3. Low ankle-to-hip vertical distance (legs folded)
-                        
-                        Returns True if the pose appears to be sitting/crouching.
-                        """
-                        if bbox is None:
+                        # Helper function to detect if a person is sitting/crouching (likely a judge)
+                        def is_sitting_pose(kpts, bbox, conf=None, min_conf=0.2) -> bool:
+                            if bbox is None:
+                                return False
+    
+                            bbox_height = bbox["y2"] - bbox["y1"]
+                            bbox_width = bbox["x2"] - bbox["x1"]
+                            if bbox_width > 0:
+                                aspect_ratio = bbox_height / bbox_width
+                                if aspect_ratio < 1.2:
+                                    return True
+    
+                            if len(kpts) >= 15:
+                                def _valid(idx):
+                                    if idx >= len(kpts):
+                                        return None
+                                    pt = kpts[idx]
+                                    if pt[0] <= 0:
+                                        return None
+                                    if len(pt) > 2 and pt[2] <= min_conf:
+                                        return None
+                                    return pt
+    
+                                left_hip = _valid(11)
+                                right_hip = _valid(12)
+                                left_knee = _valid(13)
+                                right_knee = _valid(14)
+                                left_ankle = _valid(15)
+                                right_ankle = _valid(16)
+    
+                                if left_hip is not None and left_knee is not None:
+                                    hip_knee_diff = left_knee[1] - left_hip[1]
+                                    if hip_knee_diff < bbox_height * 0.15:
+                                        return True
+    
+                                if right_hip is not None and right_knee is not None:
+                                    hip_knee_diff = right_knee[1] - right_hip[1]
+                                    if hip_knee_diff < bbox_height * 0.15:
+                                        return True
+    
+                                if left_hip is not None and left_ankle is not None:
+                                    hip_ankle_diff = left_ankle[1] - left_hip[1]
+                                    if hip_ankle_diff < bbox_height * 0.3:
+                                        return True
+    
+                                if right_hip is not None and right_ankle is not None:
+                                    hip_ankle_diff = right_ankle[1] - right_hip[1]
+                                    if hip_ankle_diff < bbox_height * 0.3:
+                                        return True
+    
                             return False
                         
-                        # Check 1: Bounding box aspect ratio
-                        # Standing person: height/width > 1.5 typically
-                        # Sitting person: height/width < 1.3 typically
-                        bbox_height = bbox["y2"] - bbox["y1"]
-                        bbox_width = bbox["x2"] - bbox["x1"]
-                        if bbox_width > 0:
-                            aspect_ratio = bbox_height / bbox_width
-                            if aspect_ratio < 1.2:  # Very squat = definitely sitting
-                                return True
-                        
-                        # Check 2: Keypoint-based sitting detection
-                        # Get relevant keypoints (indices: 11=left_hip, 12=right_hip, 13=left_knee, 14=right_knee)
-                        if len(kpts) >= 15:
-                            left_hip = kpts[11] if kpts[11][0] > 0 else None
-                            right_hip = kpts[12] if kpts[12][0] > 0 else None
-                            left_knee = kpts[13] if kpts[13][0] > 0 else None
-                            right_knee = kpts[14] if kpts[14][0] > 0 else None
-                            left_ankle = kpts[15] if len(kpts) > 15 and kpts[15][0] > 0 else None
-                            right_ankle = kpts[16] if len(kpts) > 16 and kpts[16][0] > 0 else None
-                            
-                            # Check if knees are at similar level or above hips (sitting indicator)
-                            if left_hip is not None and left_knee is not None:
-                                # In sitting pose, knee Y is similar to or less than hip Y
-                                hip_knee_diff = left_knee[1] - left_hip[1]
-                                # If knee is at same level or above hip, likely sitting
-                                if hip_knee_diff < bbox_height * 0.15:  # Knee not much below hip
-                                    return True
-                            
-                            if right_hip is not None and right_knee is not None:
-                                hip_knee_diff = right_knee[1] - right_hip[1]
-                                if hip_knee_diff < bbox_height * 0.15:
-                                    return True
-                            
-                            # Check 3: Ankle vertical distance from hip is small (folded legs)
-                            if left_hip is not None and left_ankle is not None:
-                                hip_ankle_diff = left_ankle[1] - left_hip[1]
-                                if hip_ankle_diff < bbox_height * 0.3:  # Legs very folded
-                                    return True
-                            
-                            if right_hip is not None and right_ankle is not None:
-                                hip_ankle_diff = right_ankle[1] - right_hip[1]
-                                if hip_ankle_diff < bbox_height * 0.3:
-                                    return True
-                        
-                        return False
-                    
-                    if court_roi_active and court_polygon is not None:
-                        # PRECISE POLYGON-BASED FILTERING using cv2.pointPolygonTest
-                        # This uses the actual court boundaries from manual keypoints
-                        in_court_skeletons = []
-                        for s in skeleton_data:
-                            # Check if center point (or feet position) is inside court polygon
-                            # Use feet position (bottom of bbox) for more accurate court boundary check
-                            bbox = s["bbox"]
-                            feet_y = bbox["y2"] if bbox else s["center"][1]
-                            check_point = (float(s["center"][0]), float(feet_y))
-                            
-                            # cv2.pointPolygonTest returns:
-                            # > 0 if inside, = 0 if on edge, < 0 if outside
-                            result = cv2.pointPolygonTest(court_polygon, check_point, measureDist=False)
-                            if result >= 0:  # Inside or on edge of court polygon
-                                # Additional filter: Skip sitting/crouching poses (likely judges)
-                                if is_sitting_pose(s["kpts"], bbox, s.get("conf")):
-                                    # Person is inside court but appears to be sitting (likely judge)
-                                    # Still add them but mark as potential judge for later filtering
-                                    s["is_sitting"] = True
-                                else:
-                                    s["is_sitting"] = False
-                                in_court_skeletons.append(s)
-                    else:
-                        # FALLBACK: Simple rectangular filter (central 75% of frame)
-                        # Badminton courts are typically in the central 75% of the frame (horizontally)
-                        # Judges/line judges are on the edges
-                        COURT_X_MIN = width * 0.12  # Left boundary (12% from left)
-                        COURT_X_MAX = width * 0.88  # Right boundary (88% from left)
-                        COURT_Y_MIN = height * 0.05  # Top boundary
-                        COURT_Y_MAX = height * 0.95  # Bottom boundary
-                        
-                        in_court_skeletons = []
-                        for s in skeleton_data:
-                            if COURT_X_MIN <= s["center"][0] <= COURT_X_MAX and COURT_Y_MIN <= s["center"][1] <= COURT_Y_MAX:
-                                # Mark sitting/standing for fallback too
-                                s["is_sitting"] = is_sitting_pose(s["kpts"], s["bbox"], s.get("conf"))
-                                in_court_skeletons.append(s)
-                    
-                    # Filter to active players based on cumulative movement AND pose type
-                    # IMPROVED LOGIC: In badminton, we KNOW there are exactly 2 players
-                    # Always prefer standing skeletons over sitting ones (judges sit, players stand)
-                    
-                    # First, separate standing vs sitting skeletons
-                    standing_skeletons = [s for s in in_court_skeletons if not s.get("is_sitting", False)]
-                    sitting_skeletons = [s for s in in_court_skeletons if s.get("is_sitting", False)]
-                    
-                    # Log if we filtered out sitting persons
-                    if sitting_skeletons and processed_count <= 10:
-                        print(f"[MODAL] Frame {frame_count}: Filtered {len(sitting_skeletons)} sitting person(s) (likely judges)")
-                    
-                    # Prefer standing skeletons - only use sitting ones if we don't have enough standing
-                    if len(standing_skeletons) >= 2:
-                        # We have enough standing players, ignore sitting persons entirely
-                        candidate_skeletons = standing_skeletons
-                    elif len(standing_skeletons) == 1 and len(sitting_skeletons) >= 1:
-                        # Only 1 standing - check if sitting person has high movement (might be crouching player)
-                        high_movement_sitting = [
-                            s for s in sitting_skeletons
-                            if s.get("cumulative_movement", 0) >= MIN_CUMULATIVE_MOVEMENT
-                        ]
-                        candidate_skeletons = standing_skeletons + high_movement_sitting
-                    else:
-                        # Fallback to all detected skeletons
-                        candidate_skeletons = in_court_skeletons
-                    
-                    if len(candidate_skeletons) <= 2:
-                        # If 2 or fewer candidates, keep all of them
-                        # This ensures we don't filter out the far-side player who may have
-                        # intermittent detections (low cumulative movement due to tracking gaps)
-                        active_skeletons = sorted(
-                            candidate_skeletons,
-                            key=lambda s: s["area"],  # Sort by size (near player first)
-                            reverse=True
-                        )
-                    elif frame_count > MOVEMENT_WARMUP_FRAMES:
-                        # More than 2 candidates: filter by movement to remove stationary people
-                        active_skeletons = sorted(
-                            candidate_skeletons,
-                            key=lambda s: s["cumulative_movement"],
-                            reverse=True
-                        )
-                        
-                        # Take top 2 that have sufficient movement
-                        active_skeletons = [
-                            s for s in active_skeletons
-                            if s["cumulative_movement"] >= MIN_CUMULATIVE_MOVEMENT
-                        ][:2]
-                    else:
-                        # During warmup with >2 candidates, use largest 2 by area
-                        active_skeletons = sorted(
-                            candidate_skeletons,
-                            key=lambda s: s["area"],
-                            reverse=True
-                        )[:2]
-                    
-                    # Add validated player bounding boxes to badminton_detections
-                    for skel in active_skeletons:
-                        bbox = skel["bbox"]
-                        badminton_detections["players"].append({
-                            "class": "player",
-                            "confidence": 0.9,
-                            "x": float((bbox["x1"] + bbox["x2"]) / 2),
-                            "y": float((bbox["y1"] + bbox["y2"]) / 2),
-                            "width": float(bbox["x2"] - bbox["x1"]),
-                            "height": float(bbox["y2"] - bbox["y1"]),
-                            "class_id": 0,
-                            "detection_id": skel["track_id"],
-                        })
-                    
-                    # =========================================================
-                    # ROBUST PLAYER-SKELETON MATCHING via PlayerIdentityTracker
-                    # =========================================================
-                    # Uses composite cost matching with:
-                    # - Velocity prediction (EMA-smoothed)
-                    # - Court-side consistency priors
-                    # - YOLO track ID continuity
-                    # - Bounding box area similarity
-                    # - Swap detection and correction
-                    matched_players = identity_tracker.match_skeletons(
-                        active_skeletons, frame_count
-                    )
-                    
-                    # Log tracker stats periodically
-                    if frame_count == identity_tracker.CALIBRATION_FRAMES + 1:
-                        stats = identity_tracker.get_stats()
-                        await send_log(
-                            f"Player identity calibration complete: "
-                            f"midline_y={stats['court_midline_y']:.0f}, "
-                            f"P0={stats['player_0_side']}, P1={stats['player_1_side']}",
-                            "success", "processing"
-                        )
-                    if identity_tracker.total_swaps_corrected > 0 and frame_count % 100 == 0:
-                        await send_log(
-                            f"Identity tracker: {identity_tracker.total_swaps_corrected} swap(s) corrected so far",
-                            "info", "processing"
-                        )
-                    
-                    # Process matched players
-                    for player_id, kpts, conf in matched_players:
-                        player_data = {
-                            "player_id": player_id,
-                            "keypoints": [],
-                            "center": {"x": 0.0, "y": 0.0},
-                            "current_speed": 0.0,
-                        }
-                        
-                        for kp_idx, (pt, c) in enumerate(zip(kpts, conf if conf is not None else [0.5] * len(kpts))):
-                            if kp_idx < len(keypoint_names):
-                                player_data["keypoints"].append({
-                                    "name": keypoint_names[kp_idx],
-                                    "x": float(pt[0]),
-                                    "y": float(pt[1]),
-                                    "confidence": float(c),
-                                })
-                        
-                        # Calculate center position (ankle/feet midpoint for accurate court position)
-                        # Feet position is where the player actually stands on the court
-                        left_ankle = next((k for k in player_data["keypoints"] if k["name"] == "left_ankle"), None)
-                        right_ankle = next((k for k in player_data["keypoints"] if k["name"] == "right_ankle"), None)
-                        left_hip = next((k for k in player_data["keypoints"] if k["name"] == "left_hip"), None)
-                        right_hip = next((k for k in player_data["keypoints"] if k["name"] == "right_hip"), None)
-                        
-                        center_x = None
-                        center_y = None
-                        
-                        # Primary: Use ankle midpoint (most accurate for court position)
-                        if left_ankle and right_ankle and left_ankle.get("x", 0) > 0 and right_ankle.get("x", 0) > 0:
-                            center_x = (left_ankle["x"] + right_ankle["x"]) / 2
-                            center_y = (left_ankle["y"] + right_ankle["y"]) / 2
-                        # Fallback: Use hip midpoint if ankles not visible
-                        elif left_hip and right_hip and left_hip.get("x", 0) > 0 and right_hip.get("x", 0) > 0:
-                            center_x = (left_hip["x"] + right_hip["x"]) / 2
-                            center_y = (left_hip["y"] + right_hip["y"]) / 2
-                        
-                        if center_x is not None and center_y is not None:
-                            player_data["position"] = {
-                                "x": center_x,
-                                "y": center_y,
-                            }
-                            player_data["center"] = {
-                                "x": center_x,
-                                "y": center_y,
-                            }
-                            
-                            # Add to player positions for summary metrics
-                            if player_id in player_positions:
-                                player_positions[player_id].append({
-                                    "frame": frame_count,
-                                    "x": center_x,
-                                    "y": center_y,
-                                })
-                            
-                            # Track player for speed calculation
-                            track_id = player_id
-                            current_speed = 0.0
-                            is_valid_tracking = True  # Track if we should update player_tracks
-                            
-                            if track_id in player_tracks:
-                                prev = player_tracks[track_id]
-                                dt = (frame_count - prev["frame"]) / fps
+                        if court_roi_active and court_polygon is not None:
+                            # PRECISE POLYGON-BASED FILTERING using cv2.pointPolygonTest
+                            # This uses the actual court boundaries from manual keypoints
+                            in_court_skeletons = []
+                            for s in skeleton_data:
+                                # Check if center point (or feet position) is inside court polygon
+                                # Use feet position (bottom of bbox) for more accurate court boundary check
+                                bbox = s["bbox"]
+                                feet_y = bbox["y2"] if bbox else s["center"][1]
+                                check_point = (float(s["center"][0]), float(feet_y))
                                 
-                                if dt > 0:
-                                        dx = center_x - prev["x"]
-                                        dy = center_y - prev["y"]
-                                        distance_px = np.sqrt(dx**2 + dy**2)
-                                        
-                                        # PIXEL-BASED SANITY CHECK FIRST
-                                        # Max reasonable pixel movement per frame at 30fps:
-                                        # A fast player (~7m/s = 25km/h) on a 1080p video (~500px court width)
-                                        # would move ~15px per frame.
-                                        # REDUCED threshold from 150px to 80px to catch judge jumps
-                                        # 80px allows for ~4 frames of fast movement without triggering
-                                        # while catching single-frame jumps to judges sitting outside court
-                                        MAX_PX_PER_FRAME = 80  # Reduced from 150 to catch tracking errors
-                                        frames_elapsed = max(1, frame_count - prev["frame"])
-                                        px_per_frame = distance_px / frames_elapsed
-                                        
-                                        if px_per_frame > MAX_PX_PER_FRAME:
-                                            # Tracking error - likely ID swap, don't update tracking
-                                            current_speed = 0.0
-                                            is_valid_tracking = False
-                                        else:
-                                            # Valid tracking - calculate speed
-                                            reference_dimension = max(width, height)
-                                            meters_per_pixel = 13.4 / (reference_dimension * 0.8)
-                                            
-                                            distance_m = distance_px * meters_per_pixel
-                                            speed_mps = distance_m / dt
-                                            
-                                            # PHYSIOLOGICAL SPEED LIMITS FOR BADMINTON
-                                            # Research notes:
-                                            # - Typical badminton movement: 1-4 m/s (4-15 km/h)
-                                            # - Quick recoveries/lunges: 4-7 m/s (15-25 km/h)
-                                            # - Maximum explosive burst (rare): 7-9 m/s (25-32 km/h)
-                                            # - Speeds above 25 km/h should be RARE - likely tracking error
-                                            
-                                            # Threshold for rejecting datapoints entirely
-                                            # Any speed above this is DISCARDED, not capped
-                                            MAX_VALID_SPEED_MPS = 7.0  # 25 km/h - above this, reject datapoint
-                                            
-                                            # Per-frame distance check (accounts for dt)
-                                            MAX_DISTANCE_PER_FRAME = 0.25  # meters (reduced for accuracy)
-                                            distance_per_frame = distance_m / frames_elapsed
-                                            
-                                            # Determine if this is a valid measurement
-                                            is_valid_measurement = True
-                                            
-                                            if distance_per_frame > MAX_DISTANCE_PER_FRAME:
-                                                # Large position jump - likely tracking error/ID swap to judge
-                                                is_valid_measurement = False
-                                                is_valid_tracking = False  # Don't update position
-                                                print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - distance jump {distance_per_frame:.3f}m/frame")
-                                            elif speed_mps > MAX_VALID_SPEED_MPS:
-                                                # Impossible speed - reject this datapoint entirely
-                                                # This is likely a tracking jump to a judge
-                                                is_valid_measurement = False
-                                                is_valid_tracking = False  # Don't update position
-                                                print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - speed {speed_mps*3.6:.1f} km/h > {MAX_VALID_SPEED_MPS*3.6:.1f} km/h limit")
-                                            
-                                            if is_valid_measurement:
-                                                current_speed = speed_mps * 3.6  # Convert m/s to km/h
-                                                
-                                                # Apply median filter for additional outlier detection
-                                                if track_id in player_speed_windows:
-                                                    window = player_speed_windows[track_id]
-                                                    
-                                                    # Check against median BEFORE adding to window
-                                                    if len(window) >= 3:
-                                                        sorted_window = sorted(window)
-                                                        median_speed = sorted_window[len(sorted_window) // 2]
-
-                                                        # If current speed is >3x the recent median, reject entirely
-                                                        # Use 3x (not 2x) to allow legitimate quick accelerations
-                                                        # common in badminton (e.g., standing → lunge)
-                                                        if current_speed > median_speed * 3.0 and median_speed > 2.0:
-                                                            # This is an outlier spike - discard it
-                                                            is_valid_measurement = False
-                                                            is_valid_tracking = False
-                                                            print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected by median filter - {current_speed:.1f} km/h > 2x median {median_speed:.1f} km/h")
-                                                            current_speed = 0.0
-                                                        else:
-                                                            # Valid reading - add to window
-                                                            window.append(current_speed)
-                                                            if len(window) > SPEED_WINDOW_SIZE:
-                                                                window.pop(0)
-                                                    else:
-                                                        # Building up window - add this reading
-                                                        window.append(current_speed)
-                                            else:
-                                                current_speed = 0.0  # Rejected measurement
-                                            
-                                            # Only record VALID measurements for statistics
-                                            if is_valid_measurement and current_speed > 0:
-                                                # Track total distance
-                                                if track_id in player_distances:
-                                                    player_distances[track_id] += distance_m
-                                                
-                                                # Track speeds for averaging
-                                                if track_id in player_speeds:
-                                                    player_speeds[track_id].append(current_speed)
+                                # cv2.pointPolygonTest returns:
+                                # > 0 if inside, = 0 if on edge, < 0 if outside
+                                result = cv2.pointPolygonTest(court_polygon, check_point, measureDist=False)
+                                if result >= 0:  # Inside or on edge of court polygon
+                                    # Additional filter: Skip sitting/crouching poses (likely judges)
+                                    if is_sitting_pose(s["kpts"], bbox, s.get("conf")):
+                                        # Person is inside court but appears to be sitting (likely judge)
+                                        # Still add them but mark as potential judge for later filtering
+                                        s["is_sitting"] = True
+                                    else:
+                                        s["is_sitting"] = False
+                                    in_court_skeletons.append(s)
+                        else:
+                            # FALLBACK: Simple rectangular filter (central 75% of frame)
+                            # Badminton courts are typically in the central 75% of the frame (horizontally)
+                            # Judges/line judges are on the edges
+                            COURT_X_MIN = width * 0.12  # Left boundary (12% from left)
+                            COURT_X_MAX = width * 0.88  # Right boundary (88% from left)
+                            COURT_Y_MIN = height * 0.05  # Top boundary
+                            COURT_Y_MAX = height * 0.95  # Bottom boundary
                             
-                            player_data["current_speed"] = current_speed
+                            in_court_skeletons = []
+                            for s in skeleton_data:
+                                if COURT_X_MIN <= s["center"][0] <= COURT_X_MAX and COURT_Y_MIN <= s["center"][1] <= COURT_Y_MAX:
+                                    # Mark sitting/standing for fallback too
+                                    s["is_sitting"] = is_sitting_pose(s["kpts"], s["bbox"], s.get("conf"))
+                                    in_court_skeletons.append(s)
+                        
+                        # Filter to active players based on cumulative movement AND pose type
+                        # IMPROVED LOGIC: In badminton, we KNOW there are exactly 2 players
+                        # Always prefer standing skeletons over sitting ones (judges sit, players stand)
+                        
+                        # First, separate standing vs sitting skeletons
+                        standing_skeletons = [s for s in in_court_skeletons if not s.get("is_sitting", False)]
+                        sitting_skeletons = [s for s in in_court_skeletons if s.get("is_sitting", False)]
+                        
+                        # Log if we filtered out sitting persons
+                        if sitting_skeletons and processed_count <= 10:
+                            print(f"[MODAL] Frame {frame_count}: Filtered {len(sitting_skeletons)} sitting person(s) (likely judges)")
+                        
+                        # Prefer standing skeletons - only use sitting ones if we don't have enough standing
+                        if len(standing_skeletons) >= 2:
+                            # We have enough standing players, ignore sitting persons entirely
+                            candidate_skeletons = standing_skeletons
+                        elif len(standing_skeletons) == 1 and len(sitting_skeletons) >= 1:
+                            # Only 1 standing - check if sitting person has high movement (might be crouching player)
+                            high_movement_sitting = [
+                                s for s in sitting_skeletons
+                                if s.get("cumulative_movement", 0) >= MIN_CUMULATIVE_MOVEMENT
+                            ]
+                            candidate_skeletons = standing_skeletons + high_movement_sitting
+                        else:
+                            # Fallback to all detected skeletons
+                            candidate_skeletons = in_court_skeletons
+                        
+                        if len(candidate_skeletons) <= 2:
+                            # If 2 or fewer candidates, keep all of them
+                            # This ensures we don't filter out the far-side player who may have
+                            # intermittent detections (low cumulative movement due to tracking gaps)
+                            active_skeletons = sorted(
+                                candidate_skeletons,
+                                key=lambda s: s["area"],  # Sort by size (near player first)
+                                reverse=True
+                            )
+                        elif frame_count > MOVEMENT_WARMUP_FRAMES:
+                            # More than 2 candidates: filter by movement to remove stationary people
+                            active_skeletons = sorted(
+                                candidate_skeletons,
+                                key=lambda s: s["cumulative_movement"],
+                                reverse=True
+                            )
                             
-                            # Only update tracking if this was valid (not a position jump/ID swap)
-                            if is_valid_tracking:
-                                player_tracks[track_id] = {
+                            # Take top 2 that have sufficient movement
+                            active_skeletons = [
+                                s for s in active_skeletons
+                                if s["cumulative_movement"] >= MIN_CUMULATIVE_MOVEMENT
+                            ][:2]
+                        else:
+                            # During warmup with >2 candidates, use largest 2 by area
+                            active_skeletons = sorted(
+                                candidate_skeletons,
+                                key=lambda s: s["area"],
+                                reverse=True
+                            )[:2]
+                        
+                        # Add validated player bounding boxes to badminton_detections
+                        for skel in active_skeletons:
+                            bbox = skel["bbox"]
+                            badminton_detections["players"].append({
+                                "class": "player",
+                                "confidence": 0.9,
+                                "x": float((bbox["x1"] + bbox["x2"]) / 2),
+                                "y": float((bbox["y1"] + bbox["y2"]) / 2),
+                                "width": float(bbox["x2"] - bbox["x1"]),
+                                "height": float(bbox["y2"] - bbox["y1"]),
+                                "class_id": 0,
+                                "detection_id": skel["track_id"],
+                            })
+                        
+                        # =========================================================
+                        # ROBUST PLAYER-SKELETON MATCHING via PlayerIdentityTracker
+                        # =========================================================
+                        # Uses composite cost matching with:
+                        # - Velocity prediction (EMA-smoothed)
+                        # - Court-side consistency priors
+                        # - YOLO track ID continuity
+                        # - Bounding box area similarity
+                        # - Swap detection and correction
+                        matched_players = identity_tracker.match_skeletons(
+                            active_skeletons, frame_count
+                        )
+                        
+                        # Log tracker stats periodically
+                        if frame_count == identity_tracker.CALIBRATION_FRAMES + 1:
+                            stats = identity_tracker.get_stats()
+                            await send_log(
+                                f"Player identity calibration complete: "
+                                f"midline_y={stats['court_midline_y']:.0f}, "
+                                f"P0={stats['player_0_side']}, P1={stats['player_1_side']}",
+                                "success", "processing"
+                            )
+                        if identity_tracker.total_swaps_corrected > 0 and frame_count % 100 == 0:
+                            await send_log(
+                                f"Identity tracker: {identity_tracker.total_swaps_corrected} swap(s) corrected so far",
+                                "info", "processing"
+                            )
+                        
+                        # Process matched players
+                        for player_id, kpts, conf in matched_players:
+                            player_data = {
+                                "player_id": player_id,
+                                "keypoints": [],
+                                "center": {"x": 0.0, "y": 0.0},
+                                "current_speed": 0.0,
+                            }
+                            
+                            for kp_idx, (pt, c) in enumerate(zip(kpts, conf if conf is not None else [0.5] * len(kpts))):
+                                if kp_idx < len(keypoint_names):
+                                    player_data["keypoints"].append({
+                                        "name": keypoint_names[kp_idx],
+                                        "x": float(pt[0]),
+                                        "y": float(pt[1]),
+                                        "confidence": float(c),
+                                    })
+                            
+                            # Calculate center position (ankle/feet midpoint for accurate court position)
+                            # Feet position is where the player actually stands on the court
+                            left_ankle = next((k for k in player_data["keypoints"] if k["name"] == "left_ankle"), None)
+                            right_ankle = next((k for k in player_data["keypoints"] if k["name"] == "right_ankle"), None)
+                            left_hip = next((k for k in player_data["keypoints"] if k["name"] == "left_hip"), None)
+                            right_hip = next((k for k in player_data["keypoints"] if k["name"] == "right_hip"), None)
+                            
+                            center_x = None
+                            center_y = None
+                            
+                            # Primary: Use ankle midpoint (most accurate for court position)
+                            if left_ankle and right_ankle and left_ankle.get("x", 0) > 0 and right_ankle.get("x", 0) > 0:
+                                center_x = (left_ankle["x"] + right_ankle["x"]) / 2
+                                center_y = (left_ankle["y"] + right_ankle["y"]) / 2
+                            # Fallback: Use hip midpoint if ankles not visible
+                            elif left_hip and right_hip and left_hip.get("x", 0) > 0 and right_hip.get("x", 0) > 0:
+                                center_x = (left_hip["x"] + right_hip["x"]) / 2
+                                center_y = (left_hip["y"] + right_hip["y"]) / 2
+                            
+                            if center_x is not None and center_y is not None:
+                                player_data["position"] = {
                                     "x": center_x,
                                     "y": center_y,
-                                    "frame": frame_count,
                                 }
-                        
-                        # Classify pose from keypoints
-                        if player_data["keypoints"]:
-                            pose_result = classify_pose(player_data["keypoints"])
-                            player_data["pose"] = {
-                                "pose_type": pose_result["pose_type"],
-                                "confidence": pose_result["confidence"],
-                                "body_angles": pose_result.get("body_angles"),
-                            }
-                        else:
-                            player_data["pose"] = {
-                                "pose_type": "unknown",
-                                "confidence": 0.0,
-                                "body_angles": None,
-                            }
-                        
-                        frame_data["players"].append(player_data)
-            
-            # Sort players by player_id for consistent ordering in output
-            # This ensures Player 0 always comes before Player 1 in the array,
-            # preventing frontend rendering issues from inconsistent array ordering
-            frame_data["players"].sort(key=lambda p: p["player_id"])
-            
-            skeleton_frames.append(frame_data)
-            
-            # Send progress updates every 2 seconds
-            now = time.time()
-            if now - last_progress_update >= 2.0:
-                progress = (frame_count / total_frames) * 100
-                await send_status_update("processing", progress, frame_count, total_frames)
-                last_progress_update = now
-        
-        cap.release()
-        
-        await send_log(f"Processed {processed_count} frames", "success", "processing")
-        
-        # Log identity tracker summary
-        tracker_stats = identity_tracker.get_stats()
-        await send_log(
-            f"Identity tracker: calibrated={tracker_stats['calibration_complete']}, "
-            f"swaps_corrected={tracker_stats['total_swaps_corrected']}, "
-            f"P0_positions={tracker_stats['player_0_positions']}, "
-            f"P1_positions={tracker_stats['player_1_positions']}",
-            "info", "processing"
-        )
-        if tracker_stats['total_swaps_corrected'] > 0:
-            await send_log(
-                f"⚠️ {tracker_stats['total_swaps_corrected']} skeleton ID swap(s) were detected and corrected",
-                "warning", "processing"
-            )
-        
-        # Build player summary data from tracked positions
-        # Use physiological limits based on badminton research:
-        # - Typical footwork: 1-4 m/s (4-15 km/h)
-        # - Quick lunges/recoveries: 4-7 m/s (15-25 km/h)
-        # - Maximum burst (extremely rare): up to 7 m/s (25 km/h)
-        # - Anything above 20 km/h sustained is SUSPICIOUS
-        # - Anything above 25 km/h is REJECTED
-        MAX_VALID_SPEED_KMH = 25.0       # Absolute max - matches per-frame filter
-        TYPICAL_MAX_SPEED_KMH = 15.0     # Realistic average max
-        SUSPICIOUS_SPEED_KMH = 20.0      # Above this is flagged as suspicious
-        
-        players_summary = []
-        for player_id in range(2):
-            speeds = player_speeds.get(player_id, [])
-            positions = player_positions.get(player_id, [])
-            distance = player_distances.get(player_id, 0.0)
-            
-            # STRICT filtering - reject all speeds above threshold, NO FALLBACK
-            # Stage 1: Hard filter - remove ANYTHING above max valid speed
-            filtered_speeds = [s for s in speeds if s <= MAX_VALID_SPEED_KMH]
-            
-            # Stage 2: If we have enough data, apply IQR-based outlier removal
-            if len(filtered_speeds) >= 5:
-                sorted_speeds = sorted(filtered_speeds)
-                q1_idx = len(sorted_speeds) // 4
-                q3_idx = 3 * len(sorted_speeds) // 4
-                q1 = sorted_speeds[q1_idx]
-                q3 = sorted_speeds[q3_idx]
-                iqr = q3 - q1
-                upper_bound = min(q3 + 1.5 * iqr, SUSPICIOUS_SPEED_KMH)  # Cap IQR bound
+                                player_data["center"] = {
+                                    "x": center_x,
+                                    "y": center_y,
+                                }
+                                
+                                # Add to player positions for summary metrics
+                                if player_id in player_positions:
+                                    player_positions[player_id].append({
+                                        "frame": frame_count,
+                                        "x": center_x,
+                                        "y": center_y,
+                                    })
+                                
+                                # Track player for speed calculation
+                                track_id = player_id
+                                current_speed = 0.0
+                                is_valid_tracking = True  # Track if we should update player_tracks
+                                
+                                if track_id in player_tracks:
+                                    prev = player_tracks[track_id]
+                                    dt = (frame_count - prev["frame"]) / fps
+                                    
+                                    if dt > 0:
+                                            dx = center_x - prev["x"]
+                                            dy = center_y - prev["y"]
+                                            distance_px = np.sqrt(dx**2 + dy**2)
+                                            
+                                            # PIXEL-BASED SANITY CHECK FIRST
+                                            # Max reasonable pixel movement per frame at 30fps:
+                                            # A fast player (~7m/s = 25km/h) on a 1080p video (~500px court width)
+                                            # would move ~15px per frame.
+                                            # REDUCED threshold from 150px to 80px to catch judge jumps
+                                            # 80px allows for ~4 frames of fast movement without triggering
+                                            # while catching single-frame jumps to judges sitting outside court
+                                            MAX_PX_PER_FRAME = max(80, int(0.07 * max(width, height)))
+                                            frames_elapsed = max(1, frame_count - prev["frame"])
+                                            px_per_frame = distance_px / frames_elapsed
+                                            
+                                            if px_per_frame > MAX_PX_PER_FRAME:
+                                                # Tracking error - likely ID swap, don't update tracking
+                                                current_speed = 0.0
+                                                is_valid_tracking = False
+                                            else:
+                                                if homography_matrix is not None:
+                                                    pt_cur = cv2.perspectiveTransform(
+                                                        np.array([[[center_x, center_y]]], dtype=np.float32),
+                                                        homography_matrix
+                                                    )
+                                                    pt_prev = cv2.perspectiveTransform(
+                                                        np.array([[[prev["x"], prev["y"]]]], dtype=np.float32),
+                                                        homography_matrix
+                                                    )
+                                                    dm_x = pt_cur[0][0][0] - pt_prev[0][0][0]
+                                                    dm_y = pt_cur[0][0][1] - pt_prev[0][0][1]
+                                                    distance_m = float(np.sqrt(dm_x**2 + dm_y**2))
+                                                else:
+                                                    reference_dimension = max(width, height)
+                                                    meters_per_pixel = 13.4 / (reference_dimension * 0.8)
+                                                    distance_m = distance_px * meters_per_pixel
+                                                speed_mps = distance_m / dt
+                                                
+                                                # PHYSIOLOGICAL SPEED LIMITS FOR BADMINTON
+                                                # Research notes:
+                                                # - Typical badminton movement: 1-4 m/s (4-15 km/h)
+                                                # - Quick recoveries/lunges: 4-7 m/s (15-25 km/h)
+                                                # - Maximum explosive burst (rare): 7-9 m/s (25-32 km/h)
+                                                # - Speeds above 25 km/h should be RARE - likely tracking error
+                                                
+                                                # Threshold for rejecting datapoints entirely
+                                                # Any speed above this is DISCARDED, not capped
+                                                MAX_VALID_SPEED_MPS = 8.5
+                                                
+                                                # Per-frame distance check (accounts for dt)
+                                                MAX_DISTANCE_PER_FRAME = 0.25  # meters (reduced for accuracy)
+                                                distance_per_frame = distance_m / frames_elapsed
+                                                
+                                                # Determine if this is a valid measurement
+                                                is_valid_measurement = True
+                                                
+                                                if distance_per_frame > MAX_DISTANCE_PER_FRAME:
+                                                    # Large position jump - likely tracking error/ID swap to judge
+                                                    is_valid_measurement = False
+                                                    is_valid_tracking = False  # Don't update position
+                                                    print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - distance jump {distance_per_frame:.3f}m/frame")
+                                                elif speed_mps > MAX_VALID_SPEED_MPS:
+                                                    # Impossible speed - reject this datapoint entirely
+                                                    # This is likely a tracking jump to a judge
+                                                    is_valid_measurement = False
+                                                    is_valid_tracking = False  # Don't update position
+                                                    print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - speed {speed_mps*3.6:.1f} km/h > {MAX_VALID_SPEED_MPS*3.6:.1f} km/h limit")
+                                                
+                                                if is_valid_measurement:
+                                                    current_speed = speed_mps * 3.6  # Convert m/s to km/h
+                                                    
+                                                    # Apply median filter for additional outlier detection
+                                                    if track_id in player_speed_windows:
+                                                        window = player_speed_windows[track_id]
+                                                        
+                                                        # Check against median BEFORE adding to window
+                                                        if len(window) >= 3:
+                                                            sorted_window = sorted(window)
+                                                            median_speed = sorted_window[len(sorted_window) // 2]
+    
+                                                            # If current speed is >3x the recent median, reject entirely
+                                                            # Use 3x (not 2x) to allow legitimate quick accelerations
+                                                            # common in badminton (e.g., standing → lunge)
+                                                            if current_speed > median_speed * 3.0 and median_speed > 2.0:
+                                                                # This is an outlier spike - discard it
+                                                                is_valid_measurement = False
+                                                                is_valid_tracking = False
+                                                                print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected by median filter - {current_speed:.1f} km/h > 2x median {median_speed:.1f} km/h")
+                                                                current_speed = 0.0
+                                                            else:
+                                                                # Valid reading - add to window
+                                                                window.append(current_speed)
+                                                                if len(window) > SPEED_WINDOW_SIZE:
+                                                                    window.pop(0)
+                                                        else:
+                                                            # Building up window - add this reading
+                                                            window.append(current_speed)
+                                                else:
+                                                    current_speed = 0.0  # Rejected measurement
+                                                
+                                                # Only record VALID measurements for statistics
+                                                if is_valid_measurement and current_speed > 0:
+                                                    # Track total distance
+                                                    if track_id in player_distances:
+                                                        player_distances[track_id] += distance_m
+                                                    
+                                                    # Track speeds for averaging
+                                                    if track_id in player_speeds:
+                                                        player_speeds[track_id].append(current_speed)
+                                
+                                player_data["current_speed"] = current_speed
+                                
+                                # Only update tracking if this was valid (not a position jump/ID swap)
+                                if is_valid_tracking:
+                                    player_tracks[track_id] = {
+                                        "x": center_x,
+                                        "y": center_y,
+                                        "frame": frame_count,
+                                    }
+                            
+                            # Classify pose from keypoints
+                            if player_data["keypoints"]:
+                                pose_result = classify_pose(player_data["keypoints"])
+                                player_data["pose"] = {
+                                    "pose_type": pose_result["pose_type"],
+                                    "confidence": pose_result["confidence"],
+                                    "body_angles": pose_result.get("body_angles"),
+                                }
+                            else:
+                                player_data["pose"] = {
+                                    "pose_type": "unknown",
+                                    "confidence": 0.0,
+                                    "body_angles": None,
+                                }
+                            
+                            frame_data["players"].append(player_data)
                 
-                # Filter to within IQR bounds
-                filtered_speeds = [s for s in filtered_speeds if s <= upper_bound]
+                # Sort players by player_id for consistent ordering in output
+                # This ensures Player 0 always comes before Player 1 in the array,
+                # preventing frontend rendering issues from inconsistent array ordering
+                frame_data["players"].sort(key=lambda p: p["player_id"])
+                
+                skeleton_frames_file.write(json.dumps(frame_data) + "\n")
+                skeleton_frame_count += 1
+    
+                # Send progress updates every 2 seconds
+                now = time.time()
+                if now - last_progress_update >= 2.0:
+                    progress = (frame_count / total_frames) * 100
+                    elapsed = now - phase_start
+                    fps_actual = processed_count / elapsed if elapsed > 0 else 0
+                    mem_mb = get_memory_mb()
+                    await send_status_update("processing", progress, frame_count, total_frames)
+                    # Log detailed diagnostics every 10 seconds
+                    if int(elapsed) % 10 < 3:
+                        print(f"[MODAL] Frame {frame_count}/{total_frames} ({progress:.1f}%) | "
+                              f"{fps_actual:.1f} fps | RAM: {mem_mb:.0f} MB | "
+                              f"status_failures: {status_update_failures}")
+                    last_progress_update = now
             
-            # Stage 3: Remove top 5% as final safety measure
-            if len(filtered_speeds) >= 5:
-                sorted_filtered = sorted(filtered_speeds)
-                cutoff_idx = int(len(sorted_filtered) * 0.95)
-                if cutoff_idx > 0:
-                    filtered_speeds = sorted_filtered[:cutoff_idx]
+            cap.release()
+            skeleton_frames_file.close()
+    
+            frame_loop_time = time.time() - phase_start
+            mem_mb = get_memory_mb()
+            fps_actual = processed_count / frame_loop_time if frame_loop_time > 0 else 0
+            await send_log(
+                f"Frame loop complete: {processed_count} frames in {frame_loop_time:.1f}s "
+                f"({fps_actual:.1f} fps, RAM: {mem_mb:.0f} MB)",
+                "success", "processing"
+            )
+            phase_start = time.time()
+    
+            # Read skeleton frames back from disk
+            await send_log("Loading skeleton data for post-processing...", "info", "processing")
+            skeleton_frames = []
+            with open(skeleton_frames_path, "r") as f:
+                for line in f:
+                    skeleton_frames.append(json.loads(line))
+            print(f"[MODAL] Loaded {len(skeleton_frames)} skeleton frames from disk")
+    
+            await send_log(f"Processed {processed_count} frames", "success", "processing")
             
-            # Calculate stats from filtered data only - NO FALLBACK to unfiltered
-            avg_speed = sum(filtered_speeds) / len(filtered_speeds) if filtered_speeds else 0.0
-            max_speed = max(filtered_speeds) if filtered_speeds else 0.0
+            # Log identity tracker summary
+            tracker_stats = identity_tracker.get_stats()
+            await send_log(
+                f"Identity tracker: calibrated={tracker_stats['calibration_complete']}, "
+                f"swaps_corrected={tracker_stats['total_swaps_corrected']}, "
+                f"P0_positions={tracker_stats['player_0_positions']}, "
+                f"P1_positions={tracker_stats['player_1_positions']}",
+                "info", "processing"
+            )
+            if tracker_stats['total_swaps_corrected'] > 0:
+                await send_log(
+                    f"⚠️ {tracker_stats['total_swaps_corrected']} skeleton ID swap(s) were detected and corrected",
+                    "warning", "processing"
+                )
             
-            # Apply final physiological caps (safety net)
-            avg_speed = min(avg_speed, TYPICAL_MAX_SPEED_KMH)
-            max_speed = min(max_speed, MAX_VALID_SPEED_KMH)
+            # Build player summary data from tracked positions
+            # Use physiological limits based on badminton research:
+            # - Typical footwork: 1-4 m/s (4-15 km/h)
+            # - Quick lunges/recoveries: 4-7 m/s (15-25 km/h)
+            # - Maximum burst (extremely rare): up to 7 m/s (25 km/h)
+            # - Anything above 20 km/h sustained is SUSPICIOUS
+            # - Anything above 25 km/h is REJECTED
+            MAX_VALID_SPEED_KMH = 25.0       # Absolute max - matches per-frame filter
+            TYPICAL_MAX_SPEED_KMH = 15.0     # Realistic average max
+            SUSPICIOUS_SPEED_KMH = 20.0      # Above this is flagged as suspicious
             
-            players_summary.append({
-                "player_id": player_id,
-                "avg_speed": round(avg_speed, 2),
-                "max_speed": round(max_speed, 2),
-                "total_distance": round(distance, 2),
-                "positions": positions,  # Array of {frame, x, y}
-                "keypoints_history": [],  # Empty for now, can be populated if needed
-            })
-        
-        # player_id is 0-indexed internally, but display as 1-indexed (Player 1, Player 2)
-        await send_log(f"Player 1: {len(player_positions[0])} positions, {player_distances[0]:.1f}m", "info", "processing")
-        await send_log(f"Player 2: {len(player_positions[1])} positions, {player_distances[1]:.1f}m", "info", "processing")
-        
+            players_summary = []
+            for player_id in range(2):
+                speeds = player_speeds.get(player_id, [])
+                positions = player_positions.get(player_id, [])
+                distance = player_distances.get(player_id, 0.0)
+                
+                # STRICT filtering - reject all speeds above threshold, NO FALLBACK
+                # Stage 1: Hard filter - remove ANYTHING above max valid speed
+                filtered_speeds = [s for s in speeds if s <= MAX_VALID_SPEED_KMH]
+                
+                # Stage 2: If we have enough data, apply IQR-based outlier removal
+                if len(filtered_speeds) >= 5:
+                    sorted_speeds = sorted(filtered_speeds)
+                    q1_idx = len(sorted_speeds) // 4
+                    q3_idx = 3 * len(sorted_speeds) // 4
+                    q1 = sorted_speeds[q1_idx]
+                    q3 = sorted_speeds[q3_idx]
+                    iqr = q3 - q1
+                    upper_bound = min(q3 + 1.5 * iqr, SUSPICIOUS_SPEED_KMH)  # Cap IQR bound
+                    
+                    # Filter to within IQR bounds
+                    filtered_speeds = [s for s in filtered_speeds if s <= upper_bound]
+                
+                # Stage 3: Remove top 5% as final safety measure
+                if len(filtered_speeds) >= 5:
+                    sorted_filtered = sorted(filtered_speeds)
+                    cutoff_idx = int(len(sorted_filtered) * 0.95)
+                    if cutoff_idx > 0:
+                        filtered_speeds = sorted_filtered[:cutoff_idx]
+                
+                # Calculate stats from filtered data only - NO FALLBACK to unfiltered
+                avg_speed = sum(filtered_speeds) / len(filtered_speeds) if filtered_speeds else 0.0
+                max_speed = max(filtered_speeds) if filtered_speeds else 0.0
+                
+                # Apply final physiological caps (safety net)
+                avg_speed = min(avg_speed, TYPICAL_MAX_SPEED_KMH)
+                max_speed = min(max_speed, MAX_VALID_SPEED_KMH)
+                
+                players_summary.append({
+                    "player_id": player_id,
+                    "avg_speed": round(avg_speed, 2),
+                    "max_speed": round(max_speed, 2),
+                    "total_distance": round(distance, 2),
+                    "positions": positions,  # Array of {frame, x, y}
+                    "keypoints_history": [],  # Empty for now, can be populated if needed
+                })
+            
+            # player_id is 0-indexed internally, but display as 1-indexed (Player 1, Player 2)
+            await send_log(f"Player 1: {len(player_positions[0])} positions, {player_distances[0]:.1f}m", "info", "processing")
+            await send_log(f"Player 2: {len(player_positions[1])} positions, {player_distances[1]:.1f}m", "info", "processing")
+        else:
+            # Rally-only mode: skip YOLO frame loop entirely
+            await send_log("Rally-only mode: skipping frame-by-frame analysis", "info", "processing")
+            skeleton_frames = []
+            players_summary = []
+            player_positions = {0: [], 1: []}
+            player_distances = {0: 0.0, 1: 0.0}
+            processed_count = 0
+
+            # Still need court_polygon for rally detection filtering
+            court_polygon = None
+            if manual_court_keypoints:
+                try:
+                    corners = []
+                    for key in ["top_left", "top_right", "bottom_right", "bottom_left"]:
+                        if key in manual_court_keypoints and manual_court_keypoints[key]:
+                            pt = manual_court_keypoints[key]
+                            corners.append([float(pt[0]), float(pt[1])])
+                    if len(corners) == 4:
+                        corners_np = np.array(corners, dtype=np.float32)
+                        center = corners_np.mean(axis=0)
+                        MARGIN_FACTOR = 1.02
+                        expanded = center + (corners_np - center) * MARGIN_FACTOR
+                        court_polygon = expanded.astype(np.int32)
+                except Exception:
+                    pass
+
+            cap.release()
+
         # =================================================================
         # RALLY DETECTION (from shuttle positions)
         # =================================================================
+        phase_start = time.time()
+        await send_log("Starting rally detection...", "info", "processing")
         detected_rallies = []
         rally_stats = {}
 
         # Build shuttle positions dict for rally detection
         # Use TrackNet data if available (much denser), otherwise fall back to
-        # the per-frame shuttle_position from skeleton_frames
+        # the per-frame shuttle_position from skeleton_frames.
+        # IMPORTANT: Apply court ROI + static position filtering so false
+        # positives (e.g. a white object lying on the ground outside the court)
+        # don't corrupt the rally gradient analysis.
         rally_shuttle_positions = {}
         if tracknet_available and tracknet_positions:
-            rally_shuttle_positions = tracknet_positions
-            await send_log("Running rally detection using TrackNet data...", "info", "processing")
+            # Filter TrackNet positions through the same court + static logic
+            # used during per-frame processing
+            _rally_static_clusters: list[dict] = []
+            _rally_prev_pos: dict | None = None
+            # Scale thresholds by fps: per-frame displacement is smaller at
+            # higher frame rates, so thresholds must shrink proportionally.
+            _fps_scale = 30.0 / fps
+            _RALLY_STATIC_DIST = max(4, int(0.013 * max(width, height) * _fps_scale))
+            _RALLY_MIN_MOVE = max(2, int(0.007 * max(width, height) * _fps_scale))
+
+            # Build a tighter court polygon for rally filtering (15% expansion
+            # vs 40% for rendering) — rally accuracy matters more than catching
+            # every in-flight shuttle at the very edges
+            _rally_court_polygon = None
+            if court_polygon is not None:
+                _rc = court_polygon.astype(np.float32).mean(axis=0)
+                _rally_court_polygon = (_rc + (court_polygon.astype(np.float32) - _rc) * 1.15).astype(np.int32)
+
+            for fn in sorted(tracknet_positions.keys()):
+                pos = tracknet_positions[fn]
+                if not pos.get("visible"):
+                    rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
+                    continue
+
+                px, py = pos["x"], pos["y"]
+
+                # Court ROI check (tighter 15% expansion for rally detection)
+                if _rally_court_polygon is not None:
+                    if cv2.pointPolygonTest(_rally_court_polygon, (float(px), float(py)), measureDist=False) < 0:
+                        rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
+                        continue
+
+                # Static cluster check — reject positions that barely move
+                is_static = False
+                for cl in _rally_static_clusters:
+                    if math.sqrt((px - cl["x"])**2 + (py - cl["y"])**2) < _RALLY_STATIC_DIST:
+                        cl["count"] += 1
+                        cl["x"] = (cl["x"] * (cl["count"] - 1) + px) / cl["count"]
+                        cl["y"] = (cl["y"] * (cl["count"] - 1) + py) / cl["count"]
+                        is_static = True
+                        break
+
+                if is_static:
+                    rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
+                    continue
+
+                # Movement check
+                if _rally_prev_pos is not None:
+                    movement = math.sqrt((px - _rally_prev_pos["x"])**2 + (py - _rally_prev_pos["y"])**2)
+                    if movement < _RALLY_MIN_MOVE:
+                        # Register as potentially static
+                        found = False
+                        for cl in _rally_static_clusters:
+                            if math.sqrt((px - cl["x"])**2 + (py - cl["y"])**2) < _RALLY_STATIC_DIST * 2:
+                                cl["count"] += 1
+                                found = True
+                                break
+                        if not found:
+                            _rally_static_clusters.append({"x": px, "y": py, "count": 1})
+                        rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
+                        continue
+
+                # Prune unconfirmed clusters periodically
+                _rally_static_clusters = [c for c in _rally_static_clusters if c["count"] >= 3]
+
+                rally_shuttle_positions[fn] = {"x": px, "y": py, "visible": True}
+                _rally_prev_pos = {"x": px, "y": py}
+
+            filtered_count = sum(1 for v in rally_shuttle_positions.values() if v["visible"])
+            total_tn = sum(1 for v in tracknet_positions.values() if v.get("visible"))
+            await send_log(
+                f"Running rally detection using TrackNet data ({filtered_count}/{total_tn} positions after court+static filtering)...",
+                "info", "processing"
+            )
         else:
             # Build from skeleton_frames shuttle_position data
             for sf in skeleton_frames:
@@ -1874,6 +2347,26 @@ with_reid: False
                     rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
             await send_log("Running rally detection using YOLO shuttle data...", "info", "processing")
 
+        # Build player wrist/shoulder positions for carried-shuttle detection.
+        # Extract keypoints from skeleton_frames so rally_detection can check
+        # whether the shuttle is being held near a player's hand.
+        player_wrist_data = {}
+        for sf in skeleton_frames:
+            fn = sf["frame"]
+            players_in_frame = []
+            for p in sf.get("players", []):
+                kps = {
+                    k["name"]: (k["x"], k["y"])
+                    for k in p.get("keypoints", [])
+                    if k.get("confidence", 0) >= 0.3 and k.get("x", 0) > 0
+                }
+                player_kp = {}
+                for key in ("left_wrist", "right_wrist", "left_shoulder", "right_shoulder"):
+                    player_kp[key] = kps.get(key)
+                players_in_frame.append(player_kp)
+            if players_in_frame:
+                player_wrist_data[fn] = players_in_frame
+
         if rally_shuttle_positions:
             try:
                 sys.path.insert(0, "/root")
@@ -1883,6 +2376,7 @@ with_reid: False
                     rally_shuttle_positions,
                     fps=fps,
                     total_frames=total_frames,
+                    player_positions=player_wrist_data if player_wrist_data else None,
                 )
                 rally_stats = compute_rally_stats(
                     detected_rallies, rally_shuttle_positions, fps
@@ -1900,6 +2394,11 @@ with_reid: False
             except Exception as e:
                 await send_log(f"Rally detection error: {e}", "warning", "processing")
                 print(f"[MODAL] Rally detection error: {e}")
+
+        rally_time = time.time() - phase_start
+        mem_mb = get_memory_mb()
+        await send_log(f"Rally detection complete in {rally_time:.1f}s (RAM: {mem_mb:.0f} MB)", "info", "processing")
+        phase_start = time.time()
 
         # Build results
         results_data = {
@@ -1921,9 +2420,28 @@ with_reid: False
         }
         
         # Upload full results as JSON file to Convex storage (avoids 1MB document limit)
-        await send_log("Uploading results to storage...", "info", "processing")
-        
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        await send_log("Serializing results to JSON...", "info", "processing")
+        serialize_start = time.time()
+        results_json = json.dumps(results_data).encode("utf-8")
+        serialize_time = time.time() - serialize_start
+        results_mb = len(results_json) / (1024 * 1024)
+        if results_mb > 50:
+            await send_log(
+                f"Warning: Results JSON is very large ({results_mb:.1f} MB). "
+                f"Consider processing shorter video segments.",
+                "warning", "processing"
+            )
+        mem_mb = get_memory_mb()
+        await send_log(
+            f"Uploading results ({results_mb:.1f} MB, serialized in {serialize_time:.1f}s, RAM: {mem_mb:.0f} MB)...",
+            "info", "processing"
+        )
+
+        # Free skeleton_frames from memory now that we have the JSON
+        del skeleton_frames
+        del results_data
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0)) as client:
             # Step 1: Get upload URL from Convex
             upload_url_response = await client.post(
                 f"{callback_url}/generateUploadUrl",
@@ -1937,7 +2455,6 @@ with_reid: False
                 raise Exception("Failed to get upload URL from Convex")
             
             # Step 2: Upload the results JSON to Convex storage
-            results_json = json.dumps(results_data).encode("utf-8")
             storage_response = await client.post(
                 upload_url,
                 content=results_json,
@@ -1973,13 +2490,21 @@ with_reid: False
                 },
             )
         
-        await send_log("Analysis complete! Results ready.", "success", "processing")
-        
+        upload_time = time.time() - phase_start
+        total_time = time.time() - pipeline_start
+        await send_log(
+            f"Analysis complete! Upload took {upload_time:.1f}s. "
+            f"Total pipeline: {total_time:.1f}s ({total_time/60:.1f} min)",
+            "success", "processing"
+        )
+
         # Cleanup
         video_path.unlink(missing_ok=True)
+        if 'skeleton_frames_path' in locals():
+            skeleton_frames_path.unlink(missing_ok=True)
         vol.commit()
-        
-        print(f"[MODAL] Processing complete for video: {video_id}")
+
+        print(f"[MODAL] Processing complete for video: {video_id} in {total_time:.1f}s")
         
         return {
             "status": "completed",
@@ -1989,17 +2514,37 @@ with_reid: False
         }
         
     except Exception as e:
+        import traceback
         error_msg = str(e)
-        print(f"[MODAL] Error processing video {video_id}: {error_msg}")
-        
+        tb = traceback.format_exc()
+        elapsed = time.time() - pipeline_start if 'pipeline_start' in locals() else 0
+        print(f"[MODAL] Error processing video {video_id} after {elapsed:.1f}s: {error_msg}")
+        print(f"[MODAL] Traceback:\n{tb}")
+
         await send_status_update("failed", error=error_msg)
-        await send_log(f"Processing failed: {error_msg}", "error", "processing")
-        
+        await send_log(f"Processing failed after {elapsed:.1f}s: {error_msg}", "error", "processing")
+
+        # Close skeleton file if still open, then clean up
+        if 'skeleton_frames_file' in locals() and not skeleton_frames_file.closed:
+            skeleton_frames_file.close()
+        skeleton_path = Path(f"/cache/{video_id}_skeleton.jsonl")
+        skeleton_path.unlink(missing_ok=True)
+
+        video_path = Path(f"/cache/{video_id}.mp4")
+        video_path.unlink(missing_ok=True)
+
+        try:
+            vol.commit()
+        except Exception:
+            pass
+
         return {
             "status": "failed",
             "videoId": video_id,
             "error": error_msg,
         }
+    finally:
+        await http_client.aclose()
 
 
 @app.function(image=image)

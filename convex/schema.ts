@@ -8,6 +8,9 @@ export default defineSchema({
     filename: v.string(),
     size: v.number(),
     
+    // Analysis mode
+    analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
+
     // Processing status
     status: v.union(
       v.literal("uploaded"),

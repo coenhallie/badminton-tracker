@@ -14,7 +14,13 @@ const emit = defineEmits<{
 const isDragging = ref(false)
 const isUploading = ref(false)
 const uploadProgress = ref(0)
+const uploadSpeed = ref('')
 const selectedFile = ref<File | null>(null)
+const analysisMode = ref<'rally_only' | 'full'>('full')
+const activeXhr = ref<XMLHttpRequest | null>(null)
+const retryCount = ref(0)
+const MAX_RETRIES = 2
+const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes
 
 const allowedTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/webm']
 
@@ -68,12 +74,93 @@ function validateAndSetFile(file: File) {
     return
   }
 
+  const minSize = 1024 * 100
+  if (file.size < minSize) {
+    emit('error', 'File is too small. Please upload a valid video file.')
+    return
+  }
+
   selectedFile.value = file
 }
 
 function removeFile() {
   selectedFile.value = null
   uploadProgress.value = 0
+  uploadSpeed.value = ''
+}
+
+function cancelUpload() {
+  if (activeXhr.value) {
+    activeXhr.value.abort()
+    activeXhr.value = null
+  }
+  isUploading.value = false
+  uploadProgress.value = 0
+  uploadSpeed.value = ''
+  retryCount.value = 0
+}
+
+function uploadFileWithProgress(url: string, file: File): Promise<{ storageId: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    activeXhr.value = xhr
+    let lastLoaded = 0
+    let lastTime = Date.now()
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        uploadProgress.value = (e.loaded / e.total) * 100
+
+        const now = Date.now()
+        const elapsed = (now - lastTime) / 1000
+        if (elapsed >= 0.5) {
+          const bytesPerSec = (e.loaded - lastLoaded) / elapsed
+          lastLoaded = e.loaded
+          lastTime = now
+          if (bytesPerSec > 0) {
+            if (bytesPerSec >= 1024 * 1024) {
+              uploadSpeed.value = `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`
+            } else {
+              uploadSpeed.value = `${(bytesPerSec / 1024).toFixed(0)} KB/s`
+            }
+          }
+        }
+      }
+    })
+
+    xhr.addEventListener('load', () => {
+      activeXhr.value = null
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText))
+        } catch {
+          reject(new Error('Invalid response from storage'))
+        }
+      } else {
+        reject(new Error(`Upload failed (HTTP ${xhr.status})`))
+      }
+    })
+
+    xhr.addEventListener('error', () => {
+      activeXhr.value = null
+      reject(new Error('Network error during upload'))
+    })
+
+    xhr.addEventListener('abort', () => {
+      activeXhr.value = null
+      reject(new Error('Upload cancelled'))
+    })
+
+    xhr.addEventListener('timeout', () => {
+      activeXhr.value = null
+      reject(new Error('Upload timed out'))
+    })
+
+    xhr.timeout = UPLOAD_TIMEOUT_MS
+    xhr.open('POST', url)
+    xhr.setRequestHeader('Content-Type', file.type)
+    xhr.send(file)
+  })
 }
 
 async function startUpload() {
@@ -81,52 +168,64 @@ async function startUpload() {
 
   isUploading.value = true
   uploadProgress.value = 0
+  uploadSpeed.value = ''
+  retryCount.value = 0
+
+  await attemptUpload()
+}
+
+async function attemptUpload() {
+  if (!selectedFile.value) return
 
   try {
-    // Simulate progress for UX
-    const progressInterval = setInterval(() => {
-      if (uploadProgress.value < 90) {
-        uploadProgress.value += Math.random() * 10
-      }
-    }, 200)
-
     // Step 1: Generate upload URL from Convex
     const uploadUrl = await client.mutation(api.videos.generateUploadUrl, {})
-    
-    // Step 2: Upload file directly to Convex storage
-    const uploadResponse = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': selectedFile.value.type },
-      body: selectedFile.value,
-    })
-    
-    if (!uploadResponse.ok) {
-      throw new Error('Failed to upload file to storage')
-    }
-    
-    const { storageId } = await uploadResponse.json()
-    
+
+    // Step 2: Upload file with real progress tracking
+    const { storageId } = await uploadFileWithProgress(uploadUrl, selectedFile.value)
+
     // Step 3: Create video record in Convex database
     const videoId = await client.mutation(api.videos.createVideo, {
       storageId,
       filename: selectedFile.value.name,
       size: selectedFile.value.size,
+      analysisMode: analysisMode.value,
     })
 
-    clearInterval(progressInterval)
     uploadProgress.value = 100
+    uploadSpeed.value = ''
 
-    // Emit response in the same format as before for compatibility
     emit('uploaded', {
       video_id: videoId,
       filename: selectedFile.value.name,
       size: selectedFile.value.size,
-      status: 'uploaded'
+      status: 'uploaded',
+      analysisMode: analysisMode.value,
     })
   } catch (error) {
-    emit('error', error instanceof Error ? error.message : 'Upload failed')
+    const message = error instanceof Error ? error.message : 'Upload failed'
+
+    // Don't retry if user cancelled
+    if (message === 'Upload cancelled') {
+      return
+    }
+
+    // Auto-retry on network errors / timeouts
+    if (retryCount.value < MAX_RETRIES && (message.includes('Network') || message.includes('timed out'))) {
+      retryCount.value++
+      uploadProgress.value = 0
+      uploadSpeed.value = `Retrying (${retryCount.value}/${MAX_RETRIES})...`
+      await new Promise(r => setTimeout(r, 1000 * retryCount.value))
+      await attemptUpload()
+      return
+    }
+
+    emit('error', message)
   } finally {
-    isUploading.value = false
+    if (uploadProgress.value === 100 || !activeXhr.value) {
+      isUploading.value = false
+      uploadSpeed.value = ''
+    }
   }
 }
 </script>
@@ -150,7 +249,7 @@ async function startUpload() {
       </div>
       <h3>Upload Badminton Match Video</h3>
       <p>Drag and drop your video file here, or click to browse</p>
-      <p class="file-types">Supported formats: MP4, MPEG, MOV, AVI, WebM (max 500MB)</p>
+      <p class="file-types">Supported formats: MP4, MPEG, MOV, AVI, WebM (max 1GB)</p>
       <input
         type="file"
         accept="video/*"
@@ -188,6 +287,31 @@ async function startUpload() {
         <div class="progress-fill" :style="{ width: `${uploadProgress}%` }"></div>
       </div>
 
+      <!-- Analysis Mode Selector -->
+      <div v-if="!isUploading" class="mode-selector">
+        <span class="mode-label">Analysis Mode</span>
+        <div class="mode-options">
+          <button
+            class="mode-option"
+            :class="{ active: analysisMode === 'rally_only' }"
+            @click="analysisMode = 'rally_only'"
+            type="button"
+          >
+            <span class="mode-title">Rally Separation</span>
+            <span class="mode-desc">Detect rally boundaries only (faster)</span>
+          </button>
+          <button
+            class="mode-option"
+            :class="{ active: analysisMode === 'full' }"
+            @click="analysisMode = 'full'"
+            type="button"
+          >
+            <span class="mode-title">Full Analysis</span>
+            <span class="mode-desc">Player tracking, poses, speed + rallies</span>
+          </button>
+        </div>
+      </div>
+
       <button
         v-if="!isUploading"
         class="upload-btn"
@@ -201,8 +325,12 @@ async function startUpload() {
       </button>
 
       <div v-else class="uploading-status">
-        <div class="spinner"></div>
-        <span>Uploading... {{ Math.round(uploadProgress) }}%</span>
+        <div class="upload-status-row">
+          <div class="spinner"></div>
+          <span>Uploading... {{ Math.round(uploadProgress) }}%</span>
+          <span v-if="uploadSpeed" class="upload-speed">{{ uploadSpeed }}</span>
+        </div>
+        <button class="cancel-btn" @click="cancelUpload">Cancel</button>
       </div>
     </div>
   </div>
@@ -381,10 +509,37 @@ async function startUpload() {
 
 .uploading-status {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
   gap: 12px;
   color: var(--color-text-secondary);
+}
+
+.upload-status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.upload-speed {
+  font-size: 0.8rem;
+  color: var(--color-text-tertiary);
+}
+
+.cancel-btn {
+  padding: 6px 16px;
+  background: transparent;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 0;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cancel-btn:hover {
+  border-color: var(--color-error);
+  color: var(--color-error);
 }
 
 .spinner {
@@ -400,5 +555,62 @@ async function startUpload() {
   to {
     transform: rotate(360deg);
   }
+}
+
+.mode-selector {
+  margin-bottom: 20px;
+}
+
+.mode-label {
+  display: block;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mode-options {
+  display: flex;
+  gap: 8px;
+}
+
+.mode-option {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  background: var(--color-bg-tertiary);
+  border: 2px solid var(--color-border-secondary);
+  border-radius: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s ease;
+}
+
+.mode-option:hover {
+  border-color: var(--color-text-tertiary);
+}
+
+.mode-option.active {
+  border-color: var(--color-accent);
+  background: var(--color-bg-secondary);
+}
+
+.mode-title {
+  color: var(--color-text-heading);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.mode-desc {
+  color: var(--color-text-tertiary);
+  font-size: 0.75rem;
+}
+
+.mode-option.active .mode-title {
+  color: var(--color-accent);
 }
 </style>

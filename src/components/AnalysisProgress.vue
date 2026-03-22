@@ -8,6 +8,7 @@ import type { Id } from '../../convex/_generated/dataModel'
 const props = defineProps<{
   videoId: string
   filename: string
+  analysisMode: 'rally_only' | 'full'
 }>()
 
 const emit = defineEmits<{
@@ -101,9 +102,31 @@ watch(videoStatus, async (newStatus) => {
     const resultsUrl = videoData.value.resultsUrl
     if (resultsUrl) {
       try {
-        const response = await fetch(resultsUrl)
-        const results = await response.json() as Record<string, unknown>
-        
+        let response: Response | null = null
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            response = await fetch(resultsUrl)
+            if (response.ok) break
+          } catch {
+            if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
+          }
+        }
+
+        if (!response || !response.ok) {
+          throw new Error(`Failed to fetch results after 3 attempts (status: ${response?.status ?? 'no response'})`)
+        }
+
+        let results: Record<string, unknown>
+        try {
+          results = await response.json()
+        } catch {
+          throw new Error('Results data is corrupted or not valid JSON')
+        }
+
+        if (!results || typeof results !== 'object') {
+          throw new Error('Results data has unexpected format')
+        }
+
         const analysisResult: AnalysisResult = {
           video_id: props.videoId,
           duration: (results.duration as number) ?? 0,
@@ -112,7 +135,7 @@ watch(videoStatus, async (newStatus) => {
           processed_frames: (results.processed_frames as number) ?? 0,
           players: (results.players as AnalysisResult['players']) ?? [],
           shuttle: (results.shuttle as AnalysisResult['shuttle']) ?? null,
-          skeleton_data: (results.skeleton_data as AnalysisResult['skeleton_data']) ?? [],
+          skeleton_data: Array.isArray(results.skeleton_data) ? (results.skeleton_data as AnalysisResult['skeleton_data']) : [],
           court_detection: (results.court_detection as AnalysisResult['court_detection']) ?? null,
           shuttle_analytics: (results.shuttle_analytics as AnalysisResult['shuttle_analytics']) ?? null,
           player_zone_analytics: (results.player_zone_analytics as AnalysisResult['player_zone_analytics']) ?? null,
@@ -122,7 +145,7 @@ watch(videoStatus, async (newStatus) => {
         emit('complete', analysisResult)
       } catch (err) {
         console.error('Failed to fetch results:', err)
-        emit('error', 'Failed to load analysis results')
+        emit('error', err instanceof Error ? err.message : 'Failed to load analysis results')
       }
     } else {
       // Fallback: use metadata if no results URL (shouldn't happen normally)

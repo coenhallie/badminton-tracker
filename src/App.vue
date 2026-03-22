@@ -11,22 +11,49 @@ import SpeedGraph from '@/components/SpeedGraph.vue'
 import ShotSpeedList from '@/components/ShotSpeedList.vue'
 import AdvancedAnalytics from '@/components/AdvancedAnalytics.vue'
 import RallyTimeline from '@/components/RallyTimeline.vue'
+import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
 import {
   checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
-  getHeatmap, preloadHeatmap, triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
+  triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
   clearZoneAnalyticsCache, getRecalculatedZoneAnalytics, setCurrentVideoId
 } from '@/services/api'
 import type { HealthCheckResponse } from '@/services/api'
 import type { UploadResponse, AnalysisResult, SkeletonFrame } from '@/types/analysis'
-import type { HeatmapData, SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
+import type { SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
 
 const { isDark, toggleTheme } = useTheme()
 
 // App states: upload -> court-setup (new!) -> analyzing -> results
 type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
 
-const currentState = ref<AppState>('upload')
-const uploadedVideo = ref<UploadResponse | null>(null)
+// Restore session state if the page was reloaded (e.g., Mac sleep/tab discard)
+function loadSessionState(): { state: AppState; video: UploadResponse | null } {
+  try {
+    const saved = sessionStorage.getItem('badminton-session')
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      if (parsed.state && parsed.video?.video_id) {
+        return { state: parsed.state as AppState, video: parsed.video }
+      }
+    }
+  } catch { /* ignore corrupt storage */ }
+  return { state: 'upload', video: null }
+}
+
+function saveSessionState(state: AppState, video: UploadResponse | null) {
+  try {
+    if (state === 'upload' || !video) {
+      sessionStorage.removeItem('badminton-session')
+    } else {
+      sessionStorage.setItem('badminton-session', JSON.stringify({ state, video }))
+    }
+  } catch { /* storage full or unavailable */ }
+}
+
+const restored = loadSessionState()
+const currentState = ref<AppState>(restored.state)
+const uploadedVideo = ref<UploadResponse | null>(restored.video)
+const analysisMode = ref<'rally_only' | 'full'>(restored.video?.analysisMode ?? 'full')
 const analysisResult = ref<AnalysisResult | null>(null)
 const errorMessage = ref('')
 const isApiConnected = ref(false)
@@ -44,14 +71,12 @@ const poseSource = ref<'skeleton' | 'trained' | 'both'>('both')
 // NOTE: Court overlay removed - automatic court detection disabled, using manual keypoints only
 const showHeatmap = ref(false)  // Heatmap off by default - toggle to show player position heatmap
 
-// Heatmap data storage
-const heatmapData = ref<HeatmapData | null>(null)
-const isHeatmapLoading = ref(false)
-
 // Detection type visibility toggles (within bounding boxes)
 const showPlayers = ref(true)
-const showShuttles = ref(true)
 const showRackets = ref(true)
+
+// Shuttle tracking toggle (controls trail overlay, bounding boxes, and mini court dot)
+const showShuttleTracking = ref(true)
 
 // Mini court visibility toggle
 const showMiniCourt = ref(true)
@@ -92,6 +117,33 @@ const keypointSelectionCount = ref(0)
 // Current video time and frame tracking for MiniCourt sync
 const currentVideoTime = ref(0)
 const currentFrame = ref(0)
+
+// Rally auto-pause: pause video between rallies so user can review data
+const pauseBetweenRallies = ref(false)
+const rallyPauseCountdown = ref(0)
+const pausedAfterRallyId = ref<number | null>(null)
+const nextRallyStart = ref(0)
+let rallyPauseTimer: ReturnType<typeof setInterval> | null = null
+const lastTriggeredRallyEnd = ref(-1)
+
+// Client-side rally detection (same source as AdvancedAnalytics)
+const { rallies: detectedRallies, rallySource, rallySpeedStats } = useAdvancedAnalytics(
+  computed(() => analysisResult.value),
+  currentFrame,
+)
+
+// Selected rally for per-rally heatmap filtering
+const selectedRallyId = ref<number | null>(null)
+const heatmapFrameRange = computed<{ start: number; end: number } | null>(() => {
+  if (selectedRallyId.value === null) return null
+  const rally = detectedRallies.value.find(r => r.id === selectedRallyId.value)
+  if (!rally) return null
+  return { start: rally.startFrame, end: rally.endFrame }
+})
+
+function handleRallySelect(rallyId: number | null) {
+  selectedRallyId.value = rallyId
+}
 
 // Extended court keypoints type for 12-point system
 interface ExtendedCourtKeypoints {
@@ -260,6 +312,73 @@ function handleKeypointSelectionChange(isActive: boolean, count: number) {
   isKeypointSelectionActive.value = isActive
   keypointSelectionCount.value = count
 }
+
+// ── Rally auto-pause logic ──────────────────────────────────────────────────
+
+// Watch video time for rally end boundaries (uses client-side detectedRallies)
+watch(currentVideoTime, (time) => {
+  // Reset tracking if user seeked backward past last triggered point
+  if (time < lastTriggeredRallyEnd.value - 1) {
+    lastTriggeredRallyEnd.value = -1
+  }
+
+  if (!pauseBetweenRallies.value || !detectedRallies.value.length) return
+  if (rallyPauseCountdown.value > 0) return // already in a pause
+
+  for (let i = 0; i < detectedRallies.value.length; i++) {
+    const rally = detectedRallies.value[i]
+    const next = detectedRallies.value[i + 1]
+    if (!next) continue // don't pause after the last rally
+
+    const endTime = rally.endTimestamp
+    if (time >= endTime && time < endTime + 1.0 && endTime > lastTriggeredRallyEnd.value) {
+      lastTriggeredRallyEnd.value = endTime
+      pausedAfterRallyId.value = rally.id
+      nextRallyStart.value = next.startTimestamp
+      startRallyPause()
+      break
+    }
+  }
+})
+
+function startRallyPause() {
+  videoPlayerRef.value?.pause()
+  rallyPauseCountdown.value = 3
+
+  rallyPauseTimer = setInterval(() => {
+    rallyPauseCountdown.value--
+    if (rallyPauseCountdown.value <= 0) {
+      skipToNextRally()
+    }
+  }, 1000)
+}
+
+function skipToNextRally() {
+  clearRallyPause()
+  if (videoPlayerRef.value) {
+    videoPlayerRef.value.seekTo(nextRallyStart.value)
+    videoPlayerRef.value.play()
+  }
+}
+
+function resumeFromRallyPause() {
+  clearRallyPause()
+  videoPlayerRef.value?.play()
+}
+
+function clearRallyPause() {
+  if (rallyPauseTimer) {
+    clearInterval(rallyPauseTimer)
+    rallyPauseTimer = null
+  }
+  rallyPauseCountdown.value = 0
+  pausedAfterRallyId.value = null
+}
+
+// Clean up timer on unmount
+onUnmounted(() => {
+  clearRallyPause()
+})
 
 // Trigger speed recalculation when both conditions are met
 async function triggerDelayedSpeedCalculation() {
@@ -445,8 +564,9 @@ async function loadVideoUrl(videoId: string) {
 
 function handleUploadComplete(response: UploadResponse) {
   uploadedVideo.value = response
-  // Go to court setup first (for ROI filtering) instead of directly to analyzing
-  currentState.value = 'court-setup'
+  analysisMode.value = response.analysisMode
+  // Skip court setup for rally-only mode (no player analysis needs it)
+  currentState.value = response.analysisMode === 'rally_only' ? 'analyzing' : 'court-setup'
   errorMessage.value = ''
 }
 
@@ -499,9 +619,6 @@ async function handleAnalysisComplete(result: AnalysisResult) {
   
   // Fetch the video URL asynchronously (supports Convex storage)
   await loadVideoUrl(result.video_id)
-  
-  // Preload heatmap data in background for instant toggle
-  preloadHeatmapData(result.video_id)
 }
 
 function handleAnalysisError(message: string) {
@@ -541,38 +658,6 @@ function startNewAnalysis() {
 
 function dismissError() {
   errorMessage.value = ''
-}
-
-// Heatmap functions
-async function preloadHeatmapData(videoId: string) {
-  try {
-    isHeatmapLoading.value = true
-    const response = await getHeatmap(videoId)
-    heatmapData.value = response.heatmap
-    console.log('[Heatmap] Preloaded heatmap data for video', videoId)
-  } catch (e) {
-    console.warn('[Heatmap] Failed to preload heatmap:', e)
-    // Don't show error - heatmap is optional
-  } finally {
-    isHeatmapLoading.value = false
-  }
-}
-
-async function loadHeatmapData() {
-  if (!analysisResult.value) return
-  if (heatmapData.value) return // Already loaded
-  
-  try {
-    isHeatmapLoading.value = true
-    const response = await getHeatmap(analysisResult.value.video_id)
-    heatmapData.value = response.heatmap
-  } catch (e) {
-    console.error('[Heatmap] Failed to load heatmap:', e)
-    errorMessage.value = 'Failed to load heatmap data'
-    showHeatmap.value = false // Disable toggle on error
-  } finally {
-    isHeatmapLoading.value = false
-  }
 }
 
 // Handle manual court keypoints from VideoPlayer (12-point system)
@@ -640,12 +725,6 @@ async function handleKeypointsConfirmed(keypoints: ExtendedCourtKeypoints) {
   }
 }
 
-// Watch for heatmap toggle - load data when enabled
-watch(showHeatmap, (enabled) => {
-  if (enabled && !heatmapData.value && analysisResult.value) {
-    loadHeatmapData()
-  }
-})
 
 // Watch for conditions to trigger delayed speed calculation
 // Speed is calculated when BOTH conditions are met:
@@ -693,15 +772,36 @@ async function refreshHealthStatus() {
   await performHealthCheck()
 }
 
+// Persist session state on changes
+watch([currentState, uploadedVideo], ([state, video]) => {
+  saveSessionState(state, video)
+}, { deep: true })
+
 onMounted(async () => {
   // Initial health check
   await performHealthCheck()
-  
+
   // Setup periodic health checks every 10 seconds
   healthCheckInterval = setInterval(performHealthCheck, 10000)
-  
+
   // Setup resize observer after mount
   setupResizeObserver()
+
+  // Handle restored session state after sleep/reload
+  if (currentState.value !== 'upload' && uploadedVideo.value) {
+    if (currentState.value === 'court-setup') {
+      // Court setup state is ephemeral — go to analyzing
+      currentState.value = 'analyzing'
+    }
+    if (currentState.value === 'results') {
+      // Results aren't persisted — the AnalysisProgress component
+      // needs to re-fetch them, so restart from analyzing
+      currentState.value = 'analyzing'
+    }
+  } else if (currentState.value !== 'upload') {
+    // No video data to resume — reset
+    currentState.value = 'upload'
+  }
 })
 
 onUnmounted(() => {
@@ -1172,6 +1272,7 @@ watch(videoSectionRef, () => {
           <AnalysisProgress
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
+            :analysis-mode="analysisMode"
             @complete="handleAnalysisComplete"
             @error="handleAnalysisError"
             @cancel="handleAnalysisCancel"
@@ -1189,7 +1290,7 @@ watch(videoSectionRef, () => {
               New Analysis
             </button>
 
-            <div class="results-header-right">
+            <div v-if="analysisMode !== 'rally_only'" class="results-header-right">
               <!-- Export Video Button -->
               <button
                 class="export-btn"
@@ -1281,17 +1382,13 @@ watch(videoSectionRef, () => {
                       </select>
                     </div>
                     <!-- Court Lines toggle removed - automatic detection disabled, using manual keypoints only -->
-                    <div class="toggle-item" :class="{ loading: isHeatmapLoading }">
+                    <div class="toggle-item">
                       <label class="toggle">
-                        <input type="checkbox" v-model="showHeatmap" :disabled="isHeatmapLoading" />
+                        <input type="checkbox" v-model="showHeatmap" />
                         <span class="toggle-slider heatmap-toggle" />
                       </label>
                       <span>Position Heatmap</span>
-                      <span v-if="isHeatmapLoading" class="loading-indicator">
-                        <svg class="spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-linecap="round" />
-                        </svg>
-                      </span>
+                      <span v-if="selectedRallyId !== null && showHeatmap" class="heatmap-rally-badge">Rally #{{ selectedRallyId }}</span>
                     </div>
                   </div>
                 </div>
@@ -1316,7 +1413,7 @@ watch(videoSectionRef, () => {
                     </div>
                     <div class="toggle-item">
                       <label class="toggle">
-                        <input type="checkbox" v-model="showShuttles" :disabled="!showBoundingBoxes" />
+                        <input type="checkbox" v-model="showShuttleTracking" :disabled="!showBoundingBoxes" />
                         <span class="toggle-slider shuttle-toggle" />
                       </label>
                       <span>Shuttlecock</span>
@@ -1380,6 +1477,25 @@ watch(videoSectionRef, () => {
                     </div>
                   </div>
                 </div>
+
+                <!-- Playback Section -->
+                <div class="settings-section" v-if="detectedRallies.length > 0">
+                  <h4 class="settings-section-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    Playback
+                  </h4>
+                  <div class="settings-grid">
+                    <div class="toggle-item">
+                      <label class="toggle">
+                        <input type="checkbox" v-model="pauseBetweenRallies" />
+                        <span class="toggle-slider rally-pause-toggle" />
+                      </label>
+                      <span>Pause Between Rallies</span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </Transition>
@@ -1390,16 +1506,18 @@ watch(videoSectionRef, () => {
                 <VideoPlayer
                   ref="videoPlayerRef"
                   :video-url="videoUrl"
-                  :skeleton-data="analysisResult.skeleton_data"
-                  :heatmap-data="heatmapData"
-                  :show-skeleton="showSkeleton"
-                  :show-bounding-boxes="showBoundingBoxes"
-                  :show-players="showPlayers"
-                  :show-shuttles="showShuttles"
-                  :show-rackets="showRackets"
-                  :show-pose-overlay="showPoseOverlay"
+                  :skeleton-data="analysisMode !== 'rally_only' ? analysisResult.skeleton_data : []"
+
+                  :show-skeleton="analysisMode !== 'rally_only' && showSkeleton"
+                  :show-bounding-boxes="analysisMode !== 'rally_only' && showBoundingBoxes"
+                  :show-players="analysisMode !== 'rally_only' && showPlayers"
+                  :show-shuttles="analysisMode !== 'rally_only' && showShuttleTracking"
+                  :show-rackets="analysisMode !== 'rally_only' && showRackets"
+                  :show-pose-overlay="analysisMode !== 'rally_only' && showPoseOverlay"
                   :pose-source="poseSource"
-                  :show-heatmap="showHeatmap"
+                  :show-heatmap="analysisMode !== 'rally_only' && showHeatmap"
+                  :heatmap-frame-range="heatmapFrameRange"
+                  :show-shuttle-tracking="analysisMode !== 'rally_only' && showShuttleTracking"
                   @court-keypoints-set="handleCourtKeypointsSet"
                   @keypoints-confirmed="handleKeypointsConfirmed"
                   @time-update="handleTimeUpdate"
@@ -1409,9 +1527,9 @@ watch(videoSectionRef, () => {
                 />
               </div>
 
-              <!-- Mini Court Panel -->
+              <!-- Mini Court Panel (hidden in rally-only mode) -->
               <Transition name="slide-fade">
-                <div v-if="showMiniCourt || isKeypointSelectionActive" class="minicourt-section">
+                <div v-if="analysisMode !== 'rally_only' && (showMiniCourt || isKeypointSelectionActive)" class="minicourt-section">
                   <MiniCourt
                     :court-corners="courtCornersForMiniCourt"
                     :players="videoPlaybackStarted ? currentPlayers : []"
@@ -1420,7 +1538,7 @@ watch(videoSectionRef, () => {
                     :height="videoContainerHeight"
                     :show-grid="true"
                     :show-labels="true"
-                    :show-shuttle="showShuttles"
+                    :show-shuttle="showShuttleTracking"
                     :show-trails="showPlayerTrails"
                     :show-hit-markers="showHitMarkers"
                     :skeleton-data="analysisResult?.skeleton_data"
@@ -1434,16 +1552,26 @@ watch(videoSectionRef, () => {
 
               <!-- Rally Timeline — directly below video -->
               <RallyTimeline
-                v-if="analysisResult?.rallies?.length"
-                :result="analysisResult"
+                v-if="detectedRallies.length > 0 && analysisResult"
+                :rallies="detectedRallies"
+                :duration="analysisResult.duration"
+                :rally-source="rallySource"
                 :current-time="currentVideoTime"
+                :pause-between-rallies="pauseBetweenRallies"
+                :rally-pause-countdown="rallyPauseCountdown"
+                :paused-after-rally-id="pausedAfterRallyId"
+                :rally-speed-stats="rallySpeedStats"
                 @seek-to-time="handleRallySeek"
+                @update:pause-between-rallies="pauseBetweenRallies = $event"
+                @skip-to-next-rally="skipToNextRally"
+                @resume-from-pause="resumeFromRallyPause"
+                @select-rally="handleRallySelect"
               />
             </div>
 
-            <!-- Speed Graph Panel -->
+            <!-- Speed Graph Panel (hidden in rally-only mode) -->
             <Transition name="slide-fade">
-              <div v-if="showSpeedGraph && analysisResult" class="speedgraph-section">
+              <div v-if="analysisMode !== 'rally_only' && showSpeedGraph && analysisResult" class="speedgraph-section">
                 <SpeedGraph
                   :skeleton-data="analysisResult.skeleton_data"
                   :fps="analysisResult.fps"
@@ -1458,9 +1586,9 @@ watch(videoSectionRef, () => {
               </div>
             </Transition>
 
-            <!-- Shot Speed Analysis Panel -->
+            <!-- Shot Speed Analysis Panel (hidden in rally-only mode) -->
             <Transition name="slide-fade">
-              <div v-if="showShotSpeedList && analysisResult" class="shotspeed-section">
+              <div v-if="analysisMode !== 'rally_only' && showShotSpeedList && analysisResult" class="shotspeed-section">
                 <ShotSpeedList
                   :skeleton-data="analysisResult.skeleton_data"
                   :fps="analysisResult.fps"
@@ -1473,7 +1601,7 @@ watch(videoSectionRef, () => {
               </div>
             </Transition>
 
-            <div class="dashboard-section">
+            <div v-if="analysisMode !== 'rally_only'" class="dashboard-section">
               <ResultsDashboard
                 :result="analysisResult"
                 :manual-keypoints-set="manualCourtKeypoints !== null"
@@ -1481,7 +1609,7 @@ watch(videoSectionRef, () => {
               />
             </div>
 
-            <div class="dashboard-section">
+            <div v-if="analysisMode !== 'rally_only'" class="dashboard-section">
               <AdvancedAnalytics
                 :result="analysisResult"
                 :current-frame="currentFrame"
@@ -2510,6 +2638,20 @@ a:hover {
 .toggle input:checked + .toggle-slider.heatmap-toggle {
   background: #f97316;
   border-color: #f97316;
+}
+
+.heatmap-rally-badge {
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  background: rgba(249, 115, 22, 0.2);
+  border: 1px solid rgba(249, 115, 22, 0.5);
+  color: #f97316;
+  font-weight: 600;
+}
+
+.toggle input:checked + .toggle-slider.shuttle-tracking-toggle {
+  background: #00e5ff;
+  border-color: #00e5ff;
 }
 
 .toggle input:checked + .toggle-slider::before {

@@ -182,7 +182,7 @@ export interface SkeletonFrame {
   court_detected?: boolean
   badminton_detections?: BadmintonDetections | null
   pose_classifications?: PoseClassificationResult[] | null  // Custom trained pose/action classifications
-  shuttle_position?: { x: number; y: number } | null
+  shuttle_position?: { x: number; y: number; source?: 'tracknet' | 'yolo' } | null
   shuttle_speed_kmh?: number | null
 }
 
@@ -297,6 +297,7 @@ export interface UploadResponse {
   filename: string
   size: number
   status: string
+  analysisMode: 'rally_only' | 'full'
 }
 
 export interface AnalyzeResponse {
@@ -627,6 +628,22 @@ export interface RallyShot {
   shotType: ShotType | TrainedPoseClass | string
   shuttlePosition: { x: number; y: number } | null
   playerPosition: { x: number; y: number }
+}
+
+// --- Per-Rally Speed Stats ---
+export interface RallyPlayerSpeed {
+  playerId: number
+  avgSpeed: number       // km/h (mean of non-zero frames only)
+  maxSpeed: number       // km/h
+  distanceCovered: number // meters (integrated from per-frame speed)
+  sampleCount: number    // frames with valid speed > 0
+  totalFrames: number    // total frames in rally for this player
+}
+
+export interface RallySpeedStats {
+  rallyId: number
+  players: RallyPlayerSpeed[]
+  reliable: boolean      // true if >= 30% of frames had valid speed data
 }
 
 // --- Shot Placement ---

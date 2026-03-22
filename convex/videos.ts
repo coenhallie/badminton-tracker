@@ -91,6 +91,7 @@ export const createVideo = mutation({
     storageId: v.id("_storage"),
     filename: v.string(),
     size: v.number(),
+    analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
   },
   handler: async (ctx, args) => {
     const videoId = await ctx.db.insert("videos", {
@@ -98,6 +99,7 @@ export const createVideo = mutation({
       filename: args.filename,
       size: args.size,
       status: "uploaded",
+      analysisMode: args.analysisMode ?? "full",
       createdAt: Date.now(),
     })
     
@@ -350,6 +352,9 @@ export const processVideo = action({
       throw new Error("Failed to get video URL")
     }
     
+    // Get analysis mode (default to "full" for backwards compatibility)
+    const analysisMode = video.analysisMode ?? "full"
+
     // Get manual court keypoints if available (for ROI filtering)
     const keypointsData = await ctx.runQuery(api.videos.getManualCourtKeypoints, { videoId })
     
@@ -421,6 +426,7 @@ export const processVideo = action({
           callbackUrl: convexSiteUrl,
           // Pass manual keypoints for court ROI filtering
           manualCourtKeypoints: hasCourtKeypoints ? keypointsData.keypoints : null,
+          analysisMode,
         }),
       })
 
