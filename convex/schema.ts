@@ -10,6 +10,8 @@ export default defineSchema({
     
     // Analysis mode
     analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
+    // Camera position (affects rally detection parameters)
+    cameraAngle: v.optional(v.union(v.literal("overhead"), v.literal("corner"))),
 
     // Processing status
     status: v.union(

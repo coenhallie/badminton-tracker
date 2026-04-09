@@ -255,7 +255,7 @@ export interface PlayersZoneAnalytics {
   [playerId: string]: PlayerZoneAnalytics
 }
 
-// Backend-detected rally (from TrackNet shuttle tracking + gradient analysis)
+// Backend rally detection result (shot-gap algorithm on server-side TrackNet data)
 export interface BackendRally {
   id: number
   start_frame: number
@@ -265,7 +265,6 @@ export interface BackendRally {
   duration_seconds: number
 }
 
-// Rally detection statistics from backend
 export interface RallyStats {
   total_rallies: number
   total_rally_time_s: number
@@ -288,8 +287,9 @@ export interface AnalysisResult {
   court_detection: CourtDetection | null
   shuttle_analytics?: ShuttleAnalytics | null
   player_zone_analytics?: PlayersZoneAnalytics | null
-  rallies?: BackendRally[] | null        // Backend-detected rallies (TrackNet + gradient)
-  rally_stats?: RallyStats | null        // Summary statistics for rallies
+  rallies?: BackendRally[] | null
+  rally_stats?: RallyStats | null
+  camera_angle?: 'overhead' | 'corner'
 }
 
 export interface UploadResponse {
@@ -298,6 +298,7 @@ export interface UploadResponse {
   size: number
   status: string
   analysisMode: 'rally_only' | 'full'
+  cameraAngle?: 'overhead' | 'corner'
 }
 
 export interface AnalyzeResponse {
