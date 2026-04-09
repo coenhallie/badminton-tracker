@@ -17,6 +17,7 @@ const uploadProgress = ref(0)
 const uploadSpeed = ref('')
 const selectedFile = ref<File | null>(null)
 const analysisMode = ref<'rally_only' | 'full'>('full')
+const cameraAngle = ref<'overhead' | 'corner'>('overhead')
 const activeXhr = ref<XMLHttpRequest | null>(null)
 const retryCount = ref(0)
 const MAX_RETRIES = 2
@@ -190,6 +191,7 @@ async function attemptUpload() {
       filename: selectedFile.value.name,
       size: selectedFile.value.size,
       analysisMode: analysisMode.value,
+      cameraAngle: cameraAngle.value,
     })
 
     uploadProgress.value = 100
@@ -201,6 +203,7 @@ async function attemptUpload() {
       size: selectedFile.value.size,
       status: 'uploaded',
       analysisMode: analysisMode.value,
+      cameraAngle: cameraAngle.value,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Upload failed'
@@ -308,6 +311,31 @@ async function attemptUpload() {
           >
             <span class="mode-title">Full Analysis</span>
             <span class="mode-desc">Player tracking, poses, speed + rallies</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Camera Position Selector -->
+      <div v-if="!isUploading" class="mode-selector">
+        <span class="mode-label">Camera Position</span>
+        <div class="mode-options">
+          <button
+            class="mode-option"
+            :class="{ active: cameraAngle === 'overhead' }"
+            @click="cameraAngle = 'overhead'"
+            type="button"
+          >
+            <span class="mode-title">Overhead</span>
+            <span class="mode-desc">Camera centered above the court</span>
+          </button>
+          <button
+            class="mode-option"
+            :class="{ active: cameraAngle === 'corner' }"
+            @click="cameraAngle = 'corner'"
+            type="button"
+          >
+            <span class="mode-title">Corner / Side</span>
+            <span class="mode-desc">Camera at court level from corner or side</span>
           </button>
         </div>
       </div>
