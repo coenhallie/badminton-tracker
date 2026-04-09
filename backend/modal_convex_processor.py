@@ -1028,6 +1028,7 @@ async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
     callback_url = request.get("callbackUrl")
     manual_court_keypoints = request.get("manualCourtKeypoints")
     analysis_mode = request.get("analysisMode", "full")
+    camera_angle = request.get("cameraAngle", "overhead")
 
     if not all([video_id, video_url, callback_url]):
         return {"error": "Missing required fields: videoId, videoUrl, callbackUrl"}
@@ -1039,6 +1040,7 @@ async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
         callback_url=callback_url,
         manual_court_keypoints=manual_court_keypoints,
         analysis_mode=analysis_mode,
+        camera_angle=camera_angle,
     )
 
     return {"status": "accepted", "videoId": video_id}
@@ -1058,6 +1060,7 @@ async def _process_video_worker(
     callback_url: str,
     manual_court_keypoints: Optional[Dict] = None,
     analysis_mode: str = "full",
+    camera_angle: str = "overhead",
 ) -> Dict[str, Any]:
     """
     GPU worker that does the actual video processing.
@@ -1405,14 +1408,25 @@ with_reid: False
             SHUTTLE_MIN_MOVEMENT = max(2, int(0.007 * max(width, height) * _shuttle_fps_scale))
     
             # Court ROI for shuttle filtering — expanded polygon to reject far-off detections (lights, etc.)
+            # Horizontal: 40% expansion (shuttle rarely goes far past sidelines)
+            # Vertical upward: expand to top of frame — shuttle can fly arbitrarily
+            # high during clears/lobs, sometimes even off-screen
             shuttle_court_polygon = None
             if court_polygon is not None:
-                # Expand court polygon by 40% for shuttle — shuttle can fly outside court lines
-                # but never as far as stadium ceiling lights
                 court_center = court_polygon.astype(np.float32).mean(axis=0)
-                SHUTTLE_MARGIN = 1.40  # 40% expansion
-                shuttle_court_polygon = (court_center + (court_polygon.astype(np.float32) - court_center) * SHUTTLE_MARGIN).astype(np.int32)
-                await send_log("Shuttle court ROI filter active (40% expanded court polygon)", "success", "court")
+                expanded = court_polygon.astype(np.float32).copy()
+                for i in range(len(expanded)):
+                    # Horizontal: 40% expansion from center
+                    expanded[i][0] = court_center[0] + (expanded[i][0] - court_center[0]) * 1.40
+                    # Vertical: 40% expansion downward, but extend to y=0 upward
+                    if expanded[i][1] < court_center[1]:
+                        # Top points — extend to top of frame
+                        expanded[i][1] = 0
+                    else:
+                        # Bottom points — 40% expansion
+                        expanded[i][1] = court_center[1] + (expanded[i][1] - court_center[1]) * 1.40
+                shuttle_court_polygon = expanded.astype(np.int32)
+                await send_log("Shuttle court ROI filter active (40% horizontal, full vertical upward)", "success", "court")
     
             def _shuttle_in_court(sx, sy):
                 """Check if shuttle position is within the expanded court ROI."""
@@ -2262,19 +2276,19 @@ with_reid: False
         # don't corrupt the rally gradient analysis.
         rally_shuttle_positions = {}
         if tracknet_available and tracknet_positions:
-            # Filter TrackNet positions through the same court + static logic
-            # used during per-frame processing
             _rally_static_clusters: list[dict] = []
             _rally_prev_pos: dict | None = None
-            # Scale thresholds by fps: per-frame displacement is smaller at
-            # higher frame rates, so thresholds must shrink proportionally.
             _fps_scale = 30.0 / fps
             _RALLY_STATIC_DIST = max(4, int(0.013 * max(width, height) * _fps_scale))
             _RALLY_MIN_MOVE = max(2, int(0.007 * max(width, height) * _fps_scale))
 
-            # Build a tighter court polygon for rally filtering (15% expansion
-            # vs 40% for rendering) — rally accuracy matters more than catching
-            # every in-flight shuttle at the very edges
+            # Corner angles: more aggressive static filtering (no court polygon available)
+            if camera_angle == "corner":
+                _RALLY_STATIC_DIST = int(_RALLY_STATIC_DIST * 1.5)
+                _RALLY_STATIC_COUNT = 2
+            else:
+                _RALLY_STATIC_COUNT = 3
+
             _rally_court_polygon = None
             if court_polygon is not None:
                 _rc = court_polygon.astype(np.float32).mean(axis=0)
@@ -2288,13 +2302,11 @@ with_reid: False
 
                 px, py = pos["x"], pos["y"]
 
-                # Court ROI check (tighter 15% expansion for rally detection)
                 if _rally_court_polygon is not None:
                     if cv2.pointPolygonTest(_rally_court_polygon, (float(px), float(py)), measureDist=False) < 0:
                         rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
                         continue
 
-                # Static cluster check — reject positions that barely move
                 is_static = False
                 for cl in _rally_static_clusters:
                     if math.sqrt((px - cl["x"])**2 + (py - cl["y"])**2) < _RALLY_STATIC_DIST:
@@ -2308,11 +2320,9 @@ with_reid: False
                     rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
                     continue
 
-                # Movement check
                 if _rally_prev_pos is not None:
                     movement = math.sqrt((px - _rally_prev_pos["x"])**2 + (py - _rally_prev_pos["y"])**2)
                     if movement < _RALLY_MIN_MOVE:
-                        # Register as potentially static
                         found = False
                         for cl in _rally_static_clusters:
                             if math.sqrt((px - cl["x"])**2 + (py - cl["y"])**2) < _RALLY_STATIC_DIST * 2:
@@ -2324,8 +2334,7 @@ with_reid: False
                         rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
                         continue
 
-                # Prune unconfirmed clusters periodically
-                _rally_static_clusters = [c for c in _rally_static_clusters if c["count"] >= 3]
+                _rally_static_clusters = [c for c in _rally_static_clusters if c["count"] >= _RALLY_STATIC_COUNT]
 
                 rally_shuttle_positions[fn] = {"x": px, "y": py, "visible": True}
                 _rally_prev_pos = {"x": px, "y": py}
@@ -2337,7 +2346,6 @@ with_reid: False
                 "info", "processing"
             )
         else:
-            # Build from skeleton_frames shuttle_position data
             for sf in skeleton_frames:
                 fn = sf["frame"]
                 sp = sf.get("shuttle_position")
@@ -2346,26 +2354,6 @@ with_reid: False
                 else:
                     rally_shuttle_positions[fn] = {"x": 0, "y": 0, "visible": False}
             await send_log("Running rally detection using YOLO shuttle data...", "info", "processing")
-
-        # Build player wrist/shoulder positions for carried-shuttle detection.
-        # Extract keypoints from skeleton_frames so rally_detection can check
-        # whether the shuttle is being held near a player's hand.
-        player_wrist_data = {}
-        for sf in skeleton_frames:
-            fn = sf["frame"]
-            players_in_frame = []
-            for p in sf.get("players", []):
-                kps = {
-                    k["name"]: (k["x"], k["y"])
-                    for k in p.get("keypoints", [])
-                    if k.get("confidence", 0) >= 0.3 and k.get("x", 0) > 0
-                }
-                player_kp = {}
-                for key in ("left_wrist", "right_wrist", "left_shoulder", "right_shoulder"):
-                    player_kp[key] = kps.get(key)
-                players_in_frame.append(player_kp)
-            if players_in_frame:
-                player_wrist_data[fn] = players_in_frame
 
         if rally_shuttle_positions:
             try:
@@ -2376,7 +2364,7 @@ with_reid: False
                     rally_shuttle_positions,
                     fps=fps,
                     total_frames=total_frames,
-                    player_positions=player_wrist_data if player_wrist_data else None,
+                    camera_angle=camera_angle,
                 )
                 rally_stats = compute_rally_stats(
                     detected_rallies, rally_shuttle_positions, fps
@@ -2409,6 +2397,7 @@ with_reid: False
             "processed_frames": processed_count,
             "video_width": width,
             "video_height": height,
+            "camera_angle": camera_angle,
             "players": players_summary,
             "skeleton_data": skeleton_frames,
             "shuttle": None,
