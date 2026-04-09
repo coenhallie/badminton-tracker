@@ -28,7 +28,8 @@ import type {
   RecoveryEvent,
   ReactionEvent,
   MovementEfficiency,
-  BackendRally,
+  RallySpeedStats,
+  RallyPlayerSpeed,
 } from '@/types/analysis'
 import { COURT_DIMENSIONS } from '@/types/analysis'
 import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
@@ -52,11 +53,10 @@ function getCenter(player: FramePlayer): { x: number; y: number } {
   return player.center || { x: 0, y: 0 }
 }
 
-/** Hitting pose types from backend's classify_pose() */
+/** High-confidence hitting poses — only poses that unambiguously indicate a shot */
 const HITTING_POSES = new Set([
-  'smash', 'overhead', 'serving', 'lunge', 'forehand', 'backhand',
-  // Also accept trained model class names
-  'serve', 'offense', 'lift',
+  'smash', 'overhead', 'serving',
+  'serve', 'offense',
 ])
 
 /** Get the pose type string from a player, reading from player.pose (the ONLY source) */
@@ -74,7 +74,8 @@ function getPlayerPoseType(player: FramePlayer): string | null {
 export function useAdvancedAnalytics(
   analysisResult: Ref<AnalysisResult | null>,
   currentFrame: Ref<number>,
-  courtKeypoints?: Ref<number[][] | null>
+  courtKeypoints?: Ref<number[][] | null>,
+  cameraAngle?: Ref<'overhead' | 'corner'>
 ) {
   const isComputing = ref(false)
 
@@ -104,79 +105,143 @@ export function useAdvancedAnalytics(
   // =========================================================================
 
   /**
-   * Detect shots using 3 methods in cascade:
-   * 1. Shuttle trajectory direction changes (when shuttle data exists)
-   * 2. Per-player pose detection (player.pose — always available)
-   * 3. Player deceleration peaks (proven method from ShotSpeedList)
+   * Detect shots from shuttle trajectory direction changes.
+   *
+   * A shot occurs when the shuttle reverses direction — this is the only
+   * physically grounded signal. Falls back to pose detection only when
+   * shuttle data is too sparse.
+   *
+   * Minimum gap between shots: 0.6s (fastest realistic rally exchange).
    */
   function detectAllShots(frames: SkeletonFrame[], fps: number): RallyShot[] {
-    const MIN_GAP_FRAMES = Math.max(3, Math.floor(fps * 0.25))
+    const isCorner = cameraAngle?.value === 'corner'
+    const MIN_GAP_S = isCorner ? 0.8 : 0.6
+    const MIN_GAP_FRAMES = Math.max(3, Math.floor(fps * MIN_GAP_S))
 
-    // Build frame lookup map for O(1) access by frame number
     const frameMap = new Map<number, SkeletonFrame>()
     for (const f of frames) frameMap.set(f.frame, f)
 
-    // --- Method 1: Shuttle trajectory direction changes ---
-    const shots: RallyShot[] = []
-    const shuttlePositions: { frame: number; ts: number; x: number; y: number }[] = []
+    // --- Primary: shuttle direction changes ---
+    const shuttleShots = detectShotsFromShuttle(frames, frameMap, MIN_GAP_FRAMES)
+
+    if (shuttleShots.length >= 4) {
+      return shuttleShots
+    }
+
+    // --- Fallback: pose detection (only when shuttle data insufficient) ---
+    const poseShots = detectShotsFromPose(frames, fps, MIN_GAP_FRAMES)
+
+    // Merge shuttle + pose, preferring shuttle-detected shots
+    return mergeShots([...shuttleShots, ...poseShots], MIN_GAP_FRAMES)
+  }
+
+  /**
+   * Detect shots from shuttle trajectory direction reversals.
+   * A negative dot product between consecutive velocity vectors = direction change.
+   */
+  function detectShotsFromShuttle(
+    frames: SkeletonFrame[],
+    frameMap: Map<number, SkeletonFrame>,
+    minGapFrames: number
+  ): RallyShot[] {
+    const isCorner = cameraAngle?.value === 'corner'
+    const rawPositions: { frame: number; ts: number; x: number; y: number }[] = []
     for (const f of frames) {
       if (f.shuttle_position?.x != null && f.shuttle_position?.y != null) {
-        shuttlePositions.push({
-          frame: f.frame,
-          ts: f.timestamp,
-          x: f.shuttle_position.x,
-          y: f.shuttle_position.y,
-        })
+        rawPositions.push({ frame: f.frame, ts: f.timestamp, x: f.shuttle_position.x, y: f.shuttle_position.y })
       }
     }
 
-    if (shuttlePositions.length >= 5) {
-      let lastShotFrame = -Infinity
-      for (let i = 2; i < shuttlePositions.length; i++) {
-        const p0 = shuttlePositions[i - 2]!
-        const p1 = shuttlePositions[i - 1]!
-        const p2 = shuttlePositions[i]!
-        const vx1 = p1.x - p0.x
-        const vy1 = p1.y - p0.y
-        const vx2 = p2.x - p1.x
-        const vy2 = p2.y - p1.y
-        const dot = vx1 * vx2 + vy1 * vy2
+    if (rawPositions.length < 5) return []
 
-        if (dot < 0 && (p1.frame - lastShotFrame) >= MIN_GAP_FRAMES) {
-          const skFrame = frameMap.get(p1.frame)
-          if (skFrame && skFrame.players.length > 0) {
-            // Find closest player to shuttle
-            let closest = skFrame.players[0]!
-            let minD = dist(getCenter(closest), p1)
-            for (const pl of skFrame.players) {
-              const d = dist(getCenter(pl), p1)
-              if (d < minD) { minD = d; closest = pl }
-            }
+    // Filter out single-frame outliers: if a position jumps far from both
+    // its predecessor and successor, it's a TrackNet glitch, not the shuttle.
+    const OUTLIER_DIST_SQ = 400 * 400
+    const positions: typeof rawPositions = [rawPositions[0]!]
+    for (let i = 1; i < rawPositions.length - 1; i++) {
+      const prev = rawPositions[i - 1]!
+      const curr = rawPositions[i]!
+      const next = rawPositions[i + 1]!
+      const dPrev = (curr.x - prev.x) ** 2 + (curr.y - prev.y) ** 2
+      const dNext = (curr.x - next.x) ** 2 + (curr.y - next.y) ** 2
+      if (dPrev > OUTLIER_DIST_SQ && dNext > OUTLIER_DIST_SQ) continue
+      positions.push(curr)
+    }
+    positions.push(rawPositions[rawPositions.length - 1]!)
 
-            const shotType = getPlayerPoseType(closest) || 'unknown'
+    const shots: RallyShot[] = []
+    let lastShotFrame = -Infinity
 
-            shots.push({
-              frame: p1.frame,
-              timestamp: p1.ts,
-              playerId: closest.player_id,
-              shotType,
-              shuttlePosition: { x: p1.x, y: p1.y },
-              playerPosition: getCenter(closest),
-            })
-            lastShotFrame = p1.frame
-          }
-        }
+    // Max time gap between consecutive positions for velocity to be meaningful.
+    // Positions spanning idle periods (e.g., 3s gap between rallies) produce
+    // meaningless velocity vectors that create false direction reversals.
+    const MAX_GAP_S = 2.5
+
+    for (let i = 2; i < positions.length; i++) {
+      const p0 = positions[i - 2]!
+      const p1 = positions[i - 1]!
+      const p2 = positions[i]!
+
+      // Skip if positions are too far apart in time — velocity vectors are meaningless
+      if ((p1.ts - p0.ts) > MAX_GAP_S || (p2.ts - p1.ts) > MAX_GAP_S) continue
+
+      const vx1 = p1.x - p0.x, vy1 = p1.y - p0.y
+      const vx2 = p2.x - p1.x, vy2 = p2.y - p1.y
+
+      // Skip if both velocity vectors are too small — jitter on a
+      // nearly-stationary shuttle, not a real shot. Real shots produce
+      // at least one large velocity vector (50+ px displacement).
+      const speed1sq = vx1 * vx1 + vy1 * vy1
+      const speed2sq = vx2 * vx2 + vy2 * vy2
+      const MIN_SPEED_SQ = isCorner ? 50 * 50 : 30 * 30
+      if (speed1sq < MIN_SPEED_SQ && speed2sq < MIN_SPEED_SQ) continue
+
+      const dot = vx1 * vx2 + vy1 * vy2
+
+      // Corner: require >~105deg reversal to reject jitter wobbles
+      const dotThreshold = isCorner
+        ? -0.25 * Math.sqrt(speed1sq * speed2sq)
+        : 0
+      if (dot >= dotThreshold || (p1.frame - lastShotFrame) < minGapFrames) continue
+
+      const skFrame = frameMap.get(p1.frame)
+      if (!skFrame || skFrame.players.length === 0) continue
+
+      // Assign to closest player
+      let closest = skFrame.players[0]!
+      let minD = dist(getCenter(closest), p1)
+      for (const pl of skFrame.players) {
+        const d = dist(getCenter(pl), p1)
+        if (d < minD) { minD = d; closest = pl }
       }
+
+      shots.push({
+        frame: p1.frame,
+        timestamp: p1.ts,
+        playerId: closest.player_id,
+        shotType: getPlayerPoseType(closest) || 'unknown',
+        shuttlePosition: { x: p1.x, y: p1.y },
+        playerPosition: getCenter(closest),
+      })
+      lastShotFrame = p1.frame
     }
 
-    if (shots.length >= 6) {
-      shots.sort((a, b) => a.frame - b.frame)
-      return shots
-    }
+    return shots
+  }
 
-    // --- Method 2: Per-player pose detection ---
-    const poseShots: RallyShot[] = []
-    const lastPoseShotFrame = new Map<number, number>()
+  /**
+   * Fallback: detect shots from hitting poses.
+   * Only uses high-confidence, unambiguous hitting poses (smash, overhead, serving).
+   * Requires confidence >= 0.65 and minimum 0.8s gap per player.
+   */
+  function detectShotsFromPose(
+    frames: SkeletonFrame[],
+    fps: number,
+    minGapFrames: number
+  ): RallyShot[] {
+    const perPlayerGap = Math.max(minGapFrames, Math.floor(fps * 0.8))
+    const lastShotFrame = new Map<number, number>()
+    const shots: RallyShot[] = []
 
     for (const f of frames) {
       for (const player of f.players) {
@@ -184,12 +249,12 @@ export function useAdvancedAnalytics(
         if (!poseType || !HITTING_POSES.has(poseType)) continue
 
         const pose = (player as FramePlayer & { pose?: { confidence?: number } }).pose
-        if ((pose?.confidence ?? 0) < 0.5) continue
+        if ((pose?.confidence ?? 0) < 0.65) continue
 
-        const lastFrame = lastPoseShotFrame.get(player.player_id) ?? -Infinity
-        if ((f.frame - lastFrame) < Math.floor(fps * 0.5)) continue
+        const last = lastShotFrame.get(player.player_id) ?? -Infinity
+        if ((f.frame - last) < perPlayerGap) continue
 
-        poseShots.push({
+        shots.push({
           frame: f.frame,
           timestamp: f.timestamp,
           playerId: player.player_id,
@@ -197,88 +262,11 @@ export function useAdvancedAnalytics(
           shuttlePosition: f.shuttle_position || null,
           playerPosition: getCenter(player),
         })
-        lastPoseShotFrame.set(player.player_id, f.frame)
+        lastShotFrame.set(player.player_id, f.frame)
       }
     }
 
-    if (poseShots.length >= 6) {
-      const merged = mergeShots([...shots, ...poseShots], MIN_GAP_FRAMES)
-      if (merged.length >= 6) return merged
-    }
-
-    // --- Method 3: Deceleration-based detection ---
-    const decelShots = detectShotsFromDeceleration(frames, fps, frameMap)
-
-    const all = mergeShots([...shots, ...poseShots, ...decelShots], MIN_GAP_FRAMES)
-    return all
-  }
-
-  function detectShotsFromDeceleration(frames: SkeletonFrame[], fps: number, frameMap: Map<number, SkeletonFrame>): RallyShot[] {
-    if (frames.length < 10) return []
-
-    const playerTimelines = new Map<number, {
-      frame: number; timestamp: number; x: number; y: number; speed: number
-    }[]>()
-
-    for (const f of frames) {
-      for (const player of f.players) {
-        if (!player.center) continue
-        let tl = playerTimelines.get(player.player_id)
-        if (!tl) { tl = []; playerTimelines.set(player.player_id, tl) }
-        tl.push({
-          frame: f.frame,
-          timestamp: f.timestamp,
-          x: player.center.x,
-          y: player.center.y,
-          speed: player.current_speed ?? 0,
-        })
-      }
-    }
-
-    const result: RallyShot[] = []
-    const MIN_SHOT_GAP = 0.6
-    const DECEL_THRESHOLD = 2.0
-    const MIN_SPEED_BEFORE = 3.0
-
-    for (const [playerId, timeline] of playerTimelines) {
-      if (timeline.length < 5) continue
-
-      const smooth: number[] = []
-      for (let i = 0; i < timeline.length; i++) {
-        let sum = 0, cnt = 0
-        for (let j = Math.max(0, i - 2); j <= Math.min(timeline.length - 1, i + 2); j++) {
-          sum += timeline[j]!.speed; cnt++
-        }
-        smooth.push(sum / cnt)
-      }
-
-      let lastShotTs = -Infinity
-      for (let i = 3; i < smooth.length - 1; i++) {
-        const prev3 = (smooth[i - 3]! + smooth[i - 2]! + smooth[i - 1]!) / 3
-        const curr = smooth[i]!
-        const decel = prev3 - curr
-        const entry = timeline[i]!
-
-        if (decel > DECEL_THRESHOLD && prev3 > MIN_SPEED_BEFORE && entry.timestamp - lastShotTs > MIN_SHOT_GAP) {
-          const skFrame = frameMap.get(entry.frame)
-          const player = skFrame?.players.find(p => p.player_id === playerId)
-          const poseType = player ? (getPlayerPoseType(player) || 'unknown') : 'unknown'
-
-          result.push({
-            frame: entry.frame,
-            timestamp: entry.timestamp,
-            playerId,
-            shotType: poseType,
-            shuttlePosition: skFrame?.shuttle_position || null,
-            playerPosition: { x: entry.x, y: entry.y },
-          })
-          lastShotTs = entry.timestamp
-        }
-      }
-    }
-
-    result.sort((a, b) => a.frame - b.frame)
-    return result
+    return shots
   }
 
   function mergeShots(shots: RallyShot[], minGap: number): RallyShot[] {
@@ -287,7 +275,8 @@ export function useAdvancedAnalytics(
     for (const shot of shots) {
       const last = merged[merged.length - 1]
       if (last && (shot.frame - last.frame) < minGap) {
-        if (last.shotType === 'unknown' && shot.shotType !== 'unknown') {
+        // Prefer shuttle-detected shots over pose-detected
+        if (last.shuttlePosition === null && shot.shuttlePosition !== null) {
           merged[merged.length - 1] = shot
         }
         continue
@@ -301,46 +290,34 @@ export function useAdvancedAnalytics(
   // 2. RALLY SEGMENTATION
   // =========================================================================
 
-  /**
-   * Prefer backend-detected rallies (TrackNet shuttle tracking + gradient analysis)
-   * over client-side shot-gap heuristic. Backend rallies are more accurate because
-   * they use continuous shuttle trajectory data rather than sparse shot detection.
-   */
+  /** Detect rallies from shuttle direction changes (shot-gap heuristic). */
   const rallies = computed<Rally[]>(() => {
     const result = analysisResult.value
     if (!result?.skeleton_data || result.skeleton_data.length < 10) return []
 
     const frames = result.skeleton_data
     const fps = result.fps || 30
+    const shots = detectAllShots(frames, fps)
+    const isCorner = cameraAngle?.value === 'corner'
+    const MIN_SHOTS = isCorner ? 3 : 2
+    if (shots.length < MIN_SHOTS) return []
 
-    // --- Try backend rallies first (from TrackNet + gradient detection) ---
-    const backendRallies = result.rallies
-    if (backendRallies && backendRallies.length > 0) {
-      const shots = detectAllShots(frames, fps)
-      return backendRallies.map((br: BackendRally) => {
-        // Assign shots to this rally based on timestamp overlap
-        const rallyShots = shots.filter(
-          s => s.timestamp >= br.start_timestamp && s.timestamp <= br.end_timestamp
-        )
-        return {
-          id: br.id,
-          startFrame: br.start_frame,
-          endFrame: br.end_frame,
-          startTimestamp: br.start_timestamp,
-          endTimestamp: br.end_timestamp,
-          durationSeconds: br.duration_seconds,
-          shotCount: rallyShots.length,
-          shots: rallyShots,
-          winner: null,
-        } as Rally
-      })
+    const RALLY_GAP_SECONDS = isCorner ? 4.0 : 3.1
+
+    // Check if a rally candidate is real gameplay (not a replay/close-up).
+    // Real gameplay from the standard court camera shows 2 players in 50%+
+    // of frames. Replays use close-up angles showing 0-1 players.
+    function isRealGameplay(startTs: number, endTs: number): boolean {
+      let total = 0
+      let twoPlayers = 0
+      for (const f of frames) {
+        if (f.timestamp < startTs || f.timestamp > endTs) continue
+        total++
+        if (f.players.length >= 2) twoPlayers++
+      }
+      return total === 0 || (twoPlayers / total) >= 0.50
     }
 
-    // --- Fallback: client-side shot-gap heuristic ---
-    const shots = detectAllShots(frames, fps)
-    if (shots.length < 2) return []
-
-    const RALLY_GAP_SECONDS = 3.0
     const detected: Rally[] = []
     let rallyStart = 0
 
@@ -348,26 +325,142 @@ export function useAdvancedAnalytics(
       const gap = shots[i]!.timestamp - shots[i - 1]!.timestamp
       if (gap > RALLY_GAP_SECONDS || i === shots.length - 1) {
         const rallyShots = shots.slice(rallyStart, i === shots.length - 1 ? i + 1 : i)
-        if (rallyShots.length >= 2) {
+        const MIN_RALLY_DURATION_S = isCorner ? 3.0 : 2.0
+        if (rallyShots.length >= MIN_SHOTS) {
           const first = rallyShots[0]!
           const last = rallyShots[rallyShots.length - 1]!
-          detected.push({
-            id: detected.length + 1,
-            startFrame: first.frame,
-            endFrame: last.frame,
-            startTimestamp: first.timestamp,
-            endTimestamp: last.timestamp,
-            durationSeconds: last.timestamp - first.timestamp,
-            shotCount: rallyShots.length,
-            shots: rallyShots,
-            winner: null,
-          })
+          if ((last.timestamp - first.timestamp) >= MIN_RALLY_DURATION_S && isRealGameplay(first.timestamp, last.timestamp)) {
+            detected.push({
+              id: detected.length + 1,
+              startFrame: first.frame,
+              endFrame: last.frame,
+              startTimestamp: first.timestamp,
+              endTimestamp: last.timestamp,
+              durationSeconds: last.timestamp - first.timestamp,
+              shotCount: rallyShots.length,
+              shots: rallyShots,
+              winner: null,
+            })
+          }
         }
         rallyStart = i
       }
     }
 
     return detected
+  })
+
+  const backendRallies = computed(() => {
+    const result = analysisResult.value
+    if (!result?.rallies || result.rallies.length === 0) return []
+    return result.rallies.map(r => ({
+      startTimestamp: r.start_timestamp,
+      endTimestamp: r.end_timestamp,
+      durationSeconds: r.duration_seconds,
+    }))
+  })
+
+  const rallySource = computed<'client' | 'backend' | 'both' | null>(() => {
+    const hasClient = rallies.value.length > 0
+    const hasBackend = backendRallies.value.length > 0
+    if (hasClient && hasBackend) return 'both'
+    if (hasClient) return 'client'
+    if (hasBackend) return 'backend'
+    return null
+  })
+
+  // =========================================================================
+  // 2b. PER-RALLY SPEED STATS
+  // =========================================================================
+
+  /**
+   * Compute per-rally, per-player speed metrics from current_speed data.
+   *
+   * current_speed is already in km/h, already filtered by the backend's 5-stage
+   * pipeline (pixel-jump, distance-jump, hard limit, median filter, tracking
+   * validation). We aggregate only non-zero values (zeros = filtered/invalid).
+   *
+   * Distance is integrated per frame: distance_m += (speed_kmh / 3.6) * dt
+   * where dt = 1/fps for consecutive frames.
+   *
+   * Reliability gate: stats are marked reliable only when >= 30% of the rally's
+   * frames have non-zero speed data for a player. Below that, tracking was too
+   * sparse to trust the aggregates.
+   */
+  const rallySpeedStats = computed<RallySpeedStats[]>(() => {
+    const result = analysisResult.value
+    if (!result?.skeleton_data || result.skeleton_data.length === 0) return []
+
+    const r = rallies.value
+    if (r.length === 0) return []
+
+    const frames = result.skeleton_data
+    const fps = result.fps || 30
+    const dt = 1 / fps
+
+    // Build frame index for O(1) lookup
+    const frameMap = new Map<number, SkeletonFrame>()
+    for (const f of frames) frameMap.set(f.frame, f)
+
+    const MIN_RELIABLE_RATIO = 0.3
+
+    return r.map(rally => {
+      // Collect per-player speed samples within this rally's frame range
+      const playerData = new Map<number, { speeds: number[]; totalFrames: number }>()
+
+      for (let frameNum = rally.startFrame; frameNum <= rally.endFrame; frameNum++) {
+        const f = frameMap.get(frameNum)
+        if (!f) continue
+
+        for (const player of f.players) {
+          let data = playerData.get(player.player_id)
+          if (!data) {
+            data = { speeds: [], totalFrames: 0 }
+            playerData.set(player.player_id, data)
+          }
+          data.totalFrames++
+          if (player.current_speed > 0) {
+            data.speeds.push(player.current_speed)
+          }
+        }
+      }
+
+      const players: RallyPlayerSpeed[] = []
+      let anyReliable = false
+
+      for (const [playerId, data] of playerData) {
+        const { speeds, totalFrames } = data
+        if (speeds.length === 0 || totalFrames === 0) continue
+
+        const sampleRatio = speeds.length / totalFrames
+        const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length
+        const maxSpeed = Math.max(...speeds)
+        // Integrate distance: each non-zero speed sample covers dt seconds
+        const distanceCovered = speeds.reduce((acc, s) => acc + (s / 3.6) * dt, 0)
+
+        if (sampleRatio >= MIN_RELIABLE_RATIO) {
+          anyReliable = true
+        }
+
+        players.push({
+          playerId,
+          avgSpeed,
+          maxSpeed,
+          distanceCovered,
+          sampleCount: speeds.length,
+          totalFrames,
+        })
+      }
+
+      // Sort by player ID for consistent ordering
+      players.sort((a, b) => a.playerId - b.playerId)
+
+      return {
+        rallyId: rally.id,
+        players,
+        reliable: anyReliable,
+      }
+    })
   })
 
   // =========================================================================
@@ -873,6 +966,9 @@ export function useAdvancedAnalytics(
 
   return {
     rallies,
+    backendRallies,
+    rallySource,
+    rallySpeedStats,
     rallyLengthDistribution,
     currentRally,
     shotPlacements,
