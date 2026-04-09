@@ -8,6 +8,7 @@ const props = defineProps<{
   result: AnalysisResult
   currentFrame: number
   courtKeypoints?: number[][] | null
+  cameraAngle?: 'overhead' | 'corner'
 }>()
 
 const emit = defineEmits<{
@@ -25,7 +26,8 @@ const {
 } = useAdvancedAnalytics(
   computed(() => props.result),
   computed(() => props.currentFrame),
-  computed(() => props.courtKeypoints ?? null)
+  computed(() => props.courtKeypoints ?? null),
+  computed(() => props.cameraAngle ?? 'overhead'),
 )
 
 type Tab = 'rallies' | 'shots' | 'movement'
@@ -45,9 +47,6 @@ const selectedRally = computed(() => {
   return rallies.value.find(r => r.id === selectedRallyId.value) ?? null
 })
 
-// Backend rally stats (from TrackNet + gradient detection)
-const backendRallyStats = computed(() => props.result.rally_stats ?? null)
-const hasBackendRallies = computed(() => (props.result.rallies?.length ?? 0) > 0)
 
 function selectRally(rally: Rally) {
   if (selectedRallyId.value === rally.id) {
@@ -161,12 +160,8 @@ function getQualityColor(quality: string): string {
               <span class="aa-stat-value">{{ rallies.length }}</span>
               <span class="aa-stat-label">Total Rallies</span>
             </div>
-            <div class="aa-stat-card" v-if="backendRallyStats">
-              <span class="aa-stat-value">{{ backendRallyStats.rally_percentage }}%</span>
-              <span class="aa-stat-label">Active Play</span>
-            </div>
             <div class="aa-stat-card">
-              <span class="aa-stat-value">{{ (backendRallyStats?.avg_rally_duration_s ?? rallyLengthDistribution.avgDuration).toFixed(1) }}s</span>
+              <span class="aa-stat-value">{{ rallyLengthDistribution.avgDuration.toFixed(1) }}s</span>
               <span class="aa-stat-label">Avg Rally Duration</span>
             </div>
             <div class="aa-stat-card">
@@ -178,9 +173,6 @@ function getQualityColor(quality: string): string {
               <span class="aa-stat-label">Longest Rally</span>
             </div>
           </div>
-          <p v-if="hasBackendRallies" class="detection-source">
-            Detected via shuttle trajectory tracking
-          </p>
         </section>
 
         <!-- Rally Timeline -->

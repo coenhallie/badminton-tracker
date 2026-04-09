@@ -54,6 +54,7 @@ const restored = loadSessionState()
 const currentState = ref<AppState>(restored.state)
 const uploadedVideo = ref<UploadResponse | null>(restored.video)
 const analysisMode = ref<'rally_only' | 'full'>(restored.video?.analysisMode ?? 'full')
+const cameraAngle = ref<'overhead' | 'corner'>(restored.video?.cameraAngle ?? 'overhead')
 const analysisResult = ref<AnalysisResult | null>(null)
 const errorMessage = ref('')
 const isApiConnected = ref(false)
@@ -127,9 +128,11 @@ let rallyPauseTimer: ReturnType<typeof setInterval> | null = null
 const lastTriggeredRallyEnd = ref(-1)
 
 // Client-side rally detection (same source as AdvancedAnalytics)
-const { rallies: detectedRallies, rallySource, rallySpeedStats } = useAdvancedAnalytics(
+const { rallies: detectedRallies, backendRallies, rallySource, rallySpeedStats } = useAdvancedAnalytics(
   computed(() => analysisResult.value),
   currentFrame,
+  undefined,
+  cameraAngle,
 )
 
 // Selected rally for per-rally heatmap filtering
@@ -565,6 +568,7 @@ async function loadVideoUrl(videoId: string) {
 function handleUploadComplete(response: UploadResponse) {
   uploadedVideo.value = response
   analysisMode.value = response.analysisMode
+  cameraAngle.value = response.cameraAngle ?? 'overhead'
   // Skip court setup for rally-only mode (no player analysis needs it)
   currentState.value = response.analysisMode === 'rally_only' ? 'analyzing' : 'court-setup'
   errorMessage.value = ''
@@ -612,6 +616,9 @@ function handleCourtSetupError(message: string) {
 
 async function handleAnalysisComplete(result: AnalysisResult) {
   analysisResult.value = result
+  if (result.camera_angle) {
+    cameraAngle.value = result.camera_angle
+  }
   currentState.value = 'results'
   
   // Set the current video ID for keypoints operations
@@ -832,7 +839,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.6
+            alpha v1.7
           </button>
         </div>
 
@@ -882,6 +889,24 @@ watch(videoSectionRef, () => {
           <div class="changelog-content">
             <div class="changelog-entry">
               <div class="changelog-version">
+                <span class="version-tag">v1.7-alpha</span>
+                <span class="version-date">March 26, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - Replaced gradient-based rally detection with shot-gap approach using shuttle direction reversals</li>
+                <li> - Rally detection now runs client-side with auto-pause between rallies and hover tooltips</li>
+                <li> - Improved shot detection: removed unreliable deceleration method, tightened pose confidence thresholds</li>
+                <li> - Upgraded pose model from YOLOv26n to YOLOv26m for better far-player accuracy</li>
+                <li> - Shuttle court ROI now extends to top of frame for clears and lobs</li>
+                <li> - TrackNet streaming frame extraction to avoid OOM on large videos</li>
+                <li> - NaN guards on homography transforms and hit marker cleanup on backward seek</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
+            <div class="changelog-entry">
+              <div class="changelog-version">
                 <span class="version-tag">v1.6-alpha</span>
                 <span class="version-date">March 10, 2026</span>
               </div>
@@ -890,7 +915,7 @@ watch(videoSectionRef, () => {
                 <li> - Rally timeline visualization showing detected rallies with click-to-seek navigation</li>
                 <li> - Gradient-based rally segmentation from shuttle trajectory data</li>
                 <li> - Toggle to show/hide player skeleton overlay and pose estimation</li>
-                <li> - Backend-detected rallies preferred over client-side heuristic for improved accuracy</li>
+                <li> - Rally detection from shuttle direction changes (shot-gap heuristic)</li>
               </ul>
               <p class="changelog-note">
                 <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
@@ -1518,6 +1543,7 @@ watch(videoSectionRef, () => {
                   :show-heatmap="analysisMode !== 'rally_only' && showHeatmap"
                   :heatmap-frame-range="heatmapFrameRange"
                   :show-shuttle-tracking="analysisMode !== 'rally_only' && showShuttleTracking"
+                  :court-keypoints="courtCornersForMiniCourt"
                   @court-keypoints-set="handleCourtKeypointsSet"
                   @keypoints-confirmed="handleKeypointsConfirmed"
                   @time-update="handleTimeUpdate"
@@ -1552,8 +1578,9 @@ watch(videoSectionRef, () => {
 
               <!-- Rally Timeline — directly below video -->
               <RallyTimeline
-                v-if="detectedRallies.length > 0 && analysisResult"
+                v-if="(detectedRallies.length > 0 || backendRallies.length > 0) && analysisResult"
                 :rallies="detectedRallies"
+                :backend-rallies="backendRallies"
                 :duration="analysisResult.duration"
                 :rally-source="rallySource"
                 :current-time="currentVideoTime"
@@ -1614,6 +1641,7 @@ watch(videoSectionRef, () => {
                 :result="analysisResult"
                 :current-frame="currentFrame"
                 :court-keypoints="courtCornersForMiniCourt"
+                :camera-angle="cameraAngle"
                 @seek-to-time="handleRallySeek"
               />
             </div>
