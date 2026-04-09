@@ -92,6 +92,7 @@ export const createVideo = mutation({
     filename: v.string(),
     size: v.number(),
     analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
+    cameraAngle: v.optional(v.union(v.literal("overhead"), v.literal("corner"))),
   },
   handler: async (ctx, args) => {
     const videoId = await ctx.db.insert("videos", {
@@ -100,6 +101,7 @@ export const createVideo = mutation({
       size: args.size,
       status: "uploaded",
       analysisMode: args.analysisMode ?? "full",
+      cameraAngle: args.cameraAngle ?? "overhead",
       createdAt: Date.now(),
     })
     
@@ -354,6 +356,7 @@ export const processVideo = action({
     
     // Get analysis mode (default to "full" for backwards compatibility)
     const analysisMode = video.analysisMode ?? "full"
+    const cameraAngle = video.cameraAngle ?? "overhead"
 
     // Get manual court keypoints if available (for ROI filtering)
     const keypointsData = await ctx.runQuery(api.videos.getManualCourtKeypoints, { videoId })
@@ -427,6 +430,7 @@ export const processVideo = action({
           // Pass manual keypoints for court ROI filtering
           manualCourtKeypoints: hasCourtKeypoints ? keypointsData.keypoints : null,
           analysisMode,
+          cameraAngle,
         }),
       })
 
