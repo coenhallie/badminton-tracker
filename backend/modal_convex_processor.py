@@ -1223,19 +1223,40 @@ async def _process_video_worker(
                 detection_model = YOLO("yolo11n.pt")
                 await send_log("Using COCO model (custom model not found)", "info", "model")
 
-            # Create custom BoT-SORT tracker config optimized for badminton (2 players)
-            # Key changes from defaults:
-            # - track_buffer: 90 (3 seconds at 30fps) instead of 30 (1 second)
-            #   → Far player's track survives longer occlusions/low-confidence gaps
-            # - track_high_thresh: 0.3 instead of 0.5
-            #   → Far player (small, low-confidence) gets tracked more consistently
-            # - new_track_thresh: 0.4 instead of 0.6
-            #   → Faster track creation when far player reappears
-            # - match_thresh: 0.9 instead of 0.8
-            #   → More lenient matching to prevent track fragmentation
-            tracker_config_path = Path("/cache/botsort_badminton.yaml")
-            tracker_config_path.parent.mkdir(parents=True, exist_ok=True)
-            tracker_config_content = """# BoT-SORT tracker config optimized for badminton (2 players)
+            # =========================================================
+            # TRACKER SETUP — BoT-SORT (built-in) or OC-SORT (external)
+            # =========================================================
+            ocsort_tracker = None  # Only set when tracker_type == "ocsort"
+            tracker_config_path = None  # Only set when tracker_type == "botsort"
+
+            if tracker_type == "ocsort":
+                import supervision as sv
+                from trackers import OCSORTTracker
+
+                ocsort_tracker = OCSORTTracker(
+                    lost_track_buffer=90,               # 3s at 30fps — match BoT-SORT's track_buffer
+                    frame_rate=float(fps),               # scale buffer to actual FPS
+                    minimum_consecutive_frames=2,        # fast track confirmation for 2 players
+                    minimum_iou_threshold=0.3,           # lenient for far-player small bboxes
+                    high_conf_det_threshold=0.3,         # low threshold — far player is often 0.2-0.4
+                    direction_consistency_weight=0.2,    # OCM: velocity direction matching
+                    delta_t=3,                           # past frames for velocity estimation
+                )
+                await send_log(f"OC-SORT tracker initialized (lost_track_buffer=90, frame_rate={fps})", "info", "model")
+            else:
+                # Create custom BoT-SORT tracker config optimized for badminton (2 players)
+                # Key changes from defaults:
+                # - track_buffer: 90 (3 seconds at 30fps) instead of 30 (1 second)
+                #   → Far player's track survives longer occlusions/low-confidence gaps
+                # - track_high_thresh: 0.3 instead of 0.5
+                #   → Far player (small, low-confidence) gets tracked more consistently
+                # - new_track_thresh: 0.4 instead of 0.6
+                #   → Faster track creation when far player reappears
+                # - match_thresh: 0.9 instead of 0.8
+                #   → More lenient matching to prevent track fragmentation
+                tracker_config_path = Path("/cache/botsort_badminton.yaml")
+                tracker_config_path.parent.mkdir(parents=True, exist_ok=True)
+                tracker_config_content = """# BoT-SORT tracker config optimized for badminton (2 players)
 tracker_type: botsort
 track_high_thresh: 0.3
 track_low_thresh: 0.1
@@ -1250,8 +1271,8 @@ proximity_thresh: 0.5
 appearance_thresh: 0.25
 with_reid: False
 """
-            tracker_config_path.write_text(tracker_config_content)
-            await send_log("Custom BoT-SORT tracker config created (track_buffer=90, track_high=0.3)", "info", "model")
+                tracker_config_path.write_text(tracker_config_content)
+                await send_log("Custom BoT-SORT tracker config created (track_buffer=90, track_high=0.3)", "info", "model")
 
             # Warmup both models
             dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
