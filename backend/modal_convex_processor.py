@@ -1031,6 +1031,7 @@ async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
     manual_court_keypoints = request.get("manualCourtKeypoints")
     analysis_mode = request.get("analysisMode", "full")
     camera_angle = request.get("cameraAngle", "overhead")
+    tracker_type = request.get("trackerType", "botsort")
 
     if not all([video_id, video_url, callback_url]):
         return {"error": "Missing required fields: videoId, videoUrl, callbackUrl"}
@@ -1043,6 +1044,7 @@ async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
         manual_court_keypoints=manual_court_keypoints,
         analysis_mode=analysis_mode,
         camera_angle=camera_angle,
+        tracker_type=tracker_type,
     )
 
     return {"status": "accepted", "videoId": video_id}
@@ -1063,6 +1065,7 @@ async def _process_video_worker(
     manual_court_keypoints: Optional[Dict] = None,
     analysis_mode: str = "full",
     camera_angle: str = "overhead",
+    tracker_type: str = "botsort",
 ) -> Dict[str, Any]:
     """
     GPU worker that does the actual video processing.
