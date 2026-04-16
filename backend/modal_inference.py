@@ -208,20 +208,13 @@ KEYPOINT_NAMES = [
     "left_knee", "right_knee", "left_ankle", "right_ankle"
 ]
 
-# Court region classes - DEPRECATED (court detection removed from Modal)
-# Kept for reference only
-COURT_CLASSES = [
-    'frontcourt', 'midcourt-down', 'midcourt-up', 'net',
-    'rearcourt-down', 'rearcourt-up', 'sideline-left', 'sideline-right'
-]
-
 
 @app.cls(
     gpu="T4",  # Cost-effective GPU, upgrade to "A10G" for faster inference
     timeout=300,  # 5 minute timeout per request
-    container_idle_timeout=300,  # Keep warm for 5 minutes (increased from 2)
-    allow_concurrent_inputs=20,  # Handle 20 concurrent requests (increased from 10)
+    scaledown_window=300,  # Keep warm for 5 minutes
 )
+@modal.concurrent(max_inputs=20)  # Handle 20 concurrent requests
 class BadmintonInference:
     """
     GPU-accelerated inference for badminton video analysis.
@@ -287,8 +280,8 @@ class BadmintonInference:
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
         
         # Load pose model (downloads automatically from Ultralytics hub)
-        print("Loading YOLOv26 pose model...")
-        self.pose_model = YOLO("yolo26n-pose.pt")  # YOLO26 nano pose model - NMS-free
+        print("Loading YOLOv26m pose model (medium)...")
+        self.pose_model = YOLO("yolo26m-pose.pt")  # YOLO26 small pose model - better far-player accuracy
         self.pose_model.to(self.device)
         
         # Load custom badminton detection model if available

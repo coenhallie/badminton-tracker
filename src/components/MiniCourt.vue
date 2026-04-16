@@ -180,11 +180,11 @@ const RIGHT_WRIST_IDX = 10
 // while normal ready-position arm sway is typically 3-12 px/frame.
 const HIT_DETECTION_CONFIG = {
   MIN_WRIST_SPEED: 30,       // Minimum pixels/frame for wrist speed peak (raised from 15)
-  PEAK_PROMINENCE: 2.0,      // Peak must be ≥ 2× the baseline (median of window) to qualify
+  PEAK_PROMINENCE: 2.5,      // Peak must be ≥ 2× the baseline (median of window) to qualify
   DECEL_RATIO: 0.6,          // Speed after peak must drop to ≤ 60% of peak (i.e., ≥40% deceleration)
   COOLDOWN_FRAMES: 25,       // Min frames between consecutive hits (~0.8s at 30fps)
   CONFIDENCE_THRESHOLD: 0.3, // Min keypoint confidence to use wrist position
-  MAX_SPEED_HISTORY: 10,     // Number of recent speeds to keep for baseline & peak detection
+  MAX_SPEED_HISTORY: 16,     // Number of recent speeds to keep for baseline & peak detection
   SHUTTLE_SEARCH_WINDOW: 10, // Frames to search around hit for shuttle position (±10 frames)
   SHUTTLE_PROXIMITY_PX: 200, // Max pixel distance between shuttle and player for a valid hit
 } as const
@@ -245,6 +245,15 @@ function recordTrailPositions() {
     // Keep trail length bounded (like YOLO26's `if len(track) > 30: track.pop(0)`)
     if (trail.length > maxLength) {
       trail.splice(0, trail.length - maxLength)
+    }
+  }
+
+  const activePlayerIds = new Set(smoothedPlayerPositions.keys())
+  if (activePlayerIds.size > 0) {
+    for (const [playerId] of playerTrails.value) {
+      if (!activePlayerIds.has(playerId)) {
+        playerTrails.value.delete(playerId)
+      }
     }
   }
 }
@@ -418,7 +427,7 @@ function detectHits(): boolean {
       }
       
       // Need at least 4 speed values for robust peak detection (previous, peak, current, + baseline)
-      if (state.speeds.length < 4) continue
+      if (state.speeds.length < 6) continue
       
       const n = state.speeds.length
       const currSpeed = state.speeds[n - 1]!    // Current frame speed (after suspected peak)
@@ -440,7 +449,7 @@ function detectHits(): boolean {
       
       // --- Layer 3: Peak prominence above baseline ---
       // Compute baseline as the median of all speeds in the window (excluding the peak itself)
-      const baselineSpeeds = [...state.speeds.slice(0, n - 2), ...state.speeds.slice(n - 1)]
+      const baselineSpeeds = state.speeds.slice(0, n - 2)
       const baselineMedian = median(baselineSpeeds)
       const prominenceOk = baselineMedian < 1 || (peakSpeed >= baselineMedian * HIT_DETECTION_CONFIG.PEAK_PROMINENCE)
       if (!prominenceOk) continue
@@ -465,12 +474,12 @@ function detectHits(): boolean {
       if (!feetPos) continue
       
       const courtPos = applyHomography(H, feetPos.x, feetPos.y)
-      if (!courtPos) continue
-      
+      if (!courtPos || isNaN(courtPos.x) || isNaN(courtPos.y)) continue
+
       // Bounds check (allow small margin for near-boundary hits)
       if (courtPos.x < -1 || courtPos.x > COURT_WIDTH + 1 ||
           courtPos.y < -1 || courtPos.y > COURT_LENGTH + 1) continue
-      
+
       // Increment sequential hit counter for this player
       let hitCount = playerHitCounters.get(player.player_id) ?? 0
       hitCount++
@@ -654,7 +663,9 @@ function transformPlayerPosition(pixelX: number, pixelY: number): { x: number; y
   const H = homographyMatrix.value
   if (!H) return null
   
-  return applyHomography(H, pixelX, pixelY)
+  const result = applyHomography(H, pixelX, pixelY)
+  if (!result || isNaN(result.x) || isNaN(result.y)) return null
+  return result
 }
 
 /**
@@ -1245,8 +1256,8 @@ function updateTargetPositions() {
       if (!feetPos) continue
       
       const courtPos = applyHomography(H, feetPos.x, feetPos.y)
-      if (!courtPos) continue
-      
+      if (!courtPos || isNaN(courtPos.x) || isNaN(courtPos.y)) continue
+
       // Bounds check - if out of bounds, treat as unrecognized (likely bad detection)
       const margin = 2
       if (courtPos.x < -margin || courtPos.x > COURT_WIDTH + margin ||
@@ -1395,7 +1406,7 @@ function updateTargetPositions() {
   // Update shuttle target
   if (props.shuttlePosition && props.showShuttle) {
     const courtPos = applyHomography(H, props.shuttlePosition.x, props.shuttlePosition.y)
-    if (courtPos &&
+    if (courtPos && !isNaN(courtPos.x) && !isNaN(courtPos.y) &&
         courtPos.x >= -1 && courtPos.x <= COURT_WIDTH + 1 &&
         courtPos.y >= -1 && courtPos.y <= COURT_LENGTH + 1) {
       if (smoothedShuttle) {
@@ -1417,6 +1428,19 @@ function updateTargetPositions() {
   // Record smoothed positions into trails (follows YOLO26 track_history pattern)
   recordTrailPositions()
   
+  // Trim hit markers when seeking backward
+  if (props.currentFrame !== undefined && props.currentFrame < lastHitDetectionFrame) {
+    for (const [playerId, markers] of hitMarkers.value) {
+      const filtered = markers.filter(m => m.frame <= props.currentFrame!)
+      hitMarkers.value.set(playerId, filtered)
+    }
+    for (const [playerId, markers] of hitMarkers.value) {
+      playerHitCounters.set(playerId, markers.length)
+    }
+    playerWristStates.clear()
+    lastHitDetectionFrame = props.currentFrame
+  }
+
   // Run hit detection on skeleton data up to current frame
   if (props.showHitMarkers) {
     detectHits()

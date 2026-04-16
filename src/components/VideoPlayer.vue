@@ -4,6 +4,7 @@ import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, Boundin
 import { SKELETON_CONNECTIONS, PLAYER_COLORS } from '@/types/analysis'
 import PoseOverlay from './PoseOverlay.vue'
 import { useVideoExport } from '@/composables/useVideoExport'
+import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
 
 // =============================================================================
 // PERFORMANCE OPTIMIZATION: Debug mode flag
@@ -140,11 +141,12 @@ function computeProgressiveHeatmap(
   skeletonData: SkeletonFrame[],
   currentFrameNum: number,
   videoWidth: number,
-  videoHeight: number
+  videoHeight: number,
+  frameRange?: { start: number; end: number } | null
 ): ProgressiveHeatmapState | null {
   if (!skeletonData || skeletonData.length === 0) return null
   if (videoWidth <= 0 || videoHeight <= 0) return null
-  
+
   // Initialize or check if we need to reset (if seeking backwards)
   if (!progressiveHeatmapState ||
       progressiveHeatmapState.videoWidth !== videoWidth ||
@@ -156,18 +158,24 @@ function computeProgressiveHeatmap(
       console.log('[Progressive Heatmap] Initialized/reset state for frame', currentFrameNum)
     }
   }
-  
+
   // Process frames from last processed to current
   const startIdx = progressiveHeatmapState.lastProcessedFrame < 0 ? 0 :
     skeletonData.findIndex(f => f.frame > progressiveHeatmapState!.lastProcessedFrame)
-  
+
   if (startIdx < 0) return progressiveHeatmapState
   
   let framesProcessed = 0
   for (let i = startIdx; i < skeletonData.length; i++) {
     const frame = skeletonData[i]
     if (!frame || frame.frame > currentFrameNum) break
-    
+
+    // Skip frames outside the rally frame range (if filtering by rally)
+    if (frameRange && (frame.frame < frameRange.start || frame.frame > frameRange.end)) {
+      progressiveHeatmapState.lastProcessedFrame = frame.frame
+      continue
+    }
+
     // Add heat for each player's position
     for (const player of frame.players) {
       // Use center point if available, otherwise try to compute from keypoints
@@ -259,7 +267,6 @@ const props = defineProps<{
   skeletonData?: SkeletonFrame[]
   // NOTE: courtDetection prop removed - automatic court detection disabled
   // Manual court keypoints are now the only method for court calibration
-  heatmapData?: HeatmapData | null
   showSkeleton?: boolean
   showBoundingBoxes?: boolean
   showPlayers?: boolean
@@ -269,11 +276,16 @@ const props = defineProps<{
   poseSource?: 'skeleton' | 'trained' | 'both'
   // NOTE: showCourtOverlay prop removed - no automatic court detection to display
   showHeatmap?: boolean
+  showShuttleTracking?: boolean
+  heatmapFrameRange?: { start: number; end: number } | null
+  courtKeypoints?: number[][] | null
 }>()
 
 // Colors for bounding boxes (matching backend colors)
 const PLAYER_BOX_COLOR = '#00FF00'      // Green for players
-const SHUTTLE_BOX_COLOR = '#FFA500'     // Orange for shuttlecock
+const SHUTTLE_BOX_COLOR = '#FFA500'     // Orange for shuttlecock (YOLO)
+const SHUTTLE_TRACKNET_COLOR = '#00E5FF' // Cyan for TrackNet shuttle detection
+const SHUTTLE_YOLO_COLOR = '#FFA500'     // Orange for YOLO shuttle detection
 const RACKET_BOX_COLOR = '#FF00FF'      // Magenta for rackets
 const OTHER_BOX_COLOR = '#00FFFF'       // Cyan for other detections
 
@@ -380,6 +392,7 @@ let controlsTimeout: number | null = null
 // PERFORMANCE OPTIMIZATION: Cached canvas context and pre-computed values
 let cachedCtx: CanvasRenderingContext2D | null = null
 let lastFrameNumber = -1
+let lastMediaTime = -1
 
 const formattedCurrentTime = computed(() => formatTime(currentTime.value))
 const formattedDuration = computed(() => formatTime(duration.value))
@@ -421,7 +434,13 @@ watch(() => props.skeletonData, (newData) => {
   // If the first frame's timestamp is suspiciously close to 1/fps, shift all
   // timestamps back so the first frame aligns with video currentTime = 0.
   const firstTs = newData[0]!.timestamp
-  const timeOffset = firstTs > 0.01 ? firstTs : 0
+  let timeOffset = 0
+  if (newData.length >= 2 && firstTs > 0.001) {
+    const frameDuration = newData[1]!.timestamp - newData[0]!.timestamp
+    if (frameDuration > 0 && Math.abs(firstTs - frameDuration) / frameDuration < 0.2) {
+      timeOffset = firstTs
+    }
+  }
 
   newData.forEach((frame, idx) => {
     fIndex.set(frame.frame, idx)
@@ -590,7 +609,7 @@ function findInterpolatedFrame(targetTime: number): SkeletonFrame | null {
   // If very close to floor frame, just return it (avoid unnecessary work)
   if (t < 0.01) return floorFrame
   // If very close to ceiling frame, return ceiling
-  if (t > 0.99) return ceilFrame
+  if (t > 0.99 && targetTime >= (timestamps[ceilIdx] ?? Infinity)) return ceilFrame
 
   // Interpolate player positions
   const interpolatedPlayers: FramePlayer[] = floorFrame.players.map(floorPlayer => {
@@ -633,6 +652,7 @@ function findInterpolatedFrame(targetTime: number): SkeletonFrame | null {
     shuttle_position = {
       x: floorFrame.shuttle_position.x + (ceilFrame.shuttle_position.x - floorFrame.shuttle_position.x) * t,
       y: floorFrame.shuttle_position.y + (ceilFrame.shuttle_position.y - floorFrame.shuttle_position.y) * t,
+      source: floorFrame.shuttle_position.source,
     }
   }
 
@@ -1091,6 +1111,130 @@ function showControlsTemporarily() {
   }
 }
 
+// =============================================================================
+// SHUTTLE TRACKING TRAIL: Draw TrackNet shuttle trajectory trail on video overlay
+// =============================================================================
+const SHUTTLE_TRAIL_LENGTH = 20
+
+function drawShuttleTrail(
+  ctx: CanvasRenderingContext2D,
+  currentFrameData: SkeletonFrame,
+  scaleX: number,
+  scaleY: number
+) {
+  if (!props.skeletonData || props.skeletonData.length === 0) return
+  if (!currentFrameData.shuttle_position) return
+
+  const currentFrameNum = currentFrameData.frame
+  const trailPositions: { x: number; y: number; source?: 'tracknet' | 'yolo' }[] = []
+
+  const currentIdx = frameIndex.value.get(currentFrameNum)
+  if (currentIdx === undefined) return
+
+  for (let i = currentIdx; i >= Math.max(0, currentIdx - SHUTTLE_TRAIL_LENGTH); i--) {
+    const frame = props.skeletonData[i]
+    if (frame?.shuttle_position) {
+      trailPositions.unshift(frame.shuttle_position)
+    }
+  }
+
+  if (trailPositions.length === 0) return
+
+  const totalPoints = trailPositions.length
+  const current = trailPositions[totalPoints - 1]!
+  const trailColor = current.source === 'tracknet' ? SHUTTLE_TRACKNET_COLOR : SHUTTLE_YOLO_COLOR
+
+  if (totalPoints >= 2) {
+    // White outline pass for contrast against any background
+    for (let i = 1; i < totalPoints; i++) {
+      const prev = trailPositions[i - 1]!
+      const curr = trailPositions[i]!
+      const progress = i / (totalPoints - 1)
+
+      const x1 = prev.x * scaleX
+      const y1 = prev.y * scaleY
+      const x2 = curr.x * scaleX
+      const y2 = curr.y * scaleY
+
+      const dist = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+      if (dist > 300) continue
+
+      const alpha = 0.1 + progress * 0.5
+      const lineWidth = 4 + progress * 5
+
+      ctx.beginPath()
+      ctx.moveTo(x1, y1)
+      ctx.lineTo(x2, y2)
+      ctx.strokeStyle = 'rgba(0,0,0,' + alpha.toFixed(2) + ')'
+      ctx.lineWidth = lineWidth + 3
+      ctx.lineCap = 'round'
+      ctx.stroke()
+    }
+
+    // Colored trail pass on top
+    for (let i = 1; i < totalPoints; i++) {
+      const prev = trailPositions[i - 1]!
+      const curr = trailPositions[i]!
+      const progress = i / (totalPoints - 1)
+
+      const x1 = prev.x * scaleX
+      const y1 = prev.y * scaleY
+      const x2 = curr.x * scaleX
+      const y2 = curr.y * scaleY
+
+      const dist = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+      if (dist > 300) continue
+
+      const alpha = 0.25 + progress * 0.75
+      const lineWidth = 4 + progress * 5
+
+      ctx.beginPath()
+      ctx.moveTo(x1, y1)
+      ctx.lineTo(x2, y2)
+      ctx.strokeStyle = trailColor + Math.round(alpha * 255).toString(16).padStart(2, '0')
+      ctx.lineWidth = lineWidth
+      ctx.lineCap = 'round'
+      ctx.stroke()
+    }
+  }
+
+  // Current position — large glowing dot
+  const cx = current.x * scaleX
+  const cy = current.y * scaleY
+
+  // Soft outer glow
+  const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, 20)
+  gradient.addColorStop(0, trailColor + '66')
+  gradient.addColorStop(0.5, trailColor + '22')
+  gradient.addColorStop(1, trailColor + '00')
+  ctx.beginPath()
+  ctx.arc(cx, cy, 20, 0, Math.PI * 2)
+  ctx.fillStyle = gradient
+  ctx.fill()
+
+  // Dark outline ring for contrast
+  ctx.beginPath()
+  ctx.arc(cx, cy, 10, 0, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)'
+  ctx.lineWidth = 4
+  ctx.stroke()
+
+  // Main dot
+  ctx.beginPath()
+  ctx.arc(cx, cy, 9, 0, Math.PI * 2)
+  ctx.fillStyle = trailColor
+  ctx.fill()
+  ctx.strokeStyle = '#FFFFFF'
+  ctx.lineWidth = 2.5
+  ctx.stroke()
+
+  // Inner bright center
+  ctx.beginPath()
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2)
+  ctx.fillStyle = '#FFFFFF'
+  ctx.fill()
+}
+
 // Canvas skeleton drawing
 function resizeCanvas() {
   if (!canvasRef.value || !videoRef.value) return
@@ -1104,7 +1248,7 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
     if (DEBUG_MODE) console.log('[Overlay Debug] No canvas ref')
     return
   }
-  if (!props.showSkeleton && !props.showBoundingBoxes && !props.showHeatmap) {
+  if (!props.showSkeleton && !props.showBoundingBoxes && !props.showHeatmap && !props.showShuttleTracking) {
     if (DEBUG_MODE) console.log('[Overlay Debug] All overlays are disabled')
     return
   }
@@ -1115,11 +1259,8 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   const frame = exactFrame !== undefined ? exactFrame : currentSkeletonFrame.value
   
   // Allow heatmap rendering even without skeleton frame
-  // Progressive heatmap uses skeleton data, static heatmap uses pre-computed data
-  const hasProgressiveHeatmap = props.showHeatmap && props.skeletonData && props.skeletonData.length > 0
-  const hasStaticHeatmap = props.showHeatmap && props.heatmapData
-  const hasHeatmapToRender = hasProgressiveHeatmap || hasStaticHeatmap
-  const hasFrameToRender = frame && (props.showSkeleton || props.showBoundingBoxes)
+  const hasHeatmapToRender = props.showHeatmap && props.skeletonData && props.skeletonData.length > 0
+  const hasFrameToRender = frame && (props.showSkeleton || props.showBoundingBoxes || props.showShuttleTracking)
   
   if (!frame && !hasHeatmapToRender) {
     if (DEBUG_MODE) console.log('[Overlay Debug] No current skeleton frame and no heatmap')
@@ -1143,8 +1284,14 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   // PERFORMANCE OPTIMIZATION: Skip rendering if nothing has changed.
   // During playback, interpolated frames have continuously changing positions
   // so we always redraw. When paused (no exactFrame), skip if same frame number.
-  if (frame && !hasHeatmapToRender && exactFrame === undefined) {
-    if (frame.frame === lastFrameNumber) return
+  if (frame && !hasHeatmapToRender) {
+    if (exactFrame === undefined) {
+        if (frame.frame === lastFrameNumber) return
+    } else {
+        const mediaTime = videoRef.value?.currentTime ?? -1
+        if (mediaTime === lastMediaTime && frame.frame === lastFrameNumber) return
+        lastMediaTime = mediaTime
+    }
   }
   if (frame) {
     lastFrameNumber = frame.frame
@@ -1156,7 +1303,7 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
       'showSkeleton:', props.showSkeleton,
       'showBoundingBoxes:', props.showBoundingBoxes,
       'showHeatmap:', props.showHeatmap,
-      'hasHeatmapData:', !!props.heatmapData,
+      'hasHeatmapData:', hasHeatmapToRender,
       'players:', frame?.players?.length ?? 0,
       'badminton_detections:', !!frame?.badminton_detections,
       'canvas:', canvasRef.value.width, 'x', canvasRef.value.height)
@@ -1190,40 +1337,17 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
 
   // Draw heatmap overlay if enabled (behind skeleton and bounding boxes)
   // PROGRESSIVE HEATMAP: Compute heatmap dynamically based on skeleton data up to current frame
-  if (props.showHeatmap) {
-    let heatmapToDraw: HeatmapData | null = null
-    
-    // Prefer progressive heatmap from skeleton data (updates during playback)
-    if (props.skeletonData && props.skeletonData.length > 0 && frame) {
-      const progressiveState = computeProgressiveHeatmap(
-        props.skeletonData,
-        frame.frame,
-        videoWidth,
-        videoHeight
-      )
-      
-      if (progressiveState && progressiveState.maxValue > 0) {
-        heatmapToDraw = progressiveHeatmapToRenderFormat(progressiveState)
-        if (DEBUG_MODE) {
-          console.log('[Progressive Heatmap Debug] Drawing progressive heatmap for frame:', frame.frame,
-            'dimensions:', progressiveState.width, 'x', progressiveState.height,
-            'maxValue:', progressiveState.maxValue.toFixed(2))
-        }
-      }
-    }
-    
-    // Fall back to static pre-computed heatmap if no progressive data available
-    if (!heatmapToDraw && props.heatmapData) {
-      heatmapToDraw = props.heatmapData
-      if (DEBUG_MODE) {
-        console.log('[Heatmap Debug] Drawing static heatmap overlay, data size:',
-          props.heatmapData.combined_heatmap?.length ?? 0, 'x',
-          props.heatmapData.combined_heatmap?.[0]?.length ?? 0)
-      }
-    }
-    
-    // Draw the heatmap
-    if (heatmapToDraw) {
+  if (props.showHeatmap && props.skeletonData && props.skeletonData.length > 0 && frame) {
+    const progressiveState = computeProgressiveHeatmap(
+      props.skeletonData,
+      frame.frame,
+      videoWidth,
+      videoHeight,
+      props.heatmapFrameRange
+    )
+
+    if (progressiveState && progressiveState.maxValue > 0) {
+      const heatmapToDraw = progressiveHeatmapToRenderFormat(progressiveState)
       drawHeatmap(ctx, heatmapToDraw, canvasRef.value.width, canvasRef.value.height, 0.6)
     }
   }
@@ -1231,6 +1355,11 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   // Draw bounding boxes if enabled (requires frame data)
   if (props.showBoundingBoxes && frame?.badminton_detections) {
     drawBoundingBoxes(ctx, frame.badminton_detections, scaleX, scaleY)
+  }
+
+  // Draw shuttle tracking trail + current position dot
+  if (props.showShuttleTracking && frame) {
+    drawShuttleTrail(ctx, frame, scaleX, scaleY)
   }
 
   // Draw skeleton if enabled (requires frame data)
@@ -1420,20 +1549,10 @@ function drawBoundingBoxes(
   }
 
   // Draw shuttlecocks (orange) - only if showShuttles is true
+  // Note: center dot is now drawn separately via shuttle_position in drawOverlay
   if (props.showShuttles !== false) {
     detections.shuttlecocks?.forEach(shuttle => {
       drawBox(shuttle, SHUTTLE_BOX_COLOR, 'Shuttle')
-      
-      // Draw center marker for shuttle
-      const cx = shuttle.x * scaleX
-      const cy = shuttle.y * scaleY
-      ctx.beginPath()
-      ctx.arc(cx, cy, 6, 0, Math.PI * 2)
-      ctx.fillStyle = SHUTTLE_BOX_COLOR
-      ctx.fill()
-      ctx.strokeStyle = '#FFFFFF'
-      ctx.lineWidth = 2
-      ctx.stroke()
     })
   }
 
@@ -1452,6 +1571,164 @@ function drawBoundingBoxes(
 
 // Minimum confidence for drawing keypoints (lower = draw more, higher = draw fewer)
 const KEYPOINT_CONFIDENCE_THRESHOLD = 0.3
+
+// Body angle overlay configuration
+type AngleOverlay =
+  | 'left_elbow' | 'right_elbow'
+  | 'left_shoulder' | 'right_shoulder'
+  | 'left_knee' | 'right_knee'
+  | 'left_hip' | 'right_hip'
+  | 'torso_lean'
+  | 'leg_stretch'
+
+const ANGLE_OVERLAY_LABELS: Record<AngleOverlay, string> = {
+  left_elbow: 'L Elbow',
+  right_elbow: 'R Elbow',
+  left_shoulder: 'L Shoulder',
+  right_shoulder: 'R Shoulder',
+  left_knee: 'L Knee',
+  right_knee: 'R Knee',
+  left_hip: 'L Hip',
+  right_hip: 'R Hip',
+  torso_lean: 'Torso Lean',
+  leg_stretch: 'Leg Stretch',
+}
+
+const ALL_ANGLE_OVERLAYS = Object.keys(ANGLE_OVERLAY_LABELS) as AngleOverlay[]
+const enabledOverlays = ref(new Set<AngleOverlay>())
+const showAngleMenu = ref(false)
+
+function toggleOverlay(overlay: AngleOverlay) {
+  const s = new Set(enabledOverlays.value)
+  if (s.has(overlay)) s.delete(overlay)
+  else s.add(overlay)
+  enabledOverlays.value = s
+}
+
+const homographyMatrix = computed(() => {
+  const kp = props.courtKeypoints
+  if (!kp || kp.length < 4) return null
+  return computeHomographyFromKeypoints(kp)
+})
+
+/** COCO keypoint index map for angle joint lookups */
+const KP = {
+  left_shoulder: 5, right_shoulder: 6,
+  left_elbow: 7, right_elbow: 8,
+  left_wrist: 9, right_wrist: 10,
+  left_hip: 11, right_hip: 12,
+  left_knee: 13, right_knee: 14,
+  left_ankle: 15, right_ankle: 16,
+} as const
+
+/**
+ * Map each angle overlay to the 3 keypoint indices forming the angle.
+ * Angle is measured at the MIDDLE keypoint (index 1).
+ */
+const ANGLE_JOINTS: Record<string, [number, number, number]> = {
+  left_elbow:     [KP.left_shoulder,  KP.left_elbow,     KP.left_wrist],
+  right_elbow:    [KP.right_shoulder, KP.right_elbow,    KP.right_wrist],
+  left_shoulder:  [KP.left_elbow,     KP.left_shoulder,  KP.left_hip],
+  right_shoulder: [KP.right_elbow,    KP.right_shoulder, KP.right_hip],
+  left_knee:      [KP.left_hip,       KP.left_knee,      KP.left_ankle],
+  right_knee:     [KP.right_hip,      KP.right_knee,     KP.right_ankle],
+  left_hip:       [KP.left_shoulder,  KP.left_hip,       KP.left_knee],
+  right_hip:      [KP.right_shoulder, KP.right_hip,      KP.right_knee],
+}
+
+function drawAngleArc(
+  ctx: CanvasRenderingContext2D,
+  keypoints: Keypoint[],
+  jointIndices: [number, number, number],
+  angleDegrees: number,
+  scaleX: number,
+  scaleY: number,
+  color: string,
+) {
+  const [aIdx, vIdx, bIdx] = jointIndices
+  const a = keypoints[aIdx], v = keypoints[vIdx], b = keypoints[bIdx]
+  if (!a?.x || !a?.y || !v?.x || !v?.y || !b?.x || !b?.y) return
+  if (a.confidence < KEYPOINT_CONFIDENCE_THRESHOLD ||
+      v.confidence < KEYPOINT_CONFIDENCE_THRESHOLD ||
+      b.confidence < KEYPOINT_CONFIDENCE_THRESHOLD) return
+
+  const vx = v.x * scaleX, vy = v.y * scaleY
+  const ax = a.x * scaleX, ay = a.y * scaleY
+  const bx = b.x * scaleX, by = b.y * scaleY
+
+  const angle1 = Math.atan2(ay - vy, ax - vx)
+  const angle2 = Math.atan2(by - vy, bx - vx)
+
+  // Draw arc
+  const radius = 20
+  ctx.beginPath()
+  ctx.arc(vx, vy, radius, Math.min(angle1, angle2), Math.max(angle1, angle2))
+  ctx.strokeStyle = color
+  ctx.lineWidth = 2
+  ctx.globalAlpha = 0.8
+  ctx.stroke()
+  ctx.globalAlpha = 1.0
+
+  // Draw label
+  const midAngle = (angle1 + angle2) / 2
+  const labelX = vx + Math.cos(midAngle) * (radius + 14)
+  const labelY = vy + Math.sin(midAngle) * (radius + 14)
+
+  ctx.font = 'bold 11px Inter, system-ui, sans-serif'
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#000000'
+  ctx.lineWidth = 2.5
+  ctx.strokeText(`${Math.round(angleDegrees)}°`, labelX - 10, labelY + 4)
+  ctx.fillText(`${Math.round(angleDegrees)}°`, labelX - 10, labelY + 4)
+}
+
+function drawLegStretch(
+  ctx: CanvasRenderingContext2D,
+  keypoints: Keypoint[],
+  scaleX: number,
+  scaleY: number,
+  color: string,
+  H: number[][] | null,
+) {
+  const la = keypoints[KP.left_ankle], ra = keypoints[KP.right_ankle]
+  if (!la?.x || !la?.y || !ra?.x || !ra?.y) return
+  if (la.confidence < KEYPOINT_CONFIDENCE_THRESHOLD ||
+      ra.confidence < KEYPOINT_CONFIDENCE_THRESHOLD) return
+
+  if (!H) return
+  const leftM = applyHomography(H, la.x, la.y)
+  const rightM = applyHomography(H, ra.x, ra.y)
+  if (!leftM || !rightM) return
+
+  const distMeters = Math.sqrt((leftM.x - rightM.x) ** 2 + (leftM.y - rightM.y) ** 2)
+
+  const lax = la.x * scaleX, lay = la.y * scaleY
+  const rax = ra.x * scaleX, ray = ra.y * scaleY
+
+  // Dashed line between ankles
+  ctx.beginPath()
+  ctx.setLineDash([6, 4])
+  ctx.moveTo(lax, lay)
+  ctx.lineTo(rax, ray)
+  ctx.strokeStyle = color
+  ctx.lineWidth = 2
+  ctx.globalAlpha = 0.7
+  ctx.stroke()
+  ctx.setLineDash([])
+  ctx.globalAlpha = 1.0
+
+  // Distance label at midpoint
+  const mx = (lax + rax) / 2
+  const my = (lay + ray) / 2
+  const label = `${distMeters.toFixed(2)}m`
+
+  ctx.font = 'bold 12px Inter, system-ui, sans-serif'
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#000000'
+  ctx.lineWidth = 2.5
+  ctx.strokeText(label, mx - 15, my - 8)
+  ctx.fillText(label, mx - 15, my - 8)
+}
 
 function drawSkeleton(
   ctx: CanvasRenderingContext2D,
@@ -1549,6 +1826,39 @@ function drawSkeleton(
 
       ctx.strokeText(label, x - 30, y)
       ctx.fillText(label, x - 30, y)
+    }
+
+    // Draw enabled angle overlays
+    const angles = player.pose?.body_angles
+    if (angles && enabledOverlays.value.size > 0) {
+      for (const [key, joints] of Object.entries(ANGLE_JOINTS)) {
+        if (!enabledOverlays.value.has(key as AngleOverlay)) continue
+        const value = angles[key as keyof typeof angles]
+        if (value != null) {
+          drawAngleArc(ctx, keypoints, joints, value, scaleX, scaleY, color)
+        }
+      }
+
+      // Torso lean — label near shoulder midpoint
+      if (enabledOverlays.value.has('torso_lean') && angles.torso_lean != null) {
+        const ls = keypoints[KP.left_shoulder], rs = keypoints[KP.right_shoulder]
+        if (ls?.x && ls?.y && rs?.x && rs?.y) {
+          const mx = ((ls.x + rs.x) / 2) * scaleX
+          const my = ((ls.y + rs.y) / 2) * scaleY
+          ctx.font = 'bold 11px Inter, system-ui, sans-serif'
+          ctx.fillStyle = '#ffffff'
+          ctx.strokeStyle = '#000000'
+          ctx.lineWidth = 2.5
+          const lbl = `${Math.round(angles.torso_lean)}°`
+          ctx.strokeText(lbl, mx + 15, my)
+          ctx.fillText(lbl, mx + 15, my)
+        }
+      }
+
+      // Leg stretch
+      if (enabledOverlays.value.has('leg_stretch')) {
+        drawLegStretch(ctx, keypoints, scaleX, scaleY, color, homographyMatrix.value)
+      }
     }
   })
 }
@@ -1703,6 +2013,13 @@ watch(() => props.showRackets, () => {
   }
 })
 
+watch(() => props.showShuttleTracking, () => {
+  lastFrameNumber = -1 // Force redraw
+  if (!isPlaying.value) {
+    drawOverlay()
+  }
+})
+
 // NOTE: showCourtOverlay watcher removed - automatic court detection disabled
 
 watch(() => props.showHeatmap, (newValue) => {
@@ -1717,8 +2034,9 @@ watch(() => props.showHeatmap, (newValue) => {
   }
 })
 
-watch(() => props.heatmapData, () => {
-  // Reset frame cache to force redraw when heatmap data arrives
+watch(() => props.heatmapFrameRange, () => {
+  // Reset progressive heatmap when rally selection changes
+  progressiveHeatmapState = null
   lastFrameNumber = -1
   if (!isPlaying.value && props.showHeatmap) {
     drawOverlay()
@@ -1788,10 +2106,24 @@ const {
   showHeatmap: toRef(props, 'showHeatmap') as Ref<boolean>,
 })
 
+function pause() {
+  if (videoRef.value && !videoRef.value.paused) {
+    videoRef.value.pause()
+  }
+}
+
+function play() {
+  if (videoRef.value && videoRef.value.paused) {
+    videoRef.value.play()
+  }
+}
+
 defineExpose({
   seekTo,
   seekToFrame,
   setPlaybackRate,
+  pause,
+  play,
   isExporting,
   exportProgress,
   startExport,
@@ -1819,7 +2151,7 @@ defineExpose({
         @click="!isKeypointSelectionMode && !isExporting && togglePlay()"
       />
       <canvas
-        v-if="(showSkeleton || showBoundingBoxes || showHeatmap) && (skeletonData || heatmapData)"
+        v-if="(showSkeleton || showBoundingBoxes || showHeatmap) && skeletonData"
         ref="canvasRef"
         class="skeleton-canvas"
       />
@@ -1970,6 +2302,34 @@ defineExpose({
               <path d="M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
             </svg>
           </button>
+
+          <!-- Body angle overlay toggle -->
+          <div class="angle-menu-wrapper">
+            <button
+              class="control-btn"
+              :class="{ active: enabledOverlays.size > 0 }"
+              @click="showAngleMenu = !showAngleMenu"
+              title="Body angle overlays"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                <line x1="12" y1="22.08" x2="12" y2="12" />
+              </svg>
+            </button>
+            <div v-if="showAngleMenu" class="angle-menu">
+              <button
+                v-for="key in ALL_ANGLE_OVERLAYS"
+                :key="key"
+                class="angle-menu-item"
+                :class="{ active: enabledOverlays.has(key) }"
+                @click="toggleOverlay(key)"
+              >
+                <span class="angle-menu-check">{{ enabledOverlays.has(key) ? '\u2713' : '' }}</span>
+                {{ ANGLE_OVERLAY_LABELS[key] }}
+              </button>
+            </div>
+          </div>
 
           <button class="control-btn" @click="toggleFullscreen" :title="isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'">
             <svg v-if="!isFullscreen" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
@@ -2317,5 +2677,49 @@ video.video-dimmed {
 
 .control-btn.keypoint-toggle.active:hover {
   background: #002a00;
+}
+
+.angle-menu-wrapper {
+  position: relative;
+}
+
+.angle-menu {
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  margin-bottom: 8px;
+  background: rgba(0, 0, 0, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 140px;
+  z-index: 20;
+}
+
+.angle-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 12px;
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.angle-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.angle-menu-item.active {
+  color: #4ECDC4;
+}
+
+.angle-menu-check {
+  width: 14px;
+  font-size: 0.7rem;
 }
 </style>

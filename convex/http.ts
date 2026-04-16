@@ -227,7 +227,20 @@ http.route({
           headers: corsHeaders("application/json"),
         })
       }
-      
+
+      const requiredPoints = [keypoints.top_left, keypoints.top_right, keypoints.bottom_right, keypoints.bottom_left]
+      for (const pt of requiredPoints) {
+        if (!Array.isArray(pt) || pt.length < 2 || typeof pt[0] !== 'number' || typeof pt[1] !== 'number' ||
+            isNaN(pt[0]) || isNaN(pt[1])) {
+          return new Response(JSON.stringify({
+            error: "Each keypoint must be an array of at least 2 valid numbers [x, y]"
+          }), {
+            status: 400,
+            headers: corsHeaders("application/json"),
+          })
+        }
+      }
+
       await ctx.runMutation(api.videos.setManualCourtKeypoints, {
         videoId: videoId as Id<"videos">,
         keypoints,

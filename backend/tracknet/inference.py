@@ -107,6 +107,10 @@ class TrackNetInference:
         """
         Run full TrackNetV3 pipeline on a video.
 
+        Uses streaming frame extraction to avoid loading the entire video
+        into memory at once — critical for large/long videos that would
+        otherwise OOM on GPU workers.
+
         Args:
             video_path: Path to the video file.
             batch_size: Inference batch size.
@@ -143,25 +147,22 @@ class TrackNetInference:
         h_scale = orig_h / HEIGHT
 
         # Step 1: Compute median background
-        log(f"[TrackNet] Step 1/4: Computing median background ({max_bg_samples} samples)...")
+        log(f"[TrackNet] Step 1/3: Computing median background ({max_bg_samples} samples)...")
         bg_frame = self._compute_median_background(video_path, total_frames, max_bg_samples)
+        log(f"[TrackNet] Step 1/3: Background computation complete")
 
-        # Step 2: Extract and preprocess all frames
-        log(f"[TrackNet] Step 2/4: Extracting {total_frames} frames...")
-        frames = self._extract_frames(video_path)
+        # Step 2: Stream frames through TrackNet (no bulk memory allocation)
+        total_sequences = math.ceil(total_frames / self.seq_len)
+        total_batches = math.ceil(total_sequences / batch_size)
+        log(f"[TrackNet] Step 2/3: Streaming GPU inference ({total_frames} frames, {total_batches} batches)...")
+        raw_coords = self._run_tracknet_streaming(video_path, bg_frame, total_frames, batch_size, progress_callback, log_callback=log)
 
-        # Step 3: Run TrackNet inference
-        log(f"[TrackNet] Step 3/4: Running GPU inference ({total_frames} frames, batch={batch_size})...")
-        raw_coords = self._run_tracknet(frames, bg_frame, batch_size, progress_callback)
-
-        # Free frame memory before inpainting
-        del frames
         del bg_frame
 
-        # Step 4: Run InpaintNet for gap filling
+        # Step 3: Run InpaintNet for gap filling
         if self.inpaintnet is not None:
-            log("[TrackNet] Step 4/4: Running trajectory inpainting...")
-            raw_coords = self._run_inpaintnet(raw_coords, total_frames)
+            log("[TrackNet] Step 3/3: Running trajectory inpainting...")
+            raw_coords = self._run_inpaintnet(raw_coords, total_frames, log_callback=log)
 
         # Scale coordinates back to original resolution
         positions = {}
@@ -210,109 +211,119 @@ class TrackNetInference:
         median_bg = np.median(stacked, axis=0).astype(np.uint8)
         return median_bg
 
-    def _extract_frames(self, video_path: str) -> List[np.ndarray]:
-        """Extract all frames, resize to TrackNet input size, convert to RGB."""
-        cap = cv2.VideoCapture(video_path)
-        frames = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            resized = cv2.resize(frame, (WIDTH, HEIGHT))
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            frames.append(rgb)
-        cap.release()
-        return frames
-
-    def _run_tracknet(
+    def _run_tracknet_streaming(
         self,
-        frames: List[np.ndarray],
+        video_path: str,
         bg_frame: np.ndarray,
+        total_frames: int,
         batch_size: int,
         progress_callback=None,
+        log_callback=None,
     ) -> Dict[int, Dict]:
         """
-        Run TrackNet on frame sequences.
+        Stream frames from video and run TrackNet inference without loading
+        all frames into memory. Reads seq_len frames at a time, batches them,
+        and runs inference incrementally.
 
-        Uses non-overlapping sliding windows of seq_len frames.
-        The model outputs seq_len heatmaps (one per input frame).
+        This keeps memory usage proportional to batch_size * seq_len instead
+        of total_frames — critical for long videos (e.g. 50k+ frames).
         """
-        n_frames = len(frames)
         all_coords: Dict[int, Dict] = {}
-
-        # Preprocess background
         bg_tensor = self._frame_to_tensor(bg_frame)  # (3, H, W)
 
-        # Create sequences with stride = seq_len (non-overlapping)
-        # The model outputs seq_len heatmaps (one per frame in the sequence)
-        sequences = []
-        seq_frame_indices = []
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
 
-        for start in range(0, n_frames, self.seq_len):
-            end = start + self.seq_len
-            if end > n_frames:
-                # Pad the last sequence by repeating the final frame
-                actual_count = n_frames - start
-                seq = frames[start:n_frames]
-                while len(seq) < self.seq_len:
-                    seq.append(seq[-1])
-                # Only map heatmaps to actual (non-padded) frames
-                out_indices = list(range(start, n_frames))
-            else:
-                seq = frames[start:end]
-                out_indices = list(range(start, end))
+        total_sequences = math.ceil(total_frames / self.seq_len)
+        total_batches = math.ceil(total_sequences / batch_size)
+        frame_idx = 0
+        batch_count = 0
 
-            sequences.append(seq)
-            seq_frame_indices.append(out_indices)
+        while True:
+            # Collect batch_size sequences by reading from video
+            batch_seqs: List[List[np.ndarray]] = []
+            batch_indices: List[List[int]] = []
 
-        # Process in batches
-        total_batches = math.ceil(len(sequences) / batch_size)
-        for batch_idx in range(total_batches):
-            batch_start = batch_idx * batch_size
-            batch_end = min(batch_start + batch_size, len(sequences))
-            batch_seqs = sequences[batch_start:batch_end]
-            batch_indices = seq_frame_indices[batch_start:batch_end]
+            for _ in range(batch_size):
+                seq_frames: List[np.ndarray] = []
+                out_indices: List[int] = []
 
-            # Build input tensors
+                for _ in range(self.seq_len):
+                    ret, frame = cap.read()
+                    if ret:
+                        resized = cv2.resize(frame, (WIDTH, HEIGHT))
+                        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                        seq_frames.append(rgb)
+                        out_indices.append(frame_idx)
+                        frame_idx += 1
+                    else:
+                        break
+
+                if not seq_frames:
+                    break
+
+                # Pad incomplete sequence by repeating last frame
+                while len(seq_frames) < self.seq_len:
+                    seq_frames.append(seq_frames[-1])
+
+                batch_seqs.append(seq_frames)
+                batch_indices.append(out_indices)
+
+            if not batch_seqs:
+                break
+
+            # Build input tensors and run inference
             input_tensors = []
             for seq in batch_seqs:
                 frame_tensors = [self._frame_to_tensor(f) for f in seq]
-                # Stack frames along channel dimension
                 stacked = torch.cat(frame_tensors, dim=0)  # (seq_len*3, H, W)
                 if self.bg_mode == "concat":
-                    stacked = torch.cat([bg_tensor, stacked], dim=0)  # ((seq_len+1)*3, H, W)
+                    stacked = torch.cat([bg_tensor, stacked], dim=0)
                 input_tensors.append(stacked)
 
-            batch_tensor = torch.stack(input_tensors).to(self.device)  # (B, C, H, W)
+            batch_tensor = torch.stack(input_tensors).to(self.device)
 
             with torch.no_grad():
-                heatmaps = self.tracknet(batch_tensor)  # (B, seq_len, H, W)
+                heatmaps = self.tracknet(batch_tensor)
 
-            # Extract coordinates from heatmaps
             heatmaps_np = heatmaps.cpu().numpy()
             for seq_idx in range(len(batch_seqs)):
                 out_indices = batch_indices[seq_idx]
-                for hm_idx, frame_idx in enumerate(out_indices):
-                    hm = heatmaps_np[seq_idx, hm_idx]  # (H, W)
+                for hm_idx, fidx in enumerate(out_indices):
+                    hm = heatmaps_np[seq_idx, hm_idx]
                     coord = self._heatmap_to_coord(hm)
-                    all_coords[frame_idx] = coord
+                    all_coords[fidx] = coord
+
+            batch_count += 1
+            frames_processed = min(frame_idx, total_frames)
+            pct = batch_count / total_batches * 100 if total_batches > 0 else 100
 
             if progress_callback and total_batches > 1:
-                pct = (batch_idx + 1) / total_batches * 100
                 try:
                     progress_callback(pct)
                 except Exception:
                     pass
 
+            # Log progress every 10% or every 5 batches for shorter videos
+            log_interval = max(1, total_batches // 10)
+            if log_callback and (batch_count % log_interval == 0 or batch_count == total_batches):
+                try:
+                    log_callback(f"[TrackNet] Step 2/3: Batch {batch_count}/{total_batches} — {frames_processed}/{total_frames} frames ({pct:.0f}%)")
+                except Exception:
+                    pass
+
+        cap.release()
+
         # Fill in any frames not predicted
-        for i in range(n_frames):
+        for i in range(total_frames):
             if i not in all_coords:
                 all_coords[i] = {"x": 0.0, "y": 0.0, "visible": False}
 
         return all_coords
 
     def _run_inpaintnet(
-        self, coords: Dict[int, Dict], total_frames: int
+        self, coords: Dict[int, Dict], total_frames: int, log_callback=None,
     ) -> Dict[int, Dict]:
         """
         Use InpaintNet to fill gaps in the trajectory.
@@ -342,6 +353,9 @@ class TrackNetInference:
         # Process in overlapping chunks to handle long videos
         chunk_size = 256
         stride = chunk_size // 2
+        total_chunks = max(1, math.ceil(total_frames / stride))
+        log_interval = max(1, total_chunks // 5)
+        chunk_count = 0
 
         inpainted_xs = xs.copy()
         inpainted_ys = ys.copy()
@@ -356,10 +370,19 @@ class TrackNetInference:
             chunk_y = ys[start:end]
             chunk_v = vis[start:end]
 
+            chunk_count += 1
+
             # Skip chunks that are entirely visible or entirely invisible
             chunk_vis_count = int(chunk_v.sum())
             if chunk_vis_count == 0 or chunk_vis_count == len(chunk_v):
                 continue
+
+            if log_callback and (chunk_count % log_interval == 0 or chunk_count == total_chunks):
+                pct = min(100, chunk_count / total_chunks * 100)
+                try:
+                    log_callback(f"[TrackNet] Step 3/3: Inpainting chunk {chunk_count}/{total_chunks} ({pct:.0f}%)")
+                except Exception:
+                    pass
 
             # Pad to power of 8 for the 3-level U-Net pooling
             pad_len = ((len(chunk_x) + 7) // 8) * 8
@@ -381,16 +404,36 @@ class TrackNetInference:
             pred_x = out_np[0, :len(chunk_x)]
             pred_y = out_np[1, :len(chunk_y)]
 
-            # Only fill in gaps (where visibility was 0)
             for i in range(len(chunk_x)):
                 frame_idx = start + i
                 if vis[frame_idx] == 0 and pred_x[i] > 0.01 and pred_y[i] > 0.01:
-                    # Validate the inpainted position is reasonable
-                    # (within frame bounds with some margin)
                     if 0 < pred_x[i] < 1 and 0 < pred_y[i] < 1:
-                        inpainted_xs[frame_idx] = pred_x[i]
-                        inpainted_ys[frame_idx] = pred_y[i]
-                        inpainted_vis[frame_idx] = 1.0
+                        max_gap_dist = 0.15
+                        is_continuous = True
+
+                        for back in range(frame_idx - 1, max(0, frame_idx - 5) - 1, -1):
+                            if inpainted_vis[back] > 0:
+                                dx = abs(pred_x[i] - inpainted_xs[back])
+                                dy = abs(pred_y[i] - inpainted_ys[back])
+                                gap_frames = frame_idx - back
+                                if dx > max_gap_dist * gap_frames or dy > max_gap_dist * gap_frames:
+                                    is_continuous = False
+                                break
+
+                        if is_continuous:
+                            for fwd in range(frame_idx + 1, min(total_frames, frame_idx + 5)):
+                                if vis[fwd] > 0:
+                                    dx = abs(pred_x[i] - xs[fwd])
+                                    dy = abs(pred_y[i] - ys[fwd])
+                                    gap_frames = fwd - frame_idx
+                                    if dx > max_gap_dist * gap_frames or dy > max_gap_dist * gap_frames:
+                                        is_continuous = False
+                                    break
+
+                        if is_continuous:
+                            inpainted_xs[frame_idx] = pred_x[i]
+                            inpainted_ys[frame_idx] = pred_y[i]
+                            inpainted_vis[frame_idx] = 1.0
 
         # Build updated coords
         result = {}
@@ -416,35 +459,40 @@ class TrackNetInference:
         return torch.from_numpy(frame.astype(np.float32) / 255.0).permute(2, 0, 1)
 
     @staticmethod
-    def _heatmap_to_coord(heatmap: np.ndarray, threshold: float = 0.5) -> Dict:
-        """
-        Extract shuttlecock coordinates from a single heatmap.
-
-        Thresholds the heatmap, finds connected components, and returns
-        the center of the largest component.
-        """
-        # Threshold
+    def _heatmap_to_coord(heatmap: np.ndarray, threshold: float = 0.5,
+                          max_area: int = 100) -> Dict:
         binary = (heatmap > threshold).astype(np.uint8)
 
         if binary.sum() == 0:
             return {"x": 0.0, "y": 0.0, "visible": False}
 
-        # Find connected components
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
 
         if num_labels <= 1:
             return {"x": 0.0, "y": 0.0, "visible": False}
 
-        # Find largest component (skip background label 0)
-        largest_label = 1
-        largest_area = 0
+        best_label = -1
+        best_area = 0
         for label in range(1, num_labels):
             area = stats[label, cv2.CC_STAT_AREA]
-            if area > largest_area:
-                largest_area = area
-                largest_label = label
+            if area > max_area:
+                continue
+            if area > best_area:
+                best_area = area
+                best_label = label
 
-        cx = float(centroids[largest_label][0])
-        cy = float(centroids[largest_label][1])
+        if best_label < 0:
+            return {"x": 0.0, "y": 0.0, "visible": False}
+
+        mask = (labels == best_label)
+        ys_idx, xs_idx = np.where(mask)
+        weights = heatmap[ys_idx, xs_idx]
+        total_weight = weights.sum()
+        if total_weight > 0:
+            cx = float(np.sum(xs_idx * weights) / total_weight)
+            cy = float(np.sum(ys_idx * weights) / total_weight)
+        else:
+            cx = float(centroids[best_label][0])
+            cy = float(centroids[best_label][1])
 
         return {"x": cx, "y": cy, "visible": True}
