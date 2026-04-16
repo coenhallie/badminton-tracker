@@ -71,6 +71,19 @@ def calculate_iou(box1: Dict, box2: Dict) -> float:
     return intersection / union
 
 
+def _bbox_iou(box_a, box_b):
+    """IoU between two [x1, y1, x2, y2] arrays (numpy or list)."""
+    x1 = max(box_a[0], box_b[0])
+    y1 = max(box_a[1], box_b[1])
+    x2 = min(box_a[2], box_b[2])
+    y2 = min(box_a[3], box_b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
 def skeleton_bbox_from_keypoints(kpts) -> Optional[Dict]:
     """
     Calculate bounding box from skeleton keypoints.
@@ -1499,17 +1512,27 @@ with_reid: False
                 
                 processed_count += 1
                 
-                # Run pose estimation WITH TRACKING for consistent person IDs
-                # Uses custom BoT-SORT config with 3-second track buffer for far player persistence
-                pose_results = pose_model.track(
-                    frame,
-                    persist=True,
-                    verbose=False,
-                    tracker=str(tracker_config_path),
-                    conf=0.15,  # Very low confidence to catch far player detections
-                    iou=0.5,    # Moderate IoU for NMS
-                    imgsz=960,  # Larger input for better far-player keypoint detection
-                )
+                # Run pose estimation — branched by tracker type
+                if ocsort_tracker is not None:
+                    # OC-SORT: detection only, external tracker handles association
+                    pose_results = pose_model(
+                        frame,
+                        verbose=False,
+                        conf=0.15,
+                        iou=0.5,
+                        imgsz=960,
+                    )
+                else:
+                    # BoT-SORT: built-in Ultralytics tracking
+                    pose_results = pose_model.track(
+                        frame,
+                        persist=True,
+                        verbose=False,
+                        tracker=str(tracker_config_path),
+                        conf=0.15,
+                        iou=0.5,
+                        imgsz=960,
+                    )
                 
                 # Run object detection for shuttlecock, racket, etc. (NOT for players)
                 detection_results = detection_model(frame, verbose=False)
@@ -1679,9 +1702,29 @@ with_reid: False
                 if pose_results and len(pose_results) > 0:
                     result = pose_results[0]
                     
-                    # Get tracking IDs and boxes from pose model
-                    has_tracking = result.boxes is not None and result.boxes.is_track
-                    track_ids = result.boxes.id.int().cpu().tolist() if has_tracking and result.boxes.id is not None else None
+                    # Get tracking IDs — branched by tracker type
+                    if ocsort_tracker is not None and result.boxes is not None and len(result.boxes) > 0:
+                        import supervision as sv
+                        detections = sv.Detections.from_ultralytics(result)
+                        tracked = ocsort_tracker.update(detections)
+                        # Map tracker IDs back to original detection order via IoU
+                        track_ids = [-1] * len(result.boxes)
+                        if tracked.tracker_id is not None and len(tracked) > 0:
+                            orig_boxes = result.boxes.xyxy.cpu().numpy()
+                            for t_idx in range(len(tracked)):
+                                t_box = tracked.xyxy[t_idx]
+                                best_iou, best_orig = 0.0, -1
+                                for o_idx in range(len(orig_boxes)):
+                                    iou_val = _bbox_iou(orig_boxes[o_idx], t_box)
+                                    if iou_val > best_iou:
+                                        best_iou = iou_val
+                                        best_orig = o_idx
+                                if best_orig >= 0 and best_iou > 0.5:
+                                    track_ids[best_orig] = int(tracked.tracker_id[t_idx])
+                        has_tracking = any(tid >= 0 for tid in track_ids)
+                    else:
+                        has_tracking = result.boxes is not None and result.boxes.is_track
+                        track_ids = result.boxes.id.int().cpu().tolist() if has_tracking and result.boxes.id is not None else None
                     boxes = result.boxes.xyxy.cpu().numpy() if result.boxes is not None and len(result.boxes) > 0 else None
                     
                     if result.keypoints is not None and result.keypoints.xy is not None:
@@ -2424,6 +2467,7 @@ with_reid: False
             "video_width": width,
             "video_height": height,
             "camera_angle": camera_angle,
+            "tracker_type": tracker_type,
             "players": players_summary,
             "skeleton_data": skeleton_frames,
             "shuttle": None,
