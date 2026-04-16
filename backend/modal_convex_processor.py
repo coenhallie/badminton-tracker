@@ -1007,6 +1007,8 @@ image = (
         "python-dotenv",
         "torch>=2.0.0",
         "torchvision>=0.15.0",
+        "supervision>=0.26.0",
+        "trackers>=2.3.0",
     )
     .add_local_dir(str(_backend_dir / "tracknet"), remote_path="/root/tracknet")
     .add_local_file(str(_backend_dir / "rally_detection.py"), remote_path="/root/rally_detection.py")
