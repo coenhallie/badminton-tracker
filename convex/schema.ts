@@ -12,6 +12,8 @@ export default defineSchema({
     analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
     // Camera position (affects rally detection parameters)
     cameraAngle: v.optional(v.union(v.literal("overhead"), v.literal("corner"))),
+    // Tracker algorithm for player tracking (A/B testing)
+    trackerType: v.optional(v.union(v.literal("botsort"), v.literal("ocsort"))),
 
     // Processing status
     status: v.union(
