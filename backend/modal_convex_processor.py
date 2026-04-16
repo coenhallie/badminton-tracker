@@ -1704,23 +1704,28 @@ with_reid: False
                     
                     # Get tracking IDs — branched by tracker type
                     if ocsort_tracker is not None and result.boxes is not None and len(result.boxes) > 0:
-                        import supervision as sv
                         detections = sv.Detections.from_ultralytics(result)
                         tracked = ocsort_tracker.update(detections)
-                        # Map tracker IDs back to original detection order via IoU
+                        # Map tracker IDs back to original detection order via IoU.
+                        # OC-SORT's ORU may return recovered tracks not in the input,
+                        # so len(tracked) can exceed len(result.boxes).
                         track_ids = [-1] * len(result.boxes)
                         if tracked.tracker_id is not None and len(tracked) > 0:
                             orig_boxes = result.boxes.xyxy.cpu().numpy()
+                            claimed = set()
                             for t_idx in range(len(tracked)):
                                 t_box = tracked.xyxy[t_idx]
                                 best_iou, best_orig = 0.0, -1
                                 for o_idx in range(len(orig_boxes)):
+                                    if o_idx in claimed:
+                                        continue
                                     iou_val = _bbox_iou(orig_boxes[o_idx], t_box)
                                     if iou_val > best_iou:
                                         best_iou = iou_val
                                         best_orig = o_idx
                                 if best_orig >= 0 and best_iou > 0.5:
                                     track_ids[best_orig] = int(tracked.tracker_id[t_idx])
+                                    claimed.add(best_orig)
                         has_tracking = any(tid >= 0 for tid in track_ids)
                     else:
                         has_tracking = result.boxes is not None and result.boxes.is_track
