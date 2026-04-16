@@ -18,6 +18,7 @@ const uploadSpeed = ref('')
 const selectedFile = ref<File | null>(null)
 const analysisMode = ref<'rally_only' | 'full'>('full')
 const cameraAngle = ref<'overhead' | 'corner'>('overhead')
+const trackerType = ref<'botsort' | 'ocsort'>('botsort')
 const activeXhr = ref<XMLHttpRequest | null>(null)
 const retryCount = ref(0)
 const MAX_RETRIES = 2
@@ -192,6 +193,7 @@ async function attemptUpload() {
       size: selectedFile.value.size,
       analysisMode: analysisMode.value,
       cameraAngle: cameraAngle.value,
+      trackerType: trackerType.value,
     })
 
     uploadProgress.value = 100
@@ -336,6 +338,31 @@ async function attemptUpload() {
           >
             <span class="mode-title">Corner / Side</span>
             <span class="mode-desc">Camera at court level from corner or side</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Player Tracker Selector (only for full analysis) -->
+      <div v-if="!isUploading && analysisMode === 'full'" class="mode-selector">
+        <span class="mode-label">Player Tracker</span>
+        <div class="mode-options">
+          <button
+            class="mode-option"
+            :class="{ active: trackerType === 'botsort' }"
+            @click="trackerType = 'botsort'"
+            type="button"
+          >
+            <span class="mode-title">BoT-SORT</span>
+            <span class="mode-desc">Default tracker with motion compensation</span>
+          </button>
+          <button
+            class="mode-option"
+            :class="{ active: trackerType === 'ocsort' }"
+            @click="trackerType = 'ocsort'"
+            type="button"
+          >
+            <span class="mode-title">OC-SORT</span>
+            <span class="mode-desc">Motion-only tracker, better for uniform players</span>
           </button>
         </div>
       </div>
