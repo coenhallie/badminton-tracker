@@ -36,6 +36,16 @@ const COURT_WID_S = COURT_DIMENSIONS.width_singles // 5.18
 const NET_Y = COURT_LEN / 2                        // 6.7
 const SERVICE = COURT_DIMENSIONS.service_line      // 1.98 from net
 const DOUBLES_BACK_LINE_OFFSET = COURT_DIMENSIONS.back_boundary_service // 0.76
+const NET_HEIGHT_CENTER = COURT_DIMENSIONS.net_height_center // 1.524
+
+// Net visual tuning. The homography maps ground→pixels only, so we can't
+// project true vertical heights. We estimate the net's on-screen height
+// from the pixel length of the ground net line (known 6.1m at net depth)
+// and fold in a factor that accounts for camera pitch — vertical world
+// distances foreshorten relative to horizontal ones at the same depth.
+// 0.5 looks right across typical overhead / corner badminton angles.
+const NET_VERTICAL_FORESHORTEN = 0.5
+const NET_COLOR = '#ff9500'   // Distinct orange so the net reads against white court lines
 
 // Meters→pixels homography, recomputed when keypoints change.
 const metersToPixels = computed((): number[][] | null => {
@@ -140,7 +150,61 @@ function buildOffscreenCourt() {
     ctx.stroke()
   }
 
+  drawNet(ctx, H)
+
   offscreenCourt.value = off
+}
+
+// Render the net as a vertical rectangle standing on the ground net line.
+// Posts + top edge in solid NET_COLOR; interior filled with a translucent
+// hatched pattern to suggest mesh without obscuring skeletons behind it.
+function drawNet(ctx: CanvasRenderingContext2D, H: number[][]) {
+  const bL = m2p(H, 0, NET_Y)
+  const bR = m2p(H, COURT_WID_D, NET_Y)
+  if (!bL || !bR) return
+
+  // Pixel length of the ground net line = 6.1m of world distance at the net
+  // depth. Net height ≈ (1.524 / 6.1) × that length, then foreshortened.
+  const netWidthPx = Math.hypot(bR[0] - bL[0], bR[1] - bL[1])
+  const heightPx = netWidthPx * (NET_HEIGHT_CENTER / COURT_WID_D) * NET_VERTICAL_FORESHORTEN
+  if (heightPx <= 0) return
+
+  const tL: [number, number] = [bL[0], bL[1] - heightPx]
+  const tR: [number, number] = [bR[0], bR[1] - heightPx]
+
+  // Translucent fill so skeletons behind the net remain visible.
+  ctx.save()
+  ctx.fillStyle = NET_COLOR
+  ctx.globalAlpha = 0.12
+  ctx.beginPath()
+  ctx.moveTo(bL[0], bL[1])
+  ctx.lineTo(bR[0], bR[1])
+  ctx.lineTo(tR[0], tR[1])
+  ctx.lineTo(tL[0], tL[1])
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+
+  // Posts + top tape in solid color.
+  ctx.save()
+  ctx.strokeStyle = NET_COLOR
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  ctx.lineWidth = 3
+  ctx.beginPath()
+  ctx.moveTo(tL[0], tL[1])
+  ctx.lineTo(tR[0], tR[1])
+  ctx.stroke()
+
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(bL[0], bL[1])
+  ctx.lineTo(tL[0], tL[1])
+  ctx.moveTo(bR[0], bR[1])
+  ctx.lineTo(tR[0], tR[1])
+  ctx.stroke()
+  ctx.restore()
 }
 
 function render() {
