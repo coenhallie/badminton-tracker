@@ -36,15 +36,18 @@ const COURT_WID_S = COURT_DIMENSIONS.width_singles // 5.18
 const NET_Y = COURT_LEN / 2                        // 6.7
 const SERVICE = COURT_DIMENSIONS.service_line      // 1.98 from net
 const DOUBLES_BACK_LINE_OFFSET = COURT_DIMENSIONS.back_boundary_service // 0.76
+// BWF regulation: 1.524m at the centre, 1.55m at the posts — the 2.6cm
+// dip in the middle is what gives a real net its subtle curve.
 const NET_HEIGHT_CENTER = COURT_DIMENSIONS.net_height_center // 1.524
+const NET_HEIGHT_POST = COURT_DIMENSIONS.net_height_posts    // 1.55
 
 // Net visual tuning. The homography maps ground→pixels only, so we can't
 // project true vertical heights. We estimate the net's on-screen height
 // from the pixel length of the ground net line (known 6.1m at net depth)
 // and fold in a factor that accounts for camera pitch — vertical world
 // distances foreshorten relative to horizontal ones at the same depth.
-// 0.5 looks right across typical overhead / corner badminton angles.
-const NET_VERTICAL_FORESHORTEN = 0.5
+// 0.85 ≈ cos(32°), which matches typical broadcast badminton camera tilt.
+const NET_VERTICAL_FORESHORTEN = 0.85
 const NET_COLOR = '#ff9500'   // Distinct orange so the net reads against white court lines
 
 // Meters→pixels homography, recomputed when keypoints change.
@@ -156,23 +159,36 @@ function buildOffscreenCourt() {
 }
 
 // Render the net as a vertical rectangle standing on the ground net line.
-// Posts + top edge in solid NET_COLOR; interior filled with a translucent
-// hatched pattern to suggest mesh without obscuring skeletons behind it.
+// Posts drawn at the taller 1.55m post height; top edge curves down to the
+// 1.524m center as a quadratic Bezier, matching a real taut net's sag.
+// Interior is translucent so skeletons behind the net remain visible.
 function drawNet(ctx: CanvasRenderingContext2D, H: number[][]) {
   const bL = m2p(H, 0, NET_Y)
   const bR = m2p(H, COURT_WID_D, NET_Y)
   if (!bL || !bR) return
 
   // Pixel length of the ground net line = 6.1m of world distance at the net
-  // depth. Net height ≈ (1.524 / 6.1) × that length, then foreshortened.
+  // depth. Net height pixels = (worldHeight / 6.1) × that length × foreshorten.
   const netWidthPx = Math.hypot(bR[0] - bL[0], bR[1] - bL[1])
-  const heightPx = netWidthPx * (NET_HEIGHT_CENTER / COURT_WID_D) * NET_VERTICAL_FORESHORTEN
-  if (heightPx <= 0) return
+  const mPerPx = COURT_WID_D / netWidthPx
+  if (!isFinite(mPerPx) || mPerPx <= 0) return
+  const postHeightPx = (NET_HEIGHT_POST / mPerPx) * NET_VERTICAL_FORESHORTEN
+  const centerHeightPx = (NET_HEIGHT_CENTER / mPerPx) * NET_VERTICAL_FORESHORTEN
+  if (postHeightPx <= 0) return
 
-  const tL: [number, number] = [bL[0], bL[1] - heightPx]
-  const tR: [number, number] = [bR[0], bR[1] - heightPx]
+  const tL: [number, number] = [bL[0], bL[1] - postHeightPx]
+  const tR: [number, number] = [bR[0], bR[1] - postHeightPx]
+  const midBottom: [number, number] = [(bL[0] + bR[0]) / 2, (bL[1] + bR[1]) / 2]
+  const midTop: [number, number] = [midBottom[0], midBottom[1] - centerHeightPx]
 
-  // Translucent fill so skeletons behind the net remain visible.
+  // Quadratic Bezier control point solved so the curve passes through midTop
+  // at t = 0.5:  B(0.5) = 0.25·tL + 0.5·C + 0.25·tR  →  C = 2·midTop − 0.5·(tL + tR)
+  const ctrl: [number, number] = [
+    2 * midTop[0] - 0.5 * (tL[0] + tR[0]),
+    2 * midTop[1] - 0.5 * (tL[1] + tR[1]),
+  ]
+
+  // Translucent fill — follows the curved top edge.
   ctx.save()
   ctx.fillStyle = NET_COLOR
   ctx.globalAlpha = 0.12
@@ -180,12 +196,12 @@ function drawNet(ctx: CanvasRenderingContext2D, H: number[][]) {
   ctx.moveTo(bL[0], bL[1])
   ctx.lineTo(bR[0], bR[1])
   ctx.lineTo(tR[0], tR[1])
-  ctx.lineTo(tL[0], tL[1])
+  ctx.quadraticCurveTo(ctrl[0], ctrl[1], tL[0], tL[1])
   ctx.closePath()
   ctx.fill()
   ctx.restore()
 
-  // Posts + top tape in solid color.
+  // Posts + curved top tape in solid color.
   ctx.save()
   ctx.strokeStyle = NET_COLOR
   ctx.lineCap = 'round'
@@ -194,7 +210,7 @@ function drawNet(ctx: CanvasRenderingContext2D, H: number[][]) {
   ctx.lineWidth = 3
   ctx.beginPath()
   ctx.moveTo(tL[0], tL[1])
-  ctx.lineTo(tR[0], tR[1])
+  ctx.quadraticCurveTo(ctrl[0], ctrl[1], tR[0], tR[1])
   ctx.stroke()
 
   ctx.lineWidth = 2
