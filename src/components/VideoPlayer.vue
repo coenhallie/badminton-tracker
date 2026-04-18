@@ -279,6 +279,7 @@ const props = defineProps<{
   showShuttleTracking?: boolean
   heatmapFrameRange?: { start: number; end: number } | null
   courtKeypoints?: number[][] | null
+  viewMode?: 'video' | 'court'
 }>()
 
 // Colors for bounding boxes (matching backend colors)
@@ -2143,7 +2144,7 @@ defineExpose({
         ref="videoRef"
         :src="videoUrl"
         crossorigin="anonymous"
-        :class="{ 'video-dimmed': showHeatmap }"
+        :class="{ 'video-dimmed': showHeatmap, 'video-hidden': viewMode === 'court' }"
         @play="handlePlay"
         @pause="handlePause"
         @timeupdate="handleTimeUpdate"
@@ -2380,6 +2381,22 @@ video {
 
 video.video-dimmed {
   filter: brightness(0.4);
+}
+
+.video-hidden {
+  /* Keep video in layout + keep playback state (audio, timing) alive,
+     but render it invisible so the synthetic court canvas shows through.
+     opacity:0 is chosen over display:none so the video keeps decoding
+     frames (the timing events drive skeleton/shuttle sync). */
+  opacity: 0;
+  pointer-events: none;
+}
+
+.video-wrapper:has(.video-hidden) {
+  /* Dark backdrop behind the (invisible) video so the synthetic court
+     has a canvas-native dark background even before SyntheticCourtView
+     paints. */
+  background: #0f1419;
 }
 
 .skeleton-canvas {
