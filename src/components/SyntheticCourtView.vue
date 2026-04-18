@@ -22,6 +22,9 @@ const props = defineProps<{
   courtKeypoints: ExtendedCourtKeypoints
   videoWidth: number
   videoHeight: number
+  skeletonData?: Array<{ frame: number; shuttle_position?: { x: number; y: number; visible?: boolean } | null }>
+  currentFrame?: number
+  fps?: number
 }>()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -158,19 +161,82 @@ function render() {
     ctx.fillStyle = '#0f1419'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
   }
+
+  drawShuttle(ctx)
+}
+
+// Trail = last ~0.5s of shuttle positions. At 30fps = 15 frames.
+const TRAIL_SECONDS = 0.5
+
+function shuttleFrames(): Array<{ x: number; y: number; age: number }> {
+  const cf = props.currentFrame ?? 0
+  const fps = props.fps && props.fps > 0 ? props.fps : 30
+  const window = Math.max(1, Math.round(TRAIL_SECONDS * fps))
+  const frames = props.skeletonData
+  if (!frames || frames.length === 0) return []
+
+  // skeletonData is frame-indexed but may skip frames. Walk backward from
+  // currentFrame, take up to `window` visible shuttle samples.
+  const result: Array<{ x: number; y: number; age: number }> = []
+  // Binary search would be nicer but frames are small + we only look at a window.
+  for (let i = frames.length - 1; i >= 0 && result.length < window; i--) {
+    const f = frames[i]
+    if (!f || f.frame > cf) continue
+    const sp = f.shuttle_position
+    if (!sp || sp.visible === false) continue
+    if (typeof sp.x !== 'number' || typeof sp.y !== 'number') continue
+    const age = cf - f.frame
+    if (age >= window) break
+    result.push({ x: sp.x, y: sp.y, age })
+  }
+  return result // result[0] is newest
+}
+
+function drawShuttle(ctx: CanvasRenderingContext2D) {
+  const pts = shuttleFrames()
+  if (pts.length === 0) return
+  const window = Math.max(1, Math.round(TRAIL_SECONDS * (props.fps && props.fps > 0 ? props.fps : 30)))
+
+  // Trail (oldest → newest) so newer points paint over older.
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const { x, y, age } = pts[i]!
+    const alpha = Math.max(0.05, 1 - age / window)
+    ctx.globalAlpha = alpha * 0.9
+    ctx.fillStyle = '#ffffff'
+    ctx.beginPath()
+    ctx.arc(x, y, 3, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  ctx.globalAlpha = 1
+
+  // Current position: bright dot + glow.
+  const head = pts[0]!
+  ctx.shadowColor = '#ffffff'
+  ctx.shadowBlur = 12
+  ctx.fillStyle = '#ffffff'
+  ctx.beginPath()
+  ctx.arc(head.x, head.y, 6, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.shadowBlur = 0
+}
+
+let rafId: number | null = null
+function tick() {
+  render()
+  rafId = requestAnimationFrame(tick)
 }
 
 onMounted(() => {
   buildOffscreenCourt()
-  render()
+  rafId = requestAnimationFrame(tick)
 })
 
 watch([() => props.courtKeypoints, () => props.videoWidth, () => props.videoHeight], () => {
   buildOffscreenCourt()
-  render()
 }, { deep: true })
 
 onUnmounted(() => {
+  if (rafId !== null) cancelAnimationFrame(rafId)
   offscreenCourt.value = null
 })
 </script>

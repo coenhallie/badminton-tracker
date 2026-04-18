@@ -282,6 +282,7 @@ const props = defineProps<{
   courtKeypoints?: number[][] | null
   manualCourtKeypoints?: ExtendedCourtKeypoints | null
   viewMode?: 'video' | 'court'
+  videoFps?: number
 }>()
 
 // Colors for bounding boxes (matching backend colors)
@@ -2158,6 +2159,9 @@ defineExpose({
         :court-keypoints="manualCourtKeypoints"
         :video-width="videoRef.videoWidth"
         :video-height="videoRef.videoHeight"
+        :skeleton-data="skeletonData"
+        :current-frame="currentFrame"
+        :fps="videoFps"
       />
       <canvas
         v-if="(showSkeleton || showBoundingBoxes || showHeatmap) && skeletonData"

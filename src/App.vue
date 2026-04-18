@@ -1583,6 +1583,7 @@ watch(videoSectionRef, () => {
                   :court-keypoints="courtCornersForMiniCourt"
                   :view-mode="viewMode"
                   :manual-court-keypoints="manualCourtKeypoints"
+                  :video-fps="analysisResult?.fps ?? 30"
                   @court-keypoints-set="handleCourtKeypointsSet"
                   @keypoints-confirmed="handleKeypointsConfirmed"
                   @time-update="handleTimeUpdate"
