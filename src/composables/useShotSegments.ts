@@ -42,14 +42,14 @@ export function detectShots(frames: SkeletonFrame[]): ShotEvent[] {
   // Count data availability
   let shuttleFrameCount = 0
   let poseClassCount = 0
-
+  
   for (const frame of frames) {
     if (frame.shuttle_position && frame.shuttle_position.x != null) shuttleFrameCount++
     if (frame.pose_classifications && frame.pose_classifications.length > 0) poseClassCount++
   }
-
+  
   console.log(`[ShotSpeedList] Data available: ${shuttleFrameCount} shuttle frames, ${poseClassCount} pose classification frames, ${frames.length} total frames`)
-
+  
   // Try shuttle trajectory first if enough data
   if (shuttleFrameCount >= 5) {
     const shots = detectShotsFromShuttleTrajectory(frames)
@@ -58,7 +58,7 @@ export function detectShots(frames: SkeletonFrame[]): ShotEvent[] {
       return shots
     }
   }
-
+  
   // Try pose classification if available
   if (poseClassCount >= 3) {
     const shots = detectShotsFromPoseClassification(frames)
@@ -67,7 +67,7 @@ export function detectShots(frames: SkeletonFrame[]): ShotEvent[] {
       return shots
     }
   }
-
+  
   // Primary fallback: Player movement analysis (always works with skeleton data)
   const shots = detectShotsFromPlayerMovement(frames)
   console.log(`[ShotSpeedList] Using player movement detection: ${shots.length} shots`)
@@ -79,7 +79,7 @@ export function detectShots(frames: SkeletonFrame[]): ShotEvent[] {
  */
 function detectShotsFromShuttleTrajectory(frames: SkeletonFrame[]): ShotEvent[] {
   const shots: ShotEvent[] = []
-
+  
   const shuttleFrames: { frame: number; timestamp: number; x: number; y: number }[] = []
   for (const frame of frames) {
     if (frame.shuttle_position && frame.shuttle_position.x != null && frame.shuttle_position.y != null) {
@@ -91,11 +91,11 @@ function detectShotsFromShuttleTrajectory(frames: SkeletonFrame[]): ShotEvent[] 
       })
     }
   }
-
+  
   if (shuttleFrames.length < 5) return shots
-
+  
   const smoothed = smoothPositions(shuttleFrames)
-
+  
   const velocities: { frame: number; timestamp: number; vx: number; vy: number; x: number; y: number }[] = []
   for (let i = 1; i < smoothed.length; i++) {
     const prev = smoothed[i - 1]!
@@ -112,10 +112,10 @@ function detectShotsFromShuttleTrajectory(frames: SkeletonFrame[]): ShotEvent[] 
       })
     }
   }
-
+  
   const MIN_SHOT_GAP_SECONDS = 0.3
   let lastShotTimestamp = -Infinity
-
+  
   for (let i = 1; i < velocities.length; i++) {
     const prev = velocities[i - 1]!
     const curr = velocities[i]!
@@ -123,7 +123,7 @@ function detectShotsFromShuttleTrajectory(frames: SkeletonFrame[]): ShotEvent[] 
     const dvx = curr.vx - prev.vx
     const dvy = curr.vy - prev.vy
     const accelMag = Math.sqrt(dvx * dvx + dvy * dvy)
-
+    
     if (dot < 0 && accelMag > 50 && (curr.timestamp - lastShotTimestamp) > MIN_SHOT_GAP_SECONDS) {
       const skeletonFrame = frames.find(f => f.frame === curr.frame)
       if (skeletonFrame && skeletonFrame.players.length > 0) {
@@ -142,7 +142,7 @@ function detectShotsFromShuttleTrajectory(frames: SkeletonFrame[]): ShotEvent[] 
       }
     }
   }
-
+  
   return shots
 }
 
@@ -155,21 +155,21 @@ function detectShotsFromPoseClassification(frames: SkeletonFrame[]): ShotEvent[]
   const MIN_CONFIDENCE = 0.5
   const MIN_SHOT_GAP_SECONDS = 0.5
   let lastShotTimestamp = -Infinity
-
+  
   for (const frame of frames) {
     if (!frame.pose_classifications || frame.pose_classifications.length === 0) continue
     if (frame.timestamp - lastShotTimestamp < MIN_SHOT_GAP_SECONDS) continue
-
+    
     for (const classification of frame.pose_classifications) {
       if (HITTING_CLASSES.has(classification.class_name) && classification.confidence >= MIN_CONFIDENCE) {
         let matchedPlayer = frame.players[0]
-
+        
         if (classification.bbox && frame.players.length > 1) {
           const bboxCenterX = classification.bbox.x + classification.bbox.width / 2
           const bboxCenterY = classification.bbox.y + classification.bbox.height / 2
           matchedPlayer = findClosestPlayer(frame.players, bboxCenterX, bboxCenterY) || matchedPlayer
         }
-
+        
         if (matchedPlayer) {
           shots.push({
             frame: frame.frame,
@@ -191,7 +191,7 @@ function detectShotsFromPoseClassification(frames: SkeletonFrame[]): ShotEvent[]
       }
     }
   }
-
+  
   return shots
 }
 
@@ -211,7 +211,7 @@ function detectShotsFromPoseClassification(frames: SkeletonFrame[]): ShotEvent[]
  */
 function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
   if (frames.length < 10) return []
-
+  
   // Build per-player position timeline with speeds
   const playerTimelines: Map<number, {
     frame: number
@@ -220,17 +220,17 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
     y: number
     speed: number  // km/h from skeleton data
   }[]> = new Map()
-
+  
   for (const frame of frames) {
     for (const player of frame.players) {
       if (!player.center) continue
-
+      
       let timeline = playerTimelines.get(player.player_id)
       if (!timeline) {
         timeline = []
         playerTimelines.set(player.player_id, timeline)
       }
-
+      
       timeline.push({
         frame: frame.frame,
         timestamp: frame.timestamp,
@@ -240,16 +240,16 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
       })
     }
   }
-
+  
   // For each player, detect "shot events" as deceleration peaks
   const playerShots: ShotEvent[] = []
   const MIN_SHOT_GAP = 0.6 // seconds between shots by same player
   const DECEL_THRESHOLD_KMH = 2.0 // Minimum speed drop to count as deceleration
   const MIN_SPEED_BEFORE_DECEL = 3.0 // Player must be moving at least this fast (km/h) before decel
-
+  
   for (const [playerId, timeline] of playerTimelines) {
     if (timeline.length < 5) continue
-
+    
     // Smooth speeds (moving average window=5)
     const smoothedSpeeds: number[] = []
     for (let i = 0; i < timeline.length; i++) {
@@ -260,22 +260,22 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
       }
       smoothedSpeeds.push(sum / count)
     }
-
+    
     // Detect deceleration peaks: speed was high, then drops significantly
     let lastShotTimestamp = -Infinity
-
+    
     for (let i = 3; i < smoothedSpeeds.length - 1; i++) {
       const prev3Avg = (smoothedSpeeds[i-3]! + smoothedSpeeds[i-2]! + smoothedSpeeds[i-1]!) / 3
       const curr = smoothedSpeeds[i]!
       const decel = prev3Avg - curr
-
+      
       const entry = timeline[i]!
-
+      
       // Deceleration peak: was moving fast, now slowing down
       if (decel > DECEL_THRESHOLD_KMH &&
           prev3Avg > MIN_SPEED_BEFORE_DECEL &&
           entry.timestamp - lastShotTimestamp > MIN_SHOT_GAP) {
-
+        
         playerShots.push({
           frame: entry.frame,
           timestamp: entry.timestamp,
@@ -284,20 +284,20 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
           playerPosition: { x: entry.x, y: entry.y },
           detectionMethod: 'shuttle_trajectory' // Using this to keep type simple
         })
-
+        
         lastShotTimestamp = entry.timestamp
       }
     }
   }
-
+  
   // Sort all shots by timestamp
   playerShots.sort((a, b) => a.timestamp - b.timestamp)
-
+  
   // If we have very few shots, lower thresholds and try again with just speed peaks
   if (playerShots.length < 3) {
     return detectShotsFromSpeedPeaks(frames, playerTimelines)
   }
-
+  
   // Post-process: ensure minimum gap between any two shots
   const filteredShots: ShotEvent[] = []
   let lastTs = -Infinity
@@ -307,7 +307,7 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
       lastTs = shot.timestamp
     }
   }
-
+  
   return filteredShots
 }
 
@@ -323,12 +323,12 @@ function detectShotsFromSpeedPeaks(
   const shots: ShotEvent[] = []
   const MIN_PEAK_SPEED = 2.0 // km/h - very low threshold to catch anything
   const MIN_GAP = 0.8 // seconds
-
+  
   for (const [playerId, timeline] of playerTimelines) {
     if (timeline.length < 5) continue
-
+    
     let lastShotTs = -Infinity
-
+    
     // Find local speed maxima (peaks in movement)
     for (let i = 2; i < timeline.length - 2; i++) {
       const speed = timeline[i]!.speed
@@ -336,14 +336,14 @@ function detectShotsFromSpeedPeaks(
       const nextSpeed = timeline[i+1]!.speed
       const prev2Speed = timeline[i-2]!.speed
       const next2Speed = timeline[i+1]!.speed
-
+      
       // Local maximum: current speed is higher than neighbors
       const isLocalMax = speed > prevSpeed && speed > nextSpeed &&
                          speed > prev2Speed && speed > next2Speed &&
                          speed > MIN_PEAK_SPEED
-
+      
       const entry = timeline[i]!
-
+      
       if (isLocalMax && entry.timestamp - lastShotTs > MIN_GAP) {
         shots.push({
           frame: entry.frame,
@@ -357,9 +357,9 @@ function detectShotsFromSpeedPeaks(
       }
     }
   }
-
+  
   shots.sort((a, b) => a.timestamp - b.timestamp)
-
+  
   // Filter minimum gap between any two shots
   const filtered: ShotEvent[] = []
   let lastTs = -Infinity
@@ -369,7 +369,7 @@ function detectShotsFromSpeedPeaks(
       lastTs = shot.timestamp
     }
   }
-
+  
   return filtered
 }
 
@@ -383,7 +383,7 @@ function findClosestPlayer(
 ): SkeletonFrame['players'][0] | null {
   let closest: SkeletonFrame['players'][0] | null = null
   let closestDist = Infinity
-
+  
   for (const player of players) {
     if (!player.center) continue
     const dx = player.center.x - x
@@ -394,7 +394,7 @@ function findClosestPlayer(
       closest = player
     }
   }
-
+  
   return closest || players[0] || null
 }
 
@@ -407,7 +407,7 @@ function smoothPositions(
 ): { frame: number; timestamp: number; x: number; y: number }[] {
   const result: { frame: number; timestamp: number; x: number; y: number }[] = []
   const half = Math.floor(windowSize / 2)
-
+  
   for (let i = 0; i < points.length; i++) {
     let sumX = 0, sumY = 0, count = 0
     for (let j = Math.max(0, i - half); j <= Math.min(points.length - 1, i + half); j++) {
@@ -422,7 +422,7 @@ function smoothPositions(
       y: sumY / count
     })
   }
-
+  
   return result
 }
 
