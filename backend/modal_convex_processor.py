@@ -1162,6 +1162,20 @@ async def _process_video_worker(
         pipeline_start = time.time()
         phase_start = time.time()
 
+        # Defensive cache cleanup: remove any stale files for this video_id from
+        # a previous partial/failed run on the same Modal container. Each upload
+        # gets a fresh video_id, so files from OTHER videos are already isolated
+        # by path — this only protects against retry-on-same-id edge cases and
+        # guarantees we never silently reuse cached artifacts between runs.
+        stale_files = list(Path("/cache").glob(f"{video_id}*"))
+        for stale_path in stale_files:
+            try:
+                stale_path.unlink()
+            except Exception as cleanup_err:
+                print(f"[MODAL] Warn: failed to remove stale {stale_path}: {cleanup_err}")
+        if stale_files:
+            print(f"[MODAL] Removed {len(stale_files)} stale cache file(s) for {video_id}")
+
         # Download video from Convex (streamed to disk to handle large files)
         await send_log("Downloading video from storage...", "info", "processing")
 
@@ -1242,24 +1256,43 @@ async def _process_video_worker(
             ocsort_tracker = None  # Only set when tracker_type == "ocsort"
             tracker_config_path = None  # Only set when tracker_type == "botsort"
 
+            # Scale time-based tracker buffers to actual FPS so 3-second
+            # persistence holds whether the source is 24/30/60 fps.
+            effective_fps = float(fps) if fps and fps > 0 else 30.0
+            lost_buffer_frames = max(int(round(3.0 * effective_fps)), 30)
+
             if tracker_type == "ocsort":
                 import supervision as sv
                 from trackers import OCSORTTracker
 
+                # Input detections come from pose_model(conf=0.15). high_conf_det_threshold
+                # controls which detections enter the tracker; anything below is silently
+                # dropped from the output. Setting it to 0.15 (matching pose conf) ensures
+                # the far player — often 0.2–0.3 conf — gets a shot at track continuity,
+                # matching the effective detection range BoT-SORT sees via its
+                # track_high/low threshold split. minimum_consecutive_frames=2 prevents
+                # transient noise detections from producing stable noise tracks.
                 ocsort_tracker = OCSORTTracker(
-                    lost_track_buffer=90,               # 3s at 30fps — match BoT-SORT's track_buffer
-                    frame_rate=float(fps),               # scale buffer to actual FPS
-                    minimum_consecutive_frames=2,        # fast track confirmation for 2 players
-                    minimum_iou_threshold=0.3,           # lenient for far-player small bboxes
-                    high_conf_det_threshold=0.3,         # low threshold — far player is often 0.2-0.4
-                    direction_consistency_weight=0.2,    # OCM: velocity direction matching
-                    delta_t=3,                           # past frames for velocity estimation
+                    lost_track_buffer=lost_buffer_frames,   # 3s of frames at this video's fps
+                    frame_rate=effective_fps,                # for age / velocity normalization
+                    minimum_consecutive_frames=2,            # fast track confirmation for 2 players
+                    minimum_iou_threshold=0.3,               # lenient for far-player small bboxes
+                    high_conf_det_threshold=0.15,            # match pose model conf — see note above
+                    direction_consistency_weight=0.2,        # OCM: velocity direction matching
+                    delta_t=3,                               # past frames for velocity estimation
                 )
-                await send_log(f"OC-SORT tracker initialized (lost_track_buffer=90, frame_rate={fps})", "info", "model")
+                await send_log(
+                    f"OC-SORT initialized (lost_buffer={lost_buffer_frames}f / 3.0s, "
+                    f"frame_rate={effective_fps:.1f}, high_conf_thresh=0.15)",
+                    "info", "model"
+                )
             else:
-                # Create custom BoT-SORT tracker config optimized for badminton (2 players)
+                # Create custom BoT-SORT tracker config optimized for badminton (2 players).
+                # NOTE: with_reid is False below — both trackers run pure-motion, so the A/B
+                # test isolates motion-algorithm differences (ORU/OCM/OCR vs BoT-SORT's GMC +
+                # Kalman + byte-style cascading), not appearance handling.
                 # Key changes from defaults:
-                # - track_buffer: 90 (3 seconds at 30fps) instead of 30 (1 second)
+                # - track_buffer: scales with fps (3 seconds) instead of fixed 30 frames
                 #   → Far player's track survives longer occlusions/low-confidence gaps
                 # - track_high_thresh: 0.3 instead of 0.5
                 #   → Far player (small, low-confidence) gets tracked more consistently
@@ -1267,14 +1300,17 @@ async def _process_video_worker(
                 #   → Faster track creation when far player reappears
                 # - match_thresh: 0.9 instead of 0.8
                 #   → More lenient matching to prevent track fragmentation
-                tracker_config_path = Path("/cache/botsort_badminton.yaml")
+                # Per-video YAML path (keyed on video_id) so concurrent workers on the
+                # same Modal Volume can't race on a shared file, and so the config is
+                # always re-written from scratch rather than reused from a prior run.
+                tracker_config_path = Path(f"/cache/{video_id}_botsort.yaml")
                 tracker_config_path.parent.mkdir(parents=True, exist_ok=True)
-                tracker_config_content = """# BoT-SORT tracker config optimized for badminton (2 players)
+                tracker_config_content = f"""# BoT-SORT tracker config optimized for badminton (2 players)
 tracker_type: botsort
 track_high_thresh: 0.3
 track_low_thresh: 0.1
 new_track_thresh: 0.4
-track_buffer: 90
+track_buffer: {lost_buffer_frames}
 match_thresh: 0.9
 fuse_score: True
 # GMC (Global Motion Compensation) for camera movement
@@ -1285,7 +1321,10 @@ appearance_thresh: 0.25
 with_reid: False
 """
                 tracker_config_path.write_text(tracker_config_content)
-                await send_log("Custom BoT-SORT tracker config created (track_buffer=90, track_high=0.3)", "info", "model")
+                await send_log(
+                    f"BoT-SORT config written (track_buffer={lost_buffer_frames}f / 3.0s, track_high=0.3)",
+                    "info", "model"
+                )
 
             # Warmup both models
             dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
@@ -1706,9 +1745,10 @@ with_reid: False
                     if ocsort_tracker is not None and result.boxes is not None and len(result.boxes) > 0:
                         detections = sv.Detections.from_ultralytics(result)
                         tracked = ocsort_tracker.update(detections)
-                        # Map tracker IDs back to original detection order via IoU.
-                        # OC-SORT's ORU may return recovered tracks not in the input,
-                        # so len(tracked) can exceed len(result.boxes).
+                        # OC-SORT reorders its output (built from association indices, not
+                        # input order) and silently drops detections below
+                        # high_conf_det_threshold, so len(tracked) <= len(result.boxes).
+                        # We re-align by IoU so keypoints[i] stays paired with track_ids[i].
                         track_ids = [-1] * len(result.boxes)
                         if tracked.tracker_id is not None and len(tracked) > 0:
                             orig_boxes = result.boxes.xyxy.cpu().numpy()
@@ -2562,10 +2602,12 @@ with_reid: False
             "success", "processing"
         )
 
-        # Cleanup
-        video_path.unlink(missing_ok=True)
-        if 'skeleton_frames_path' in locals():
-            skeleton_frames_path.unlink(missing_ok=True)
+        # Cleanup: remove every cache artifact we wrote for this video_id so the
+        # /cache volume never serves stale data to a later run. Uses a glob so
+        # any per-video file (mp4, skeleton jsonl, tracker yaml, etc.) is
+        # swept without having to enumerate paths individually.
+        for artifact in Path("/cache").glob(f"{video_id}*"):
+            artifact.unlink(missing_ok=True)
         vol.commit()
 
         print(f"[MODAL] Processing complete for video: {video_id} in {total_time:.1f}s")
@@ -2588,14 +2630,12 @@ with_reid: False
         await send_status_update("failed", error=error_msg)
         await send_log(f"Processing failed after {elapsed:.1f}s: {error_msg}", "error", "processing")
 
-        # Close skeleton file if still open, then clean up
+        # Close skeleton file if still open, then sweep every cache artifact
+        # tied to this video_id so a retry starts from scratch.
         if 'skeleton_frames_file' in locals() and not skeleton_frames_file.closed:
             skeleton_frames_file.close()
-        skeleton_path = Path(f"/cache/{video_id}_skeleton.jsonl")
-        skeleton_path.unlink(missing_ok=True)
-
-        video_path = Path(f"/cache/{video_id}.mp4")
-        video_path.unlink(missing_ok=True)
+        for artifact in Path("/cache").glob(f"{video_id}*"):
+            artifact.unlink(missing_ok=True)
 
         try:
             vol.commit()
