@@ -1361,8 +1361,11 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
     drawBoundingBoxes(ctx, frame.badminton_detections, scaleX, scaleY)
   }
 
-  // Draw shuttle tracking trail + current position dot
-  if (props.showShuttleTracking && frame) {
+  // Draw shuttle tracking trail + current position dot.
+  // Skipped in court view — SyntheticCourtView draws its own (cleaner) trail
+  // designed for the synthetic-court background, and we don't want both
+  // trails overlapping.
+  if (props.showShuttleTracking && frame && props.viewMode !== 'court') {
     drawShuttleTrail(ctx, frame, scaleX, scaleY)
   }
 
