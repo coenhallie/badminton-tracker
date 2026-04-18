@@ -1538,32 +1538,32 @@ watch(videoSectionRef, () => {
           </Transition>
 
           <div class="results-content" :class="{ 'with-minicourt': showMiniCourt }">
-            <div class="video-with-minicourt">
-              <div class="mode-selector view-mode-selector">
-                <span class="mode-label">Playback View</span>
-                <div class="mode-options">
-                  <button
-                    type="button"
-                    class="mode-option"
-                    :class="{ active: viewMode === 'video' }"
-                    @click="viewMode = 'video'"
-                  >
-                    <span class="mode-title">Video</span>
-                    <span class="mode-desc">Real footage with skeleton overlay</span>
-                  </button>
-                  <button
-                    type="button"
-                    class="mode-option"
-                    :class="{ active: viewMode === 'court' }"
-                    :disabled="manualCourtKeypoints === null"
-                    :title="manualCourtKeypoints === null ? 'Set manual court keypoints to enable' : ''"
-                    @click="viewMode = 'court'"
-                  >
-                    <span class="mode-title">Court</span>
-                    <span class="mode-desc">Synthetic court with skeleton + shuttle trail</span>
-                  </button>
-                </div>
+            <div class="mode-selector view-mode-selector">
+              <span class="mode-label">Playback View</span>
+              <div class="mode-options">
+                <button
+                  type="button"
+                  class="mode-option"
+                  :class="{ active: viewMode === 'video' }"
+                  @click="viewMode = 'video'"
+                >
+                  <span class="mode-title">Video</span>
+                  <span class="mode-desc">Real footage with skeleton overlay</span>
+                </button>
+                <button
+                  type="button"
+                  class="mode-option"
+                  :class="{ active: viewMode === 'court' }"
+                  :disabled="manualCourtKeypoints === null"
+                  :title="manualCourtKeypoints === null ? 'Set manual court keypoints to enable' : ''"
+                  @click="viewMode = 'court'"
+                >
+                  <span class="mode-title">Court</span>
+                  <span class="mode-desc">Synthetic court with skeleton + shuttle trail</span>
+                </button>
               </div>
+            </div>
+            <div class="video-with-minicourt">
               <div ref="videoSectionRef" class="video-section">
                 <VideoPlayer
                   ref="videoPlayerRef"
