@@ -1,6 +1,7 @@
 import { computed, type Ref } from 'vue'
-import type { SkeletonFrame, SpeedZone } from '@/types/analysis'
+import type { SkeletonFrame, Keypoint, SpeedZone } from '@/types/analysis'
 import { getSpeedZone } from '@/utils/speedZones'
+import { legStretchMeters, kneeFlexDegrees } from '@/utils/bodyAngles'
 
 export interface ShotEvent {
   frame: number
@@ -488,17 +489,75 @@ export function buildMovementSegments(
   return segments
 }
 
-export function useShotSegments(skeletonData: Ref<SkeletonFrame[] | undefined>) {
+export interface BodyAnglePeaks {
+  peakLegStretchM: number | null   // Max ankle-to-ankle distance in meters
+  peakKneeFlexDeg: number | null   // Minimum knee angle (deepest bend)
+  peakTorsoLeanDeg: number | null  // Max absolute torso-lean angle
+}
+
+/**
+ * Walk the frames of a single segment for the moving player and compute
+ * peak body-mechanics values. H is the video-pixels → court-meters homography
+ * (the forward matrix produced by computeHomographyFromKeypoints). When null,
+ * leg stretch cannot be computed and is returned as null.
+ */
+export function aggregateBodyAngles(
+  segment: ShotMovementSegment,
+  frames: SkeletonFrame[],
+  H: number[][] | null,
+): BodyAnglePeaks {
+  let peakLeg: number | null = null
+  let peakKnee: number | null = null
+  let peakTorso: number | null = null
+
+  for (const frame of frames) {
+    if (frame.frame < segment.startFrame || frame.frame > segment.endFrame) continue
+    const player = frame.players.find(p => p.player_id === segment.movingPlayerId)
+    if (!player) continue
+
+    const leg = legStretchMeters(player.keypoints as Keypoint[], H)
+    if (leg != null && (peakLeg == null || leg > peakLeg)) peakLeg = leg
+
+    const knee = kneeFlexDegrees(
+      player.pose?.body_angles?.left_knee,
+      player.pose?.body_angles?.right_knee,
+    )
+    if (knee != null && (peakKnee == null || knee < peakKnee)) peakKnee = knee
+
+    const torso = player.pose?.body_angles?.torso_lean
+    if (typeof torso === 'number') {
+      const absT = Math.abs(torso)
+      if (peakTorso == null || absT > peakTorso) peakTorso = absT
+    }
+  }
+
+  return {
+    peakLegStretchM: peakLeg,
+    peakKneeFlexDeg: peakKnee,
+    peakTorsoLeanDeg: peakTorso,
+  }
+}
+
+export interface ShotMovementSegmentWithPeaks extends ShotMovementSegment {
+  peaks: BodyAnglePeaks
+}
+
+export function useShotSegments(
+  skeletonData: Ref<SkeletonFrame[] | undefined>,
+  homography?: Ref<number[][] | null>,
+) {
   const shotEvents = computed<ShotEvent[]>(() => {
     const frames = skeletonData.value
     if (!frames || frames.length === 0) return []
     return detectShots(frames)
   })
 
-  const segments = computed<ShotMovementSegment[]>(() => {
+  const segments = computed<ShotMovementSegmentWithPeaks[]>(() => {
     const frames = skeletonData.value
     if (!frames) return []
-    return buildMovementSegments(shotEvents.value, frames)
+    const H = homography?.value ?? null
+    const base = buildMovementSegments(shotEvents.value, frames)
+    return base.map(seg => ({ ...seg, peaks: aggregateBodyAngles(seg, frames, H) }))
   })
 
   return { shotEvents, segments }
