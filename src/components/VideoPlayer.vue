@@ -2226,7 +2226,7 @@ defineExpose({
       
     </div>
 
-    <div class="controls" :class="{ visible: (showControls || !isPlaying) && !isKeypointSelectionMode }">
+    <div class="controls" :class="{ visible: (showControls || !isPlaying || viewMode === 'court') && !isKeypointSelectionMode }">
       <div class="progress-bar" @click="handleSeek">
         <div class="progress-bg">
           <div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div>
