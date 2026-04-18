@@ -2435,6 +2435,9 @@ video.video-dimmed {
   justify-content: center;
   background: rgba(0, 0, 0, 0.3);
   cursor: pointer;
+  /* Above PoseOverlay (z-index: 20) so the center play button is
+     clickable even when skeletons are drawn near the middle. */
+  z-index: 25;
 }
 
 .play-button {
@@ -2469,6 +2472,9 @@ video.video-dimmed {
   background: rgba(0, 0, 0, 0.85);
   opacity: 0;
   transition: opacity 0.3s ease;
+  /* Must sit above PoseOverlay (z-index: 20), which has pointer-events:auto
+     and would otherwise cover the control bar and swallow its clicks. */
+  z-index: 25;
 }
 
 .controls.visible {
