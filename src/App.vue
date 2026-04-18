@@ -12,6 +12,8 @@ import ShotSpeedList from '@/components/ShotSpeedList.vue'
 import AdvancedAnalytics from '@/components/AdvancedAnalytics.vue'
 import RallyTimeline from '@/components/RallyTimeline.vue'
 import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
+import { useShotSegments, type ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
+import { computeHomographyFromKeypoints } from '@/utils/homography'
 import {
   checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
   triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
@@ -127,6 +129,14 @@ const nextRallyStart = ref(0)
 let rallyPauseTimer: ReturnType<typeof setInterval> | null = null
 const lastTriggeredRallyEnd = ref(-1)
 
+// Shot auto-pause state
+const pauseBetweenShots = ref(false)
+const shotPauseDurationSec = ref<1 | 1.5 | 2 | 3>(1.5)
+const shotPauseCountdown = ref(0)
+const currentShotSegment = ref<ShotMovementSegmentWithPeaks | null>(null)
+const lastTriggeredShotTime = ref(-1)
+let shotPauseTimer: ReturnType<typeof setInterval> | null = null
+
 // Client-side rally detection (same source as AdvancedAnalytics)
 const { rallies: detectedRallies, backendRallies, rallySource, rallySpeedStats } = useAdvancedAnalytics(
   computed(() => analysisResult.value),
@@ -171,6 +181,25 @@ interface ExtendedCourtKeypoints {
 
 // Manual court keypoints storage (for mini court when manually set)
 const manualCourtKeypoints = ref<ExtendedCourtKeypoints | null>(null)
+
+// Reactive skeletonData for the composable.
+const skeletonDataRef = computed(() => analysisResult.value?.skeleton_data)
+
+// Homography for leg-stretch meters (null when no manual keypoints).
+const shotHomography = computed((): number[][] | null => {
+  const kp = manualCourtKeypoints.value
+  if (!kp) return null
+  const videoPts = [
+    kp.top_left, kp.top_right, kp.bottom_right, kp.bottom_left,
+    kp.net_left, kp.net_right,
+    kp.service_near_left, kp.service_near_right,
+    kp.service_far_left, kp.service_far_right,
+    kp.center_near, kp.center_far,
+  ]
+  return computeHomographyFromKeypoints(videoPts)
+})
+
+const { segments: shotSegments } = useShotSegments(skeletonDataRef, shotHomography)
 
 // Playback view mode: 'video' = real video + overlays (default),
 // 'court' = synthetic court redrawn from keypoints + overlays.
@@ -390,9 +419,83 @@ function clearRallyPause() {
   pausedAfterRallyId.value = null
 }
 
+// ── Shot auto-pause logic ────────────────────────────────────────────────
+// Mirrors the rally-pause watcher's shape exactly.
+
+watch(currentVideoTime, (time) => {
+  // Reset tracking on seek-backward (same 1s slack as rally-pause).
+  if (time < lastTriggeredShotTime.value - 1) {
+    lastTriggeredShotTime.value = -1
+  }
+
+  if (!pauseBetweenShots.value) return
+  if (shotPauseCountdown.value > 0) return          // already in a pause
+  if (rallyPauseCountdown.value > 0) return         // rally-pause has priority
+  if (!shotSegments.value.length) return
+
+  for (let i = 0; i < shotSegments.value.length; i++) {
+    const seg = shotSegments.value[i]!
+    const t = seg.endTimestamp // the "just-happened" shot is endShot of segment i
+    if (t <= lastTriggeredShotTime.value) continue
+    if (time < t || time >= t + 0.5) continue       // only within 0.5s window
+
+    // Suppress if this is the last shot of its rally AND rally-pause is on.
+    if (pauseBetweenRallies.value && isLastShotOfRally(seg.endShot.timestamp)) {
+      lastTriggeredShotTime.value = t
+      continue
+    }
+
+    lastTriggeredShotTime.value = t
+    currentShotSegment.value = seg
+    startShotPause()
+    break
+  }
+})
+
+function isLastShotOfRally(shotTimestamp: number): boolean {
+  const segs = shotSegments.value
+  const idx = segs.findIndex(s => s.endShot.timestamp === shotTimestamp)
+  if (idx === -1) return false
+  const nextShot = segs[idx + 1]?.endShot
+  const rally = detectedRallies.value.find(
+    r => shotTimestamp >= r.startTimestamp && shotTimestamp <= r.endTimestamp,
+  )
+  if (!rally) return false
+  if (!nextShot) return true
+  return nextShot.timestamp > rally.endTimestamp
+}
+
+function startShotPause() {
+  videoPlayerRef.value?.pause()
+  shotPauseCountdown.value = shotPauseDurationSec.value
+
+  // Tick every 100ms so the countdown displays fractional seconds smoothly.
+  shotPauseTimer = setInterval(() => {
+    shotPauseCountdown.value = Math.max(0, shotPauseCountdown.value - 0.1)
+    if (shotPauseCountdown.value <= 0) {
+      endShotPause()
+    }
+  }, 100)
+}
+
+function endShotPause() {
+  clearShotPause()
+  videoPlayerRef.value?.play()
+}
+
+function clearShotPause() {
+  if (shotPauseTimer) {
+    clearInterval(shotPauseTimer)
+    shotPauseTimer = null
+  }
+  shotPauseCountdown.value = 0
+  currentShotSegment.value = null
+}
+
 // Clean up timer on unmount
 onUnmounted(() => {
   clearRallyPause()
+  clearShotPause()
 })
 
 // Trigger speed recalculation when both conditions are met
@@ -1584,6 +1687,8 @@ watch(videoSectionRef, () => {
                   :view-mode="viewMode"
                   :manual-court-keypoints="manualCourtKeypoints"
                   :video-fps="analysisResult?.fps ?? 30"
+                  :shot-summary-segment="currentShotSegment"
+                  :shot-summary-countdown="shotPauseCountdown"
                   @court-keypoints-set="handleCourtKeypointsSet"
                   @keypoints-confirmed="handleKeypointsConfirmed"
                   @time-update="handleTimeUpdate"
