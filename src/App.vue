@@ -172,6 +172,18 @@ interface ExtendedCourtKeypoints {
 // Manual court keypoints storage (for mini court when manually set)
 const manualCourtKeypoints = ref<ExtendedCourtKeypoints | null>(null)
 
+// Playback view mode: 'video' = real video + overlays (default),
+// 'court' = synthetic court redrawn from keypoints + overlays.
+// Only available when manual keypoints are set.
+const viewMode = ref<'video' | 'court'>('video')
+
+// Guard: if keypoints get cleared while viewing court mode, snap back to video.
+watch(manualCourtKeypoints, (kp) => {
+  if (kp === null && viewMode.value === 'court') {
+    viewMode.value = 'video'
+  }
+})
+
 // Zone analytics recalculation trigger counter
 // Incremented each time keypoints are confirmed to trigger ResultsDashboard refresh
 const zoneRecalculationTrigger = ref(0)
@@ -1527,6 +1539,31 @@ watch(videoSectionRef, () => {
 
           <div class="results-content" :class="{ 'with-minicourt': showMiniCourt }">
             <div class="video-with-minicourt">
+              <div class="mode-selector view-mode-selector">
+                <span class="mode-label">Playback View</span>
+                <div class="mode-options">
+                  <button
+                    type="button"
+                    class="mode-option"
+                    :class="{ active: viewMode === 'video' }"
+                    @click="viewMode = 'video'"
+                  >
+                    <span class="mode-title">Video</span>
+                    <span class="mode-desc">Real footage with skeleton overlay</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="mode-option"
+                    :class="{ active: viewMode === 'court' }"
+                    :disabled="manualCourtKeypoints === null"
+                    :title="manualCourtKeypoints === null ? 'Set manual court keypoints to enable' : ''"
+                    @click="viewMode = 'court'"
+                  >
+                    <span class="mode-title">Court</span>
+                    <span class="mode-desc">Synthetic court with skeleton + shuttle trail</span>
+                  </button>
+                </div>
+              </div>
               <div ref="videoSectionRef" class="video-section">
                 <VideoPlayer
                   ref="videoPlayerRef"
@@ -1544,6 +1581,7 @@ watch(videoSectionRef, () => {
                   :heatmap-frame-range="heatmapFrameRange"
                   :show-shuttle-tracking="analysisMode !== 'rally_only' && showShuttleTracking"
                   :court-keypoints="courtCornersForMiniCourt"
+                  :view-mode="viewMode"
                   @court-keypoints-set="handleCourtKeypointsSet"
                   @keypoints-confirmed="handleKeypointsConfirmed"
                   @time-update="handleTimeUpdate"
@@ -3028,6 +3066,58 @@ a:hover {
   margin: 8px 0 0 0;
   padding-top: 16px;
   border-top: 1px solid var(--color-border-secondary);
+}
+
+/* Playback view-mode selector (copied from VideoUpload.vue:615-680 scoped styles) */
+.mode-selector {
+  margin-bottom: 20px;
+}
+
+.mode-label {
+  display: block;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mode-options {
+  display: flex;
+  gap: 8px;
+}
+
+.mode-option {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  background: var(--color-bg-tertiary);
+  border: 2px solid var(--color-border-secondary);
+  border-radius: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s ease;
+}
+
+.mode-option:hover {
+  border-color: var(--color-text-tertiary);
+}
+
+.mode-option.active {
+  border-color: var(--color-accent);
+  background: var(--color-bg-secondary);
+}
+
+.mode-option.active .mode-title {
+  color: var(--color-accent);
+}
+
+.mode-option:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 </style>
