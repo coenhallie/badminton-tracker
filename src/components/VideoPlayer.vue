@@ -6,6 +6,7 @@ import PoseOverlay from './PoseOverlay.vue'
 import SyntheticCourtView from './SyntheticCourtView.vue'
 import { useVideoExport } from '@/composables/useVideoExport'
 import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
+import { legStretchMeters } from '@/utils/bodyAngles'
 
 // =============================================================================
 // PERFORMANCE OPTIMIZATION: Debug mode flag
@@ -1697,22 +1698,15 @@ function drawLegStretch(
   color: string,
   H: number[][] | null,
 ) {
+  const distMeters = legStretchMeters(keypoints, H)
+  if (distMeters == null) return
+
   const la = keypoints[KP.left_ankle], ra = keypoints[KP.right_ankle]
   if (!la?.x || !la?.y || !ra?.x || !ra?.y) return
-  if (la.confidence < KEYPOINT_CONFIDENCE_THRESHOLD ||
-      ra.confidence < KEYPOINT_CONFIDENCE_THRESHOLD) return
-
-  if (!H) return
-  const leftM = applyHomography(H, la.x, la.y)
-  const rightM = applyHomography(H, ra.x, ra.y)
-  if (!leftM || !rightM) return
-
-  const distMeters = Math.sqrt((leftM.x - rightM.x) ** 2 + (leftM.y - rightM.y) ** 2)
 
   const lax = la.x * scaleX, lay = la.y * scaleY
   const rax = ra.x * scaleX, ray = ra.y * scaleY
 
-  // Dashed line between ankles
   ctx.beginPath()
   ctx.setLineDash([6, 4])
   ctx.moveTo(lax, lay)
@@ -1724,7 +1718,6 @@ function drawLegStretch(
   ctx.setLineDash([])
   ctx.globalAlpha = 1.0
 
-  // Distance label at midpoint
   const mx = (lax + rax) / 2
   const my = (lay + ray) / 2
   const label = `${distMeters.toFixed(2)}m`
