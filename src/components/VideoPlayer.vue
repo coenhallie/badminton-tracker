@@ -2419,6 +2419,9 @@ video.video-dimmed {
   height: 100%;
   pointer-events: none;
   object-fit: contain;
+  /* Must sit above the SyntheticCourtView canvas (z-index: 2) so skeletons
+     and bounding boxes remain visible in court mode. */
+  z-index: 3;
 }
 
 .play-overlay {
