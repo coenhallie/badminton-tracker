@@ -3,6 +3,8 @@ import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toR
 import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, BoundingBoxDetection } from '@/types/analysis'
 import { SKELETON_CONNECTIONS, PLAYER_COLORS } from '@/types/analysis'
 import PoseOverlay from './PoseOverlay.vue'
+import ShotSummaryOverlay from './ShotSummaryOverlay.vue'
+import type { ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
 import SyntheticCourtView from './SyntheticCourtView.vue'
 import { useVideoExport } from '@/composables/useVideoExport'
 import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
@@ -284,6 +286,8 @@ const props = defineProps<{
   manualCourtKeypoints?: ExtendedCourtKeypoints | null
   viewMode?: 'video' | 'court'
   videoFps?: number
+  shotSummarySegment?: ShotMovementSegmentWithPeaks | null
+  shotSummaryCountdown?: number
 }>()
 
 // Colors for bounding boxes (matching backend colors)
@@ -2175,6 +2179,11 @@ defineExpose({
         :skeleton-frame="currentSkeletonFrame"
         :visible="showPoseOverlay ?? false"
         :pose-source="poseSource ?? 'both'"
+      />
+      <ShotSummaryOverlay
+        v-if="shotSummarySegment && (shotSummaryCountdown ?? 0) > 0"
+        :segment="shotSummarySegment"
+        :countdown-sec="shotSummaryCountdown ?? 0"
       />
       <div v-if="!isPlaying && !isKeypointSelectionMode" class="play-overlay" @click="togglePlay">
         <div class="play-button">
