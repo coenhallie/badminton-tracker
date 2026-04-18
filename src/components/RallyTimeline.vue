@@ -13,6 +13,8 @@ const props = defineProps<{
   rallyPauseCountdown: number
   pausedAfterRallyId: number | null
   rallySpeedStats?: RallySpeedStats[]
+  pauseBetweenShots: boolean
+  shotPauseDurationSec: 1 | 1.5 | 2 | 3
 }>()
 
 const emit = defineEmits<{
@@ -21,6 +23,8 @@ const emit = defineEmits<{
   skipToNextRally: []
   resumeFromPause: []
   selectRally: [rallyId: number | null]
+  'update:pauseBetweenShots': [value: boolean]
+  'update:shotPauseDurationSec': [value: 1 | 1.5 | 2 | 3]
 }>()
 
 const videoTimeline = computed(() => {
@@ -192,6 +196,29 @@ function getPlayerColor(index: number): string {
         <span class="rally-tl-autopause-slider" />
         <span class="rally-tl-autopause-label">Auto-pause</span>
       </label>
+
+      <label class="rally-tl-autopause" :title="pauseBetweenShots ? 'Auto-pause between shots is ON' : 'Auto-pause between shots is OFF'">
+        <input
+          type="checkbox"
+          :checked="pauseBetweenShots"
+          @change="emit('update:pauseBetweenShots', ($event.target as HTMLInputElement).checked)"
+        />
+        <span class="rally-tl-autopause-slider" />
+        <span class="rally-tl-autopause-label">Pause Between Shots</span>
+      </label>
+
+      <select
+        v-if="pauseBetweenShots"
+        class="rally-tl-shot-duration"
+        :value="shotPauseDurationSec"
+        @change="emit('update:shotPauseDurationSec', Number(($event.target as HTMLSelectElement).value) as 1 | 1.5 | 2 | 3)"
+        :title="'Pause duration after each shot'"
+      >
+        <option :value="1">1s</option>
+        <option :value="1.5">1.5s</option>
+        <option :value="2">2s</option>
+        <option :value="3">3s</option>
+      </select>
     </div>
 
     <!-- Pause banner -->
@@ -436,6 +463,17 @@ function getPlayerColor(index: number): string {
 
 .rally-tl-autopause input:checked ~ .rally-tl-autopause-label {
   color: var(--color-accent);
+}
+
+.rally-tl-shot-duration {
+  padding: 2px 6px;
+  margin-left: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 /* Pause banner between header and timeline bar */
