@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toR
 import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, BoundingBoxDetection } from '@/types/analysis'
 import { SKELETON_CONNECTIONS, PLAYER_COLORS } from '@/types/analysis'
 import PoseOverlay from './PoseOverlay.vue'
+import SyntheticCourtView from './SyntheticCourtView.vue'
 import { useVideoExport } from '@/composables/useVideoExport'
 import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
 
@@ -279,6 +280,7 @@ const props = defineProps<{
   showShuttleTracking?: boolean
   heatmapFrameRange?: { start: number; end: number } | null
   courtKeypoints?: number[][] | null
+  manualCourtKeypoints?: ExtendedCourtKeypoints | null
   viewMode?: 'video' | 'court'
 }>()
 
@@ -2150,6 +2152,12 @@ defineExpose({
         @timeupdate="handleTimeUpdate"
         @loadedmetadata="handleLoadedMetadata"
         @click="!isKeypointSelectionMode && !isExporting && togglePlay()"
+      />
+      <SyntheticCourtView
+        v-if="viewMode === 'court' && manualCourtKeypoints && videoRef?.videoWidth"
+        :court-keypoints="manualCourtKeypoints"
+        :video-width="videoRef.videoWidth"
+        :video-height="videoRef.videoHeight"
       />
       <canvas
         v-if="(showSkeleton || showBoundingBoxes || showHeatmap) && skeletonData"

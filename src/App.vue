@@ -1582,6 +1582,7 @@ watch(videoSectionRef, () => {
                   :show-shuttle-tracking="analysisMode !== 'rally_only' && showShuttleTracking"
                   :court-keypoints="courtCornersForMiniCourt"
                   :view-mode="viewMode"
+                  :manual-court-keypoints="manualCourtKeypoints"
                   @court-keypoints-set="handleCourtKeypointsSet"
                   @keypoints-confirmed="handleKeypointsConfirmed"
                   @time-update="handleTimeUpdate"
