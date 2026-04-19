@@ -283,7 +283,7 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
           playerId: playerId,
           shuttlePosition: { x: entry.x, y: entry.y }, // Use player position as proxy
           playerPosition: { x: entry.x, y: entry.y },
-          detectionMethod: 'shuttle_trajectory' // Using this to keep type simple
+          detectionMethod: 'player_movement'
         })
         
         lastShotTimestamp = entry.timestamp
@@ -336,9 +336,10 @@ function detectShotsFromSpeedPeaks(
       const prevSpeed = timeline[i-1]!.speed
       const nextSpeed = timeline[i+1]!.speed
       const prev2Speed = timeline[i-2]!.speed
-      const next2Speed = timeline[i+1]!.speed
-      
-      // Local maximum: current speed is higher than neighbors
+      const next2Speed = timeline[i+2]!.speed
+
+      // Local maximum across a symmetric 5-sample window (i-2..i+2):
+      // current speed strictly greater than its two neighbors on each side.
       const isLocalMax = speed > prevSpeed && speed > nextSpeed &&
                          speed > prev2Speed && speed > next2Speed &&
                          speed > MIN_PEAK_SPEED
@@ -352,7 +353,7 @@ function detectShotsFromSpeedPeaks(
           playerId,
           shuttlePosition: { x: entry.x, y: entry.y },
           playerPosition: { x: entry.x, y: entry.y },
-          detectionMethod: 'shuttle_trajectory'
+          detectionMethod: 'speed_peaks'
         })
         lastShotTs = entry.timestamp
       }
