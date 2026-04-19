@@ -210,8 +210,11 @@ const { segments: shotSegments } = useShotSegments(skeletonDataRef, shotHomograp
 const inRallyShotSegments = computed(() => {
   const segs = shotSegments.value
   const rallies = detectedRallies.value
-  if (!rallies.length) return segs
-  return segs.filter(seg => {
+  if (!rallies.length) {
+    console.log(`[ShotDetection/LayerA] No rallies detected; passing through all ${segs.length} segments`)
+    return segs
+  }
+  const kept = segs.filter(seg => {
     const rally = rallies.find(
       r => seg.endShot.timestamp >= r.startTimestamp &&
            seg.endShot.timestamp <= r.endTimestamp,
@@ -222,6 +225,11 @@ const inRallyShotSegments = computed(() => {
     return seg.startShot.timestamp >= rally.startTimestamp &&
            seg.startShot.timestamp <= rally.endTimestamp
   })
+  console.log(
+    `[ShotDetection/LayerA] ${kept.length}/${segs.length} segments kept ` +
+    `(dropped ${segs.length - kept.length} between-rally); rallies=${rallies.length}`
+  )
+  return kept
 })
 
 // Playback view mode: 'video' = real video + overlays (default),

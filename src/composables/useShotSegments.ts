@@ -176,7 +176,14 @@ function detectShotsFromShuttleTrajectory(
   //   - min speed mag    → reject when BOTH sides are near-stationary
   //   - gap > 0.5s       → match real shot tempo, kill double-triggers
   const MIN_SHOT_GAP_SECONDS = 0.5
-  const MIN_ANGLE_CHANGE_COS = -0.5
+  // Relaxed from -0.5 to 0 based on diagnostic counters on real matches:
+  // TrackNet-smoothed trajectories + our frame sampling produce impact-pair
+  // reversals of only ~90-110° (cosAngle ≈ -0.1 to -0.5), not the full
+  // >120° reversal I originally assumed. The stricter threshold rejected
+  // 3265/3976 candidate pairs including every real shot. Any reversal
+  // (dot<0) now passes this gate; the accel, speed, and wrist gates
+  // remain responsible for eliminating gravity-arc-apex and wobble-noise.
+  const MIN_ANGLE_CHANGE_COS = 0
   const MIN_ACCEL_MAG_PX = 200
   const MIN_SPEED_MAG_PX = 80
   let lastShotTimestamp = -Infinity
