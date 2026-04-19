@@ -201,6 +201,29 @@ const shotHomography = computed((): number[][] | null => {
 
 const { segments: shotSegments } = useShotSegments(skeletonDataRef, shotHomography)
 
+// Layer A of shot-detection quality gates: drop segments that don't fall
+// cleanly inside a single detected rally. Eliminates between-rally false
+// positives (player walking back, picking up shuttle, pre-serve jitter)
+// from triggering the auto-pause. Falls through as a no-op when no rallies
+// have been detected so the feature still works on videos without rally
+// detection output.
+const inRallyShotSegments = computed(() => {
+  const segs = shotSegments.value
+  const rallies = detectedRallies.value
+  if (!rallies.length) return segs
+  return segs.filter(seg => {
+    const rally = rallies.find(
+      r => seg.endShot.timestamp >= r.startTimestamp &&
+           seg.endShot.timestamp <= r.endTimestamp,
+    )
+    if (!rally) return false
+    // Both endpoints of the segment must lie in the SAME rally — a segment
+    // that spans a between-rally gap is nonsense for shot-to-shot stats.
+    return seg.startShot.timestamp >= rally.startTimestamp &&
+           seg.startShot.timestamp <= rally.endTimestamp
+  })
+})
+
 // Playback view mode: 'video' = real video + overlays (default),
 // 'court' = synthetic court redrawn from keypoints + overlays.
 // Only available when manual keypoints are set.
@@ -431,10 +454,10 @@ watch(currentVideoTime, (time) => {
   if (!pauseBetweenShots.value) return
   if (shotPauseCountdown.value > 0) return          // already in a pause
   if (rallyPauseCountdown.value > 0) return         // rally-pause has priority
-  if (!shotSegments.value.length) return
+  if (!inRallyShotSegments.value.length) return
 
-  for (let i = 0; i < shotSegments.value.length; i++) {
-    const seg = shotSegments.value[i]!
+  for (let i = 0; i < inRallyShotSegments.value.length; i++) {
+    const seg = inRallyShotSegments.value[i]!
     const t = seg.endTimestamp // the "just-happened" shot is endShot of segment i
     if (t <= lastTriggeredShotTime.value) continue
     if (time < t || time >= t + 0.5) continue       // only within 0.5s window
@@ -453,7 +476,9 @@ watch(currentVideoTime, (time) => {
 })
 
 function isLastShotOfRally(shotTimestamp: number): boolean {
-  const segs = shotSegments.value
+  // Walk the in-rally list so "next shot" is the next in-rally shot, not a
+  // between-rally false positive that would confuse the end-of-rally check.
+  const segs = inRallyShotSegments.value
   const idx = segs.findIndex(s => s.endShot.timestamp === shotTimestamp)
   if (idx === -1) return false
   const nextShot = segs[idx + 1]?.endShot
