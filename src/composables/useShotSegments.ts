@@ -114,36 +114,61 @@ function detectShotsFromShuttleTrajectory(frames: SkeletonFrame[]): ShotEvent[] 
     }
   }
   
-  const MIN_SHOT_GAP_SECONDS = 0.3
+  // Layer C thresholds. Earlier config (dot<0 / accel>50 / gap>0.3s) fired
+  // on any direction change with any acceleration bump, including the
+  // gravity-induced apex-of-arc flip (vy crosses zero) and TrackNet jitter
+  // while the shuttle wobbles near-stationary between rallies. New gates:
+  //   - cosAngle < -0.5  → require a sharp >120° reversal, not a smooth arc
+  //   - accelMag > 200   → raise the bar 4× in raw pixel units
+  //   - min speed mag    → reject when BOTH sides are near-stationary
+  //   - gap > 0.5s       → match real shot tempo, kill double-triggers
+  const MIN_SHOT_GAP_SECONDS = 0.5
+  const MIN_ANGLE_CHANGE_COS = -0.5
+  const MIN_ACCEL_MAG_PX = 200
+  const MIN_SPEED_MAG_PX = 80
   let lastShotTimestamp = -Infinity
-  
+
   for (let i = 1; i < velocities.length; i++) {
     const prev = velocities[i - 1]!
     const curr = velocities[i]!
+
+    const prevMag = Math.hypot(prev.vx, prev.vy)
+    const currMag = Math.hypot(curr.vx, curr.vy)
+    // Both sides near-stationary → this is shuttle wobble, not a hit.
+    if (prevMag < MIN_SPEED_MAG_PX && currMag < MIN_SPEED_MAG_PX) continue
+
     const dot = prev.vx * curr.vx + prev.vy * curr.vy
+    const denom = prevMag * currMag
+    const cosAngle = denom > 0 ? dot / denom : 0
+    // Require a sharp direction reversal (>120°). An apex-of-arc gravity
+    // flip produces a gradual change per-frame; a racket hit nearly
+    // reverses the velocity vector.
+    if (cosAngle > MIN_ANGLE_CHANGE_COS) continue
+
     const dvx = curr.vx - prev.vx
     const dvy = curr.vy - prev.vy
     const accelMag = Math.sqrt(dvx * dvx + dvy * dvy)
-    
-    if (dot < 0 && accelMag > 50 && (curr.timestamp - lastShotTimestamp) > MIN_SHOT_GAP_SECONDS) {
-      const skeletonFrame = frames.find(f => f.frame === curr.frame)
-      if (skeletonFrame && skeletonFrame.players.length > 0) {
-        const closest = findClosestPlayer(skeletonFrame.players, curr.x, curr.y)
-        if (closest) {
-          shots.push({
-            frame: curr.frame,
-            timestamp: curr.timestamp,
-            playerId: closest.player_id,
-            shuttlePosition: { x: curr.x, y: curr.y },
-            playerPosition: closest.center ? { x: closest.center.x, y: closest.center.y } : { x: 0, y: 0 },
-            detectionMethod: 'shuttle_trajectory'
-          })
-          lastShotTimestamp = curr.timestamp
-        }
+    if (accelMag < MIN_ACCEL_MAG_PX) continue
+
+    if (curr.timestamp - lastShotTimestamp < MIN_SHOT_GAP_SECONDS) continue
+
+    const skeletonFrame = frames.find(f => f.frame === curr.frame)
+    if (skeletonFrame && skeletonFrame.players.length > 0) {
+      const closest = findClosestPlayer(skeletonFrame.players, curr.x, curr.y)
+      if (closest) {
+        shots.push({
+          frame: curr.frame,
+          timestamp: curr.timestamp,
+          playerId: closest.player_id,
+          shuttlePosition: { x: curr.x, y: curr.y },
+          playerPosition: closest.center ? { x: closest.center.x, y: closest.center.y } : { x: 0, y: 0 },
+          detectionMethod: 'shuttle_trajectory'
+        })
+        lastShotTimestamp = curr.timestamp
       }
     }
   }
-  
+
   return shots
 }
 
