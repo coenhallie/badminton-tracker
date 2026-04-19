@@ -1,7 +1,52 @@
 import { computed, type Ref } from 'vue'
-import type { SkeletonFrame, Keypoint, SpeedZone } from '@/types/analysis'
+import type { SkeletonFrame, Keypoint, SpeedZone, FramePlayer } from '@/types/analysis'
 import { getSpeedZone } from '@/utils/speedZones'
 import { legStretchMeters, kneeFlexDegrees } from '@/utils/bodyAngles'
+import { applyHomography } from '@/utils/homography'
+
+// COCO wrist keypoint indices (same layout used across the app).
+const LEFT_WRIST = 9
+const RIGHT_WRIST = 10
+const WRIST_CONFIDENCE_THRESHOLD = 0.3
+
+// Layer B: at the moment of a shot-candidate direction change, the shuttle
+// must be within this many meters of at least one player's wrist. 1.5 m is
+// generous — racket ~0.65 m + arm reach ~0.6 m = ~1.25 m at full extension —
+// with margin left over for pose-keypoint noise.
+const SHOT_PROXIMITY_METERS = 1.5
+
+/**
+ * Smallest distance (in court meters) between the shuttle and any confident
+ * wrist keypoint across the given players. Returns null when the homography
+ * is missing or no wrist is visible.
+ */
+function nearestWristMeters(
+  players: FramePlayer[],
+  shuttleX: number,
+  shuttleY: number,
+  H: number[][] | null,
+): number | null {
+  if (!H) return null
+
+  const shuttleM = applyHomography(H, shuttleX, shuttleY)
+  if (!shuttleM) return null
+
+  let best: number | null = null
+  for (const player of players) {
+    const kpts = player.keypoints
+    if (!kpts) continue
+    for (const idx of [LEFT_WRIST, RIGHT_WRIST]) {
+      const w = kpts[idx]
+      if (!w?.x || !w?.y) continue
+      if (w.confidence < WRIST_CONFIDENCE_THRESHOLD) continue
+      const wM = applyHomography(H, w.x, w.y)
+      if (!wM) continue
+      const d = Math.hypot(shuttleM.x - wM.x, shuttleM.y - wM.y)
+      if (best == null || d < best) best = d
+    }
+  }
+  return best
+}
 
 export interface ShotEvent {
   frame: number
@@ -39,21 +84,24 @@ export interface ShotMovementSegment {
  * a player decelerating (reaching the shuttle) after rapid movement. We detect
  * these deceleration events and alternate between players.
  */
-export function detectShots(frames: SkeletonFrame[]): ShotEvent[] {
+export function detectShots(
+  frames: SkeletonFrame[],
+  homography: number[][] | null = null,
+): ShotEvent[] {
   // Count data availability
   let shuttleFrameCount = 0
   let poseClassCount = 0
-  
+
   for (const frame of frames) {
     if (frame.shuttle_position && frame.shuttle_position.x != null) shuttleFrameCount++
     if (frame.pose_classifications && frame.pose_classifications.length > 0) poseClassCount++
   }
-  
+
   console.log(`[ShotSpeedList] Data available: ${shuttleFrameCount} shuttle frames, ${poseClassCount} pose classification frames, ${frames.length} total frames`)
-  
+
   // Try shuttle trajectory first if enough data
   if (shuttleFrameCount >= 5) {
-    const shots = detectShotsFromShuttleTrajectory(frames)
+    const shots = detectShotsFromShuttleTrajectory(frames, homography)
     if (shots.length >= 3) {
       console.log(`[ShotSpeedList] Using shuttle trajectory detection: ${shots.length} shots`)
       return shots
@@ -77,8 +125,13 @@ export function detectShots(frames: SkeletonFrame[]): ShotEvent[] {
 
 /**
  * Detect shots from shuttle position trajectory direction changes.
+ * When a homography (video-pixels → court-meters) is supplied, also gates
+ * each candidate on wrist proximity in court meters (Layer B).
  */
-function detectShotsFromShuttleTrajectory(frames: SkeletonFrame[]): ShotEvent[] {
+function detectShotsFromShuttleTrajectory(
+  frames: SkeletonFrame[],
+  homography: number[][] | null = null,
+): ShotEvent[] {
   const shots: ShotEvent[] = []
   
   const shuttleFrames: { frame: number; timestamp: number; x: number; y: number }[] = []
@@ -154,6 +207,13 @@ function detectShotsFromShuttleTrajectory(frames: SkeletonFrame[]): ShotEvent[] 
 
     const skeletonFrame = frames.find(f => f.frame === curr.frame)
     if (skeletonFrame && skeletonFrame.players.length > 0) {
+      // Layer B: wrist-proximity gate. A real shot happens where a racket
+      // meets the shuttle — i.e. near a player's wrist. When the homography
+      // is available we can check this in court meters; otherwise this gate
+      // is a no-op and we fall back to the existing closest-player logic.
+      const wristDist = nearestWristMeters(skeletonFrame.players, curr.x, curr.y, homography)
+      if (wristDist != null && wristDist > SHOT_PROXIMITY_METERS) continue
+
       const closest = findClosestPlayer(skeletonFrame.players, curr.x, curr.y)
       if (closest) {
         shots.push({
@@ -575,7 +635,7 @@ export function useShotSegments(
   const shotEvents = computed<ShotEvent[]>(() => {
     const frames = skeletonData.value
     if (!frames || frames.length === 0) return []
-    return detectShots(frames)
+    return detectShots(frames, homography?.value ?? null)
   })
 
   const segments = computed<ShotMovementSegmentWithPeaks[]>(() => {
