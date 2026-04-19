@@ -181,14 +181,35 @@ function detectShotsFromShuttleTrajectory(
   const MIN_SPEED_MAG_PX = 80
   let lastShotTimestamp = -Infinity
 
+  // Per-gate rejection counters (logged at end) to diagnose which gate is
+  // filtering which candidates. Remove once thresholds are tuned.
+  const stats = {
+    totalPairs: 0,
+    rejectedSpeed: 0,
+    rejectedAngle: 0,
+    rejectedAccel: 0,
+    rejectedGap: 0,
+    rejectedNoSkeleton: 0,
+    rejectedWrist: 0,
+    accepted: 0,
+    sampleAngleCos: [] as number[],
+    sampleAccelMag: [] as number[],
+    sampleSpeedMag: [] as number[],
+    sampleWristMeters: [] as number[],
+  }
+
   for (let i = 1; i < velocities.length; i++) {
     const prev = velocities[i - 1]!
     const curr = velocities[i]!
+    stats.totalPairs++
 
     const prevMag = Math.hypot(prev.vx, prev.vy)
     const currMag = Math.hypot(curr.vx, curr.vy)
     // Both sides near-stationary → this is shuttle wobble, not a hit.
-    if (prevMag < MIN_SPEED_MAG_PX && currMag < MIN_SPEED_MAG_PX) continue
+    if (prevMag < MIN_SPEED_MAG_PX && currMag < MIN_SPEED_MAG_PX) {
+      stats.rejectedSpeed++
+      continue
+    }
 
     const dot = prev.vx * curr.vx + prev.vy * curr.vy
     const denom = prevMag * currMag
@@ -196,38 +217,84 @@ function detectShotsFromShuttleTrajectory(
     // Require a sharp direction reversal (>120°). An apex-of-arc gravity
     // flip produces a gradual change per-frame; a racket hit nearly
     // reverses the velocity vector.
-    if (cosAngle > MIN_ANGLE_CHANGE_COS) continue
+    if (cosAngle > MIN_ANGLE_CHANGE_COS) {
+      stats.rejectedAngle++
+      // Sample the near-miss candidates (ones that at least reverse direction)
+      // so we can see the distribution of real direction changes.
+      if (dot < 0 && stats.sampleAngleCos.length < 20) {
+        stats.sampleAngleCos.push(cosAngle)
+      }
+      continue
+    }
 
     const dvx = curr.vx - prev.vx
     const dvy = curr.vy - prev.vy
     const accelMag = Math.sqrt(dvx * dvx + dvy * dvy)
-    if (accelMag < MIN_ACCEL_MAG_PX) continue
+    if (accelMag < MIN_ACCEL_MAG_PX) {
+      stats.rejectedAccel++
+      if (stats.sampleAccelMag.length < 20) stats.sampleAccelMag.push(accelMag)
+      continue
+    }
 
-    if (curr.timestamp - lastShotTimestamp < MIN_SHOT_GAP_SECONDS) continue
+    if (curr.timestamp - lastShotTimestamp < MIN_SHOT_GAP_SECONDS) {
+      stats.rejectedGap++
+      continue
+    }
 
     const skeletonFrame = frames.find(f => f.frame === curr.frame)
-    if (skeletonFrame && skeletonFrame.players.length > 0) {
-      // Layer B: wrist-proximity gate. A real shot happens where a racket
-      // meets the shuttle — i.e. near a player's wrist. When the homography
-      // is available we can check this in court meters; otherwise this gate
-      // is a no-op and we fall back to the existing closest-player logic.
-      const wristDist = nearestWristMeters(skeletonFrame.players, curr.x, curr.y, homography)
-      if (wristDist != null && wristDist > SHOT_PROXIMITY_METERS) continue
+    if (!skeletonFrame || skeletonFrame.players.length === 0) {
+      stats.rejectedNoSkeleton++
+      continue
+    }
 
-      const closest = findClosestPlayer(skeletonFrame.players, curr.x, curr.y)
-      if (closest) {
-        shots.push({
-          frame: curr.frame,
-          timestamp: curr.timestamp,
-          playerId: closest.player_id,
-          shuttlePosition: { x: curr.x, y: curr.y },
-          playerPosition: closest.center ? { x: closest.center.x, y: closest.center.y } : { x: 0, y: 0 },
-          detectionMethod: 'shuttle_trajectory'
-        })
-        lastShotTimestamp = curr.timestamp
-      }
+    // Layer B: wrist-proximity gate. A real shot happens where a racket
+    // meets the shuttle — i.e. near a player's wrist. When the homography
+    // is available we can check this in court meters; otherwise this gate
+    // is a no-op and we fall back to the existing closest-player logic.
+    const wristDist = nearestWristMeters(skeletonFrame.players, curr.x, curr.y, homography)
+    if (wristDist != null && wristDist > SHOT_PROXIMITY_METERS) {
+      stats.rejectedWrist++
+      if (stats.sampleWristMeters.length < 20) stats.sampleWristMeters.push(wristDist)
+      continue
+    }
+
+    const closest = findClosestPlayer(skeletonFrame.players, curr.x, curr.y)
+    if (closest) {
+      shots.push({
+        frame: curr.frame,
+        timestamp: curr.timestamp,
+        playerId: closest.player_id,
+        shuttlePosition: { x: curr.x, y: curr.y },
+        playerPosition: closest.center ? { x: closest.center.x, y: closest.center.y } : { x: 0, y: 0 },
+        detectionMethod: 'shuttle_trajectory'
+      })
+      lastShotTimestamp = curr.timestamp
+      stats.accepted++
     }
   }
+
+  // Summary log — shows which gate is eating candidates. The "sample*"
+  // arrays show the distribution of values so we can see how close the
+  // rejected candidates were to the threshold.
+  const pctAngleCos = stats.sampleAngleCos.length
+    ? stats.sampleAngleCos.map(v => v.toFixed(2)).join(', ')
+    : '—'
+  const pctAccelMag = stats.sampleAccelMag.length
+    ? stats.sampleAccelMag.map(v => v.toFixed(0)).join(', ')
+    : '—'
+  const pctWrist = stats.sampleWristMeters.length
+    ? stats.sampleWristMeters.map(v => v.toFixed(2)).join(', ')
+    : '—'
+  console.log(
+    `[ShotDetection] pairs=${stats.totalPairs} | ` +
+    `rej: speed=${stats.rejectedSpeed} angle=${stats.rejectedAngle} ` +
+    `accel=${stats.rejectedAccel} gap=${stats.rejectedGap} ` +
+    `noSkel=${stats.rejectedNoSkeleton} wrist=${stats.rejectedWrist} | ` +
+    `accepted=${stats.accepted}`
+  )
+  console.log(`[ShotDetection] angle-cos samples (direction-reversing pairs): ${pctAngleCos}`)
+  console.log(`[ShotDetection] accel-mag samples (rejected by accel gate, px/s²): ${pctAccelMag}`)
+  console.log(`[ShotDetection] wrist-dist samples (rejected by proximity, meters): ${pctWrist}`)
 
   return shots
 }
