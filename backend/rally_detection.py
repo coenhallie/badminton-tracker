@@ -1,10 +1,28 @@
 """
-Rally Detection from Shuttlecock Tracking Data
+Rally Detection — shot-gap approach.
 
-Shot-gap approach (same algorithm as client-side, but using dense TrackNet data):
-1. Detect shots as shuttle direction reversals (dot product of velocity vectors < 0)
-2. Group shots into rallies using a gap threshold (3.0s between shots)
-3. Minimum 2 shots per rally, minimum 2.0s duration
+Algorithm mirrors src/utils/shotDetection.ts (TS) exactly. Any change to
+thresholds or logic here MUST be applied to that module (and
+useAdvancedAnalytics.ts:rallies) to keep client and backend rally counts
+comparable. Sync keys:
+
+  min_rally_duration_s      ↔  MIN_RALLY_DURATION_S in useAdvancedAnalytics
+  min_gap_duration_s        ↔  RALLY_GAP_SECONDS in useAdvancedAnalytics
+  min_speed_sq              ↔  DetectShuttleShotsOptions.minSpeedSq
+  dot_threshold             ↔  DetectShuttleShotsOptions.cosAngleMax
+  stride_s                  ↔  DetectShuttleShotsOptions.strideSec
+  min_shots                 ↔  MIN_SHOTS in useAdvancedAnalytics
+
+Diverges intentionally on:
+  - No wrist-proximity gate (backend has no pose keypoints at this stage).
+  - No player-movement / speed-peaks fallbacks (backend always has
+    TrackNet shuttle data; if shuttle is empty, no rallies are detected).
+
+Shot-gap algorithm:
+1. Detect shots as shuttle direction reversals (dot product of velocity
+   vectors < threshold).
+2. Group shots into rallies using a gap threshold.
+3. Enforce min shots + min duration per rally.
 
 TrackNet provides ~40-50% frame coverage vs ~10-40% from YOLO per-frame
 detection, giving more complete shot detection and tighter rally boundaries.
@@ -25,7 +43,7 @@ def detect_rallies(
     player_positions: Optional[Dict[int, List[Dict]]] = None,
     pose_data: Optional[Dict[int, List[Dict]]] = None,
     speed_data: Optional[Dict[int, List[float]]] = None,
-    min_rally_duration_s: float = 2.0,
+    min_rally_duration_s: float = 0.8,
     min_gap_duration_s: float = 3.0,
     zero_gradient_window: int = 0,
     zero_gradient_ratio: float = 0.80,
@@ -56,11 +74,11 @@ def detect_rallies(
     # Camera-angle presets: corner angles produce more TrackNet jitter,
     # requiring stricter thresholds to avoid false rallies.
     if camera_angle == "corner":
-        min_rally_duration_s = max(min_rally_duration_s, 3.0)
+        min_rally_duration_s = max(min_rally_duration_s, 1.2)
         min_gap_duration_s = max(min_gap_duration_s, 4.0)
         min_shot_gap_s = 0.8
         min_speed_sq = 30.0 * 30.0  # 900 — reject jitter
-        min_shots = 3
+        min_shots = 2
         dot_threshold = -0.25  # cos(~105deg), reject slight wobbles
         stride_s = 0.5  # longer stride smooths noise
     else:
