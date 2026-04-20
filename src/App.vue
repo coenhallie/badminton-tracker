@@ -207,6 +207,16 @@ const { segments: shotSegments } = useShotSegments(skeletonDataRef, shotHomograp
 // from triggering the auto-pause. Falls through as a no-op when no rallies
 // have been detected so the feature still works on videos without rally
 // detection output.
+// Padding applied to each rally's boundaries before the in-rally check.
+// Rally detection is imperfect on both sides: it over-segments on some
+// videos (splitting one real rally into multiple short ones) and
+// under-segments on others (detecting a narrow window of active play when
+// the real rally extended further). A ±2 s band around each rally bridges
+// the fragmented-boundary case and catches shots in the drift-zone of
+// narrow rallies, without letting in the truly-between-rally false
+// positives that sit 5+ s outside any rally.
+const RALLY_BOUNDARY_PADDING_SECONDS = 2.0
+
 const inRallyShotSegments = computed(() => {
   const segs = shotSegments.value
   const rallies = detectedRallies.value
@@ -214,21 +224,17 @@ const inRallyShotSegments = computed(() => {
     console.log(`[ShotDetection/LayerA] No rallies detected; passing through all ${segs.length} segments`)
     return segs
   }
-  // Keep any segment whose endShot (the one we'd auto-pause on) lands inside
-  // some detected rally. Earlier logic also required the startShot to be in
-  // the SAME rally, but rally detection occasionally over-segments a single
-  // real rally into multiple short ones — that mislabeled boundary then
-  // dropped legitimate shot pairs. The auto-pause fires at the endShot, so
-  // gating on endShot alone is sufficient to kill between-rally ghosts.
+  const pad = RALLY_BOUNDARY_PADDING_SECONDS
   const kept = segs.filter(seg =>
     rallies.some(
-      r => seg.endShot.timestamp >= r.startTimestamp &&
-           seg.endShot.timestamp <= r.endTimestamp,
+      r => seg.endShot.timestamp >= r.startTimestamp - pad &&
+           seg.endShot.timestamp <= r.endTimestamp + pad,
     ),
   )
   console.log(
     `[ShotDetection/LayerA] ${kept.length}/${segs.length} segments kept ` +
-    `(dropped ${segs.length - kept.length} between-rally); rallies=${rallies.length}`
+    `(padded ±${pad}s, dropped ${segs.length - kept.length} far from any rally); ` +
+    `rallies=${rallies.length}`
   )
   return kept
 })
