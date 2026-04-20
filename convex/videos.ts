@@ -1,5 +1,6 @@
 import { action, mutation, query, internalMutation } from "./_generated/server"
 import { v } from "convex/values"
+import type { Id } from "./_generated/dataModel"
 import { api, internal } from "./_generated/api"
 
 // =============================================================================
@@ -238,35 +239,83 @@ export const addLog = mutation({
 })
 
 /**
- * Delete a video and its associated data
+ * Delete a video and ALL its associated data: every storage blob the
+ * record references, every processingLogs row, and the record itself.
+ *
+ * Bug fix: previously missed resultsStorageId — the JSON file that holds
+ * skeleton + shuttle + rally output. Without this, deleting a video
+ * orphaned its results blob in Convex storage.
  */
 export const deleteVideo = mutation({
   args: { videoId: v.id("videos") },
   handler: async (ctx, { videoId }) => {
     const video = await ctx.db.get(videoId)
     if (!video) return
-    
-    // Delete storage files
-    if (video.storageId) {
-      await ctx.storage.delete(video.storageId)
-    }
-    if (video.processedVideoStorageId) {
-      await ctx.storage.delete(video.processedVideoStorageId)
-    }
-    if (video.skeletonDataStorageId) {
-      await ctx.storage.delete(video.skeletonDataStorageId)
-    }
-    
+
+    // Delete every storage blob this record references. Each field is
+    // independently optional, so guard each.
+    const blobIds = [
+      video.storageId,
+      video.resultsStorageId,
+      video.processedVideoStorageId,
+      video.skeletonDataStorageId,
+    ].filter((id): id is Id<"_storage"> => id != null)
+
+    await Promise.all(blobIds.map(id => ctx.storage.delete(id)))
+
     // Delete logs
     const logs = await ctx.db
       .query("processingLogs")
       .withIndex("by_videoId", (q) => q.eq("videoId", videoId))
       .collect()
-    
+
     await Promise.all(logs.map(log => ctx.db.delete(log._id)))
-    
+
     // Delete video record
     await ctx.db.delete(videoId)
+  },
+})
+
+/**
+ * Delete EVERY video + its storage blobs + its logs.
+ *
+ * Destructive, irreversible. Intended for operator cleanup when the
+ * videos table has accumulated stuck/old records that should not persist.
+ */
+export const deleteAllVideos = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const videos = await ctx.db.query("videos").collect()
+
+    for (const video of videos) {
+      // Delete storage blobs for this record.
+      const blobIds = [
+        video.storageId,
+        video.resultsStorageId,
+        video.processedVideoStorageId,
+        video.skeletonDataStorageId,
+      ].filter((id): id is Id<"_storage"> => id != null)
+      for (const id of blobIds) {
+        try {
+          await ctx.storage.delete(id)
+        } catch {
+          // A storage blob may already be gone (e.g. prior partial cleanup).
+          // Don't let a single dangling reference abort the whole sweep.
+        }
+      }
+
+      // Delete logs for this record.
+      const logs = await ctx.db
+        .query("processingLogs")
+        .withIndex("by_videoId", (q) => q.eq("videoId", video._id))
+        .collect()
+      for (const log of logs) await ctx.db.delete(log._id)
+
+      // Delete the record itself.
+      await ctx.db.delete(video._id)
+    }
+
+    return { deleted: videos.length }
   },
 })
 
