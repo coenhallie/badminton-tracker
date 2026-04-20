@@ -208,14 +208,14 @@ const { segments: shotSegments } = useShotSegments(skeletonDataRef, shotHomograp
 // have been detected so the feature still works on videos without rally
 // detection output.
 // Padding applied to each rally's boundaries before the in-rally check.
-// Rally detection is imperfect on both sides: it over-segments on some
-// videos (splitting one real rally into multiple short ones) and
-// under-segments on others (detecting a narrow window of active play when
-// the real rally extended further). A ±2 s band around each rally bridges
-// the fragmented-boundary case and catches shots in the drift-zone of
-// narrow rallies, without letting in the truly-between-rally false
-// positives that sit 5+ s outside any rally.
-const RALLY_BOUNDARY_PADDING_SECONDS = 2.0
+// Rally detection draws boundaries at the first/last detected shot inside
+// each rally — but real play often extends past those bounds (the shuttle
+// is still live after the final winner's hit, the receiver moves into
+// position before the first return, etc.). A generous ±5 s pad makes
+// the rally gate a "rough sanity check" rather than a tight filter:
+// shots within a few seconds of any rally are kept; only shots in long
+// dead-zones (>5 s from any rally) are treated as between-rally noise.
+const RALLY_BOUNDARY_PADDING_SECONDS = 5.0
 
 // Layer A: keep only shot segments whose end-shot falls inside a detected rally
 // (±RALLY_BOUNDARY_PADDING_SECONDS). Falls through unchanged when no rallies.
@@ -223,6 +223,7 @@ const inRallyShotSegments = computed(() => {
   const segs = shotSegments.value
   const rallies = detectedRallies.value
   if (!rallies.length) {
+    console.log(`[ShotDetection/LayerA] no rallies; keeping all ${segs.length} segments`)
     return segs
   }
   const pad = RALLY_BOUNDARY_PADDING_SECONDS
@@ -231,6 +232,10 @@ const inRallyShotSegments = computed(() => {
       r => seg.endShot.timestamp >= r.startTimestamp - pad &&
            seg.endShot.timestamp <= r.endTimestamp + pad,
     ),
+  )
+  console.log(
+    `[ShotDetection/LayerA] ${kept.length}/${segs.length} segments kept ` +
+    `(pad=±${pad}s, rallies=${rallies.length})`
   )
   return kept
 })
