@@ -1,70 +1,23 @@
 import { computed, type Ref } from 'vue'
-import type { SkeletonFrame, Keypoint, SpeedZone, FramePlayer } from '@/types/analysis'
+import type { SkeletonFrame, Keypoint, SpeedZone } from '@/types/analysis'
 import { getSpeedZone } from '@/utils/speedZones'
 import { legStretchMeters, kneeFlexDegrees } from '@/utils/bodyAngles'
-import { applyHomography } from '@/utils/homography'
+import {
+  detectShuttleShots,
+  detectPoseShots,
+  type ShotEvent as SharedShotEvent,
+  type DetectionMethod,
+} from '@/utils/shotDetection'
 
-// COCO wrist keypoint indices (same layout used across the app).
-const LEFT_WRIST = 9
-const RIGHT_WRIST = 10
-const WRIST_CONFIDENCE_THRESHOLD = 0.3
-
-// Layer B: at the moment of a shot-candidate direction change, the shuttle
-// must be within this many meters of at least one player's wrist. Tuned
-// against real diagnostic samples — the wrist keypoint sits ~0.65 m behind
-// the racket head, and the shuttle typically moves ~1 m between impact and
-// the next frame (30 m/s over 33 ms), plus pose-keypoint noise of ~0.5 m
-// on wide-camera views — so real shots routinely show 2–5 m wrist-to-
-// shuttle distance. 3.5 m catches those while still rejecting the 10 m+
-// ghost-direction-change candidates in empty air.
-const SHOT_PROXIMITY_METERS = 3.5
-
-/**
- * Smallest distance (in court meters) between the shuttle and any confident
- * wrist keypoint across the given players. Returns null when the homography
- * is missing or no wrist is visible.
- */
-function nearestWristMeters(
-  players: FramePlayer[],
-  shuttleX: number,
-  shuttleY: number,
-  H: number[][] | null,
-): number | null {
-  if (!H) return null
-
-  const shuttleM = applyHomography(H, shuttleX, shuttleY)
-  if (!shuttleM) return null
-
-  let best: number | null = null
-  for (const player of players) {
-    const kpts = player.keypoints
-    if (!kpts) continue
-    for (const idx of [LEFT_WRIST, RIGHT_WRIST]) {
-      const w = kpts[idx]
-      if (!w?.x || !w?.y) continue
-      if (w.confidence < WRIST_CONFIDENCE_THRESHOLD) continue
-      const wM = applyHomography(H, w.x, w.y)
-      if (!wM) continue
-      const d = Math.hypot(shuttleM.x - wM.x, shuttleM.y - wM.y)
-      if (best == null || d < best) best = d
-    }
-  }
-  return best
-}
-
-export interface ShotEvent {
-  frame: number
-  timestamp: number
-  playerId: number
-  shuttlePosition: { x: number; y: number }
-  playerPosition: { x: number; y: number }
-  detectionMethod: 'shuttle_trajectory' | 'pose_classification' | 'player_movement' | 'speed_peaks'
-}
+// Re-export ShotEvent so downstream consumers (ShotSpeedList.vue, App.vue)
+// can continue importing it from this module. The canonical definition now
+// lives in @/utils/shotDetection.
+export type { ShotEvent } from '@/utils/shotDetection'
 
 export interface ShotMovementSegment {
   id: number
-  startShot: ShotEvent
-  endShot: ShotEvent
+  startShot: SharedShotEvent
+  endShot: SharedShotEvent
   movingPlayerId: number
   maxSpeedKmh: number
   avgSpeedKmh: number
@@ -80,9 +33,9 @@ export interface ShotMovementSegment {
 
 /**
  * Detect shot events using a cascade of methods:
- * 1. Shuttle trajectory analysis (if shuttle_position data available)
- * 2. Pose classification (if pose_classifications data available)
- * 3. Player movement pattern analysis (always available - uses acceleration/deceleration)
+ * 1. Shuttle trajectory analysis (via shared @/utils/shotDetection).
+ * 2. Pose classification (via shared @/utils/shotDetection).
+ * 3. Player movement pattern analysis (local fallback - uses acceleration/deceleration).
  *
  * Method 3 is the reliable fallback: in badminton, a shot correlates with
  * a player decelerating (reaching the shuttle) after rapid movement. We detect
@@ -91,271 +44,56 @@ export interface ShotMovementSegment {
 export function detectShots(
   frames: SkeletonFrame[],
   homography: number[][] | null = null,
-): ShotEvent[] {
-  // Count data availability
+  fps = 30,
+): SharedShotEvent[] {
+  // Routing data availability
   let shuttleFrameCount = 0
   let poseClassCount = 0
-
   for (const frame of frames) {
     if (frame.shuttle_position && frame.shuttle_position.x != null) shuttleFrameCount++
     if (frame.pose_classifications && frame.pose_classifications.length > 0) poseClassCount++
   }
+  console.log(
+    `[ShotSpeedList] Data available: ${shuttleFrameCount} shuttle frames, ` +
+    `${poseClassCount} pose classification frames, ${frames.length} total frames`
+  )
 
-  console.log(`[ShotSpeedList] Data available: ${shuttleFrameCount} shuttle frames, ${poseClassCount} pose classification frames, ${frames.length} total frames`)
-
-  // Try shuttle trajectory first if enough data
+  // Primary: shared shuttle-trajectory detector with pause-use-case options.
   if (shuttleFrameCount >= 5) {
-    const shots = detectShotsFromShuttleTrajectory(frames, homography)
+    const shots = detectShuttleShots(frames, {
+      fps,
+      cameraAngle: 'overhead',
+      homography,
+      minAccelMagPx: 200,
+      wristProximityMeters: homography ? 3.5 : null,
+      rejectOutliers: true,
+      strideSec: 'auto',
+      logStats: true,
+    })
     if (shots.length >= 3) {
       console.log(`[ShotSpeedList] Using shuttle trajectory detection: ${shots.length} shots`)
       return shots
     }
   }
-  
-  // Try pose classification if available
+
+  // Pose fallback
   if (poseClassCount >= 3) {
-    const shots = detectShotsFromPoseClassification(frames)
+    const shots = detectPoseShots(frames, {
+      fps,
+      hittingClasses: new Set(['smash', 'offense', 'backhand-general', 'serve', 'lift']),
+      minConfidence: 0.5,
+      minShotGapSec: 0.5,
+      perPlayerGapSec: 0.8,
+    })
     if (shots.length >= 3) {
       console.log(`[ShotSpeedList] Using pose classification detection: ${shots.length} shots`)
       return shots
     }
   }
-  
-  // Primary fallback: Player movement analysis (always works with skeleton data)
+
+  // Last resort: local player-movement fallback (keeps its own detectShotsFromSpeedPeaks path).
   const shots = detectShotsFromPlayerMovement(frames)
   console.log(`[ShotSpeedList] Using player movement detection: ${shots.length} shots`)
-  return shots
-}
-
-/**
- * Detect shots from shuttle position trajectory direction changes.
- * When a homography (video-pixels → court-meters) is supplied, also gates
- * each candidate on wrist proximity in court meters (Layer B).
- */
-function detectShotsFromShuttleTrajectory(
-  frames: SkeletonFrame[],
-  homography: number[][] | null = null,
-): ShotEvent[] {
-  const shots: ShotEvent[] = []
-  
-  const shuttleFrames: { frame: number; timestamp: number; x: number; y: number }[] = []
-  for (const frame of frames) {
-    if (frame.shuttle_position && frame.shuttle_position.x != null && frame.shuttle_position.y != null) {
-      shuttleFrames.push({
-        frame: frame.frame,
-        timestamp: frame.timestamp,
-        x: frame.shuttle_position.x,
-        y: frame.shuttle_position.y
-      })
-    }
-  }
-  
-  if (shuttleFrames.length < 5) return shots
-  
-  const smoothed = smoothPositions(shuttleFrames)
-  
-  const velocities: { frame: number; timestamp: number; vx: number; vy: number; x: number; y: number }[] = []
-  for (let i = 1; i < smoothed.length; i++) {
-    const prev = smoothed[i - 1]!
-    const curr = smoothed[i]!
-    const dt = curr.timestamp - prev.timestamp
-    if (dt > 0) {
-      velocities.push({
-        frame: curr.frame,
-        timestamp: curr.timestamp,
-        vx: (curr.x - prev.x) / dt,
-        vy: (curr.y - prev.y) / dt,
-        x: curr.x,
-        y: curr.y
-      })
-    }
-  }
-  
-  // Layer C thresholds. Earlier config (dot<0 / accel>50 / gap>0.3s) fired
-  // on any direction change with any acceleration bump, including the
-  // gravity-induced apex-of-arc flip (vy crosses zero) and TrackNet jitter
-  // while the shuttle wobbles near-stationary between rallies. New gates:
-  //   - cosAngle < -0.5  → require a sharp >120° reversal, not a smooth arc
-  //   - accelMag > 200   → raise the bar 4× in raw pixel units
-  //   - min speed mag    → reject when BOTH sides are near-stationary
-  //   - gap > 0.5s       → match real shot tempo, kill double-triggers
-  const MIN_SHOT_GAP_SECONDS = 0.5
-  // Relaxed from -0.5 to 0 based on diagnostic counters on real matches:
-  // TrackNet-smoothed trajectories + our frame sampling produce impact-pair
-  // reversals of only ~90-110° (cosAngle ≈ -0.1 to -0.5), not the full
-  // >120° reversal I originally assumed. The stricter threshold rejected
-  // 3265/3976 candidate pairs including every real shot. Any reversal
-  // (dot<0) now passes this gate; the accel, speed, and wrist gates
-  // remain responsible for eliminating gravity-arc-apex and wobble-noise.
-  const MIN_ANGLE_CHANGE_COS = 0
-  const MIN_ACCEL_MAG_PX = 200
-  const MIN_SPEED_MAG_PX = 80
-  let lastShotTimestamp = -Infinity
-
-  // Per-gate rejection counters (logged at end) to diagnose which gate is
-  // filtering which candidates. Remove once thresholds are tuned.
-  const stats = {
-    totalPairs: 0,
-    rejectedSpeed: 0,
-    rejectedAngle: 0,
-    rejectedAccel: 0,
-    rejectedGap: 0,
-    rejectedNoSkeleton: 0,
-    rejectedWrist: 0,
-    accepted: 0,
-    sampleAngleCos: [] as number[],
-    sampleAccelMag: [] as number[],
-    sampleSpeedMag: [] as number[],
-    sampleWristMeters: [] as number[],
-  }
-
-  for (let i = 1; i < velocities.length; i++) {
-    const prev = velocities[i - 1]!
-    const curr = velocities[i]!
-    stats.totalPairs++
-
-    const prevMag = Math.hypot(prev.vx, prev.vy)
-    const currMag = Math.hypot(curr.vx, curr.vy)
-    // Both sides near-stationary → this is shuttle wobble, not a hit.
-    if (prevMag < MIN_SPEED_MAG_PX && currMag < MIN_SPEED_MAG_PX) {
-      stats.rejectedSpeed++
-      continue
-    }
-
-    const dot = prev.vx * curr.vx + prev.vy * curr.vy
-    const denom = prevMag * currMag
-    const cosAngle = denom > 0 ? dot / denom : 0
-    // Require a sharp direction reversal (>120°). An apex-of-arc gravity
-    // flip produces a gradual change per-frame; a racket hit nearly
-    // reverses the velocity vector.
-    if (cosAngle > MIN_ANGLE_CHANGE_COS) {
-      stats.rejectedAngle++
-      // Sample the near-miss candidates (ones that at least reverse direction)
-      // so we can see the distribution of real direction changes.
-      if (dot < 0 && stats.sampleAngleCos.length < 20) {
-        stats.sampleAngleCos.push(cosAngle)
-      }
-      continue
-    }
-
-    const dvx = curr.vx - prev.vx
-    const dvy = curr.vy - prev.vy
-    const accelMag = Math.sqrt(dvx * dvx + dvy * dvy)
-    if (accelMag < MIN_ACCEL_MAG_PX) {
-      stats.rejectedAccel++
-      if (stats.sampleAccelMag.length < 20) stats.sampleAccelMag.push(accelMag)
-      continue
-    }
-
-    if (curr.timestamp - lastShotTimestamp < MIN_SHOT_GAP_SECONDS) {
-      stats.rejectedGap++
-      continue
-    }
-
-    const skeletonFrame = frames.find(f => f.frame === curr.frame)
-    if (!skeletonFrame || skeletonFrame.players.length === 0) {
-      stats.rejectedNoSkeleton++
-      continue
-    }
-
-    // Layer B: wrist-proximity gate. A real shot happens where a racket
-    // meets the shuttle — i.e. near a player's wrist. When the homography
-    // is available we can check this in court meters; otherwise this gate
-    // is a no-op and we fall back to the existing closest-player logic.
-    const wristDist = nearestWristMeters(skeletonFrame.players, curr.x, curr.y, homography)
-    if (wristDist != null && wristDist > SHOT_PROXIMITY_METERS) {
-      stats.rejectedWrist++
-      if (stats.sampleWristMeters.length < 20) stats.sampleWristMeters.push(wristDist)
-      continue
-    }
-
-    const closest = findClosestPlayer(skeletonFrame.players, curr.x, curr.y)
-    if (closest) {
-      shots.push({
-        frame: curr.frame,
-        timestamp: curr.timestamp,
-        playerId: closest.player_id,
-        shuttlePosition: { x: curr.x, y: curr.y },
-        playerPosition: closest.center ? { x: closest.center.x, y: closest.center.y } : { x: 0, y: 0 },
-        detectionMethod: 'shuttle_trajectory'
-      })
-      lastShotTimestamp = curr.timestamp
-      stats.accepted++
-    }
-  }
-
-  // Summary log — shows which gate is eating candidates. The "sample*"
-  // arrays show the distribution of values so we can see how close the
-  // rejected candidates were to the threshold.
-  const pctAngleCos = stats.sampleAngleCos.length
-    ? stats.sampleAngleCos.map(v => v.toFixed(2)).join(', ')
-    : '—'
-  const pctAccelMag = stats.sampleAccelMag.length
-    ? stats.sampleAccelMag.map(v => v.toFixed(0)).join(', ')
-    : '—'
-  const pctWrist = stats.sampleWristMeters.length
-    ? stats.sampleWristMeters.map(v => v.toFixed(2)).join(', ')
-    : '—'
-  console.log(
-    `[ShotDetection] pairs=${stats.totalPairs} | ` +
-    `rej: speed=${stats.rejectedSpeed} angle=${stats.rejectedAngle} ` +
-    `accel=${stats.rejectedAccel} gap=${stats.rejectedGap} ` +
-    `noSkel=${stats.rejectedNoSkeleton} wrist=${stats.rejectedWrist} | ` +
-    `accepted=${stats.accepted}`
-  )
-  console.log(`[ShotDetection] angle-cos samples (direction-reversing pairs): ${pctAngleCos}`)
-  console.log(`[ShotDetection] accel-mag samples (rejected by accel gate, px/s²): ${pctAccelMag}`)
-  console.log(`[ShotDetection] wrist-dist samples (rejected by proximity, meters): ${pctWrist}`)
-
-  return shots
-}
-
-/**
- * Detect shots from pose classification data (smash, offense, backhand, serve, lift).
- */
-function detectShotsFromPoseClassification(frames: SkeletonFrame[]): ShotEvent[] {
-  const shots: ShotEvent[] = []
-  const HITTING_CLASSES = new Set(['smash', 'offense', 'backhand-general', 'serve', 'lift'])
-  const MIN_CONFIDENCE = 0.5
-  const MIN_SHOT_GAP_SECONDS = 0.5
-  let lastShotTimestamp = -Infinity
-  
-  for (const frame of frames) {
-    if (!frame.pose_classifications || frame.pose_classifications.length === 0) continue
-    if (frame.timestamp - lastShotTimestamp < MIN_SHOT_GAP_SECONDS) continue
-    
-    for (const classification of frame.pose_classifications) {
-      if (HITTING_CLASSES.has(classification.class_name) && classification.confidence >= MIN_CONFIDENCE) {
-        let matchedPlayer = frame.players[0]
-        
-        if (classification.bbox && frame.players.length > 1) {
-          const bboxCenterX = classification.bbox.x + classification.bbox.width / 2
-          const bboxCenterY = classification.bbox.y + classification.bbox.height / 2
-          matchedPlayer = findClosestPlayer(frame.players, bboxCenterX, bboxCenterY) || matchedPlayer
-        }
-        
-        if (matchedPlayer) {
-          shots.push({
-            frame: frame.frame,
-            timestamp: frame.timestamp,
-            playerId: matchedPlayer.player_id,
-            shuttlePosition: frame.shuttle_position
-              ? { x: frame.shuttle_position.x, y: frame.shuttle_position.y }
-              : matchedPlayer.center
-                ? { x: matchedPlayer.center.x, y: matchedPlayer.center.y }
-                : { x: 0, y: 0 },
-            playerPosition: matchedPlayer.center
-              ? { x: matchedPlayer.center.x, y: matchedPlayer.center.y }
-              : { x: 0, y: 0 },
-            detectionMethod: 'pose_classification'
-          })
-          lastShotTimestamp = frame.timestamp
-          break
-        }
-      }
-    }
-  }
-  
   return shots
 }
 
@@ -373,9 +111,9 @@ function detectShotsFromPoseClassification(frames: SkeletonFrame[]): ShotEvent[]
  * 4. These peaks indicate the player just reached the shuttle (shot moment)
  * 5. Merge events from both players, sorted by time, alternating where possible
  */
-function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
+function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): SharedShotEvent[] {
   if (frames.length < 10) return []
-  
+
   // Build per-player position timeline with speeds
   const playerTimelines: Map<number, {
     frame: number
@@ -384,17 +122,17 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
     y: number
     speed: number  // km/h from skeleton data
   }[]> = new Map()
-  
+
   for (const frame of frames) {
     for (const player of frame.players) {
       if (!player.center) continue
-      
+
       let timeline = playerTimelines.get(player.player_id)
       if (!timeline) {
         timeline = []
         playerTimelines.set(player.player_id, timeline)
       }
-      
+
       timeline.push({
         frame: frame.frame,
         timestamp: frame.timestamp,
@@ -404,16 +142,16 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
       })
     }
   }
-  
+
   // For each player, detect "shot events" as deceleration peaks
-  const playerShots: ShotEvent[] = []
+  const playerShots: SharedShotEvent[] = []
   const MIN_SHOT_GAP = 0.6 // seconds between shots by same player
   const DECEL_THRESHOLD_KMH = 2.0 // Minimum speed drop to count as deceleration
   const MIN_SPEED_BEFORE_DECEL = 3.0 // Player must be moving at least this fast (km/h) before decel
-  
+
   for (const [playerId, timeline] of playerTimelines) {
     if (timeline.length < 5) continue
-    
+
     // Smooth speeds (moving average window=5)
     const smoothedSpeeds: number[] = []
     for (let i = 0; i < timeline.length; i++) {
@@ -424,46 +162,46 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
       }
       smoothedSpeeds.push(sum / count)
     }
-    
+
     // Detect deceleration peaks: speed was high, then drops significantly
     let lastShotTimestamp = -Infinity
-    
+
     for (let i = 3; i < smoothedSpeeds.length - 1; i++) {
       const prev3Avg = (smoothedSpeeds[i-3]! + smoothedSpeeds[i-2]! + smoothedSpeeds[i-1]!) / 3
       const curr = smoothedSpeeds[i]!
       const decel = prev3Avg - curr
-      
+
       const entry = timeline[i]!
-      
+
       // Deceleration peak: was moving fast, now slowing down
       if (decel > DECEL_THRESHOLD_KMH &&
           prev3Avg > MIN_SPEED_BEFORE_DECEL &&
           entry.timestamp - lastShotTimestamp > MIN_SHOT_GAP) {
-        
+
         playerShots.push({
           frame: entry.frame,
           timestamp: entry.timestamp,
           playerId: playerId,
           shuttlePosition: { x: entry.x, y: entry.y }, // Use player position as proxy
           playerPosition: { x: entry.x, y: entry.y },
-          detectionMethod: 'player_movement'
+          detectionMethod: 'player_movement' as DetectionMethod
         })
-        
+
         lastShotTimestamp = entry.timestamp
       }
     }
   }
-  
+
   // Sort all shots by timestamp
   playerShots.sort((a, b) => a.timestamp - b.timestamp)
-  
+
   // If we have very few shots, lower thresholds and try again with just speed peaks
   if (playerShots.length < 3) {
     return detectShotsFromSpeedPeaks(frames, playerTimelines)
   }
-  
+
   // Post-process: ensure minimum gap between any two shots
-  const filteredShots: ShotEvent[] = []
+  const filteredShots: SharedShotEvent[] = []
   let lastTs = -Infinity
   for (const shot of playerShots) {
     if (shot.timestamp - lastTs > 0.4) {
@@ -471,7 +209,7 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
       lastTs = shot.timestamp
     }
   }
-  
+
   return filteredShots
 }
 
@@ -483,16 +221,16 @@ function detectShotsFromPlayerMovement(frames: SkeletonFrame[]): ShotEvent[] {
 function detectShotsFromSpeedPeaks(
   frames: SkeletonFrame[],
   playerTimelines: Map<number, { frame: number; timestamp: number; x: number; y: number; speed: number }[]>
-): ShotEvent[] {
-  const shots: ShotEvent[] = []
+): SharedShotEvent[] {
+  const shots: SharedShotEvent[] = []
   const MIN_PEAK_SPEED = 2.0 // km/h - very low threshold to catch anything
   const MIN_GAP = 0.8 // seconds
-  
+
   for (const [playerId, timeline] of playerTimelines) {
     if (timeline.length < 5) continue
-    
+
     let lastShotTs = -Infinity
-    
+
     // Find local speed maxima (peaks in movement)
     for (let i = 2; i < timeline.length - 2; i++) {
       const speed = timeline[i]!.speed
@@ -506,9 +244,9 @@ function detectShotsFromSpeedPeaks(
       const isLocalMax = speed > prevSpeed && speed > nextSpeed &&
                          speed > prev2Speed && speed > next2Speed &&
                          speed > MIN_PEAK_SPEED
-      
+
       const entry = timeline[i]!
-      
+
       if (isLocalMax && entry.timestamp - lastShotTs > MIN_GAP) {
         shots.push({
           frame: entry.frame,
@@ -516,17 +254,17 @@ function detectShotsFromSpeedPeaks(
           playerId,
           shuttlePosition: { x: entry.x, y: entry.y },
           playerPosition: { x: entry.x, y: entry.y },
-          detectionMethod: 'speed_peaks'
+          detectionMethod: 'speed_peaks' as DetectionMethod
         })
         lastShotTs = entry.timestamp
       }
     }
   }
-  
+
   shots.sort((a, b) => a.timestamp - b.timestamp)
-  
+
   // Filter minimum gap between any two shots
-  const filtered: ShotEvent[] = []
+  const filtered: SharedShotEvent[] = []
   let lastTs = -Infinity
   for (const shot of shots) {
     if (shot.timestamp - lastTs > 0.5) {
@@ -534,61 +272,8 @@ function detectShotsFromSpeedPeaks(
       lastTs = shot.timestamp
     }
   }
-  
+
   return filtered
-}
-
-/**
- * Find the closest player to a given position.
- */
-function findClosestPlayer(
-  players: SkeletonFrame['players'],
-  x: number,
-  y: number
-): SkeletonFrame['players'][0] | null {
-  let closest: SkeletonFrame['players'][0] | null = null
-  let closestDist = Infinity
-  
-  for (const player of players) {
-    if (!player.center) continue
-    const dx = player.center.x - x
-    const dy = player.center.y - y
-    const dist = Math.sqrt(dx * dx + dy * dy)
-    if (dist < closestDist) {
-      closestDist = dist
-      closest = player
-    }
-  }
-  
-  return closest || players[0] || null
-}
-
-/**
- * Smooth positions using a moving average to reduce noise.
- */
-function smoothPositions(
-  points: { frame: number; timestamp: number; x: number; y: number }[],
-  windowSize: number = 3
-): { frame: number; timestamp: number; x: number; y: number }[] {
-  const result: { frame: number; timestamp: number; x: number; y: number }[] = []
-  const half = Math.floor(windowSize / 2)
-  
-  for (let i = 0; i < points.length; i++) {
-    let sumX = 0, sumY = 0, count = 0
-    for (let j = Math.max(0, i - half); j <= Math.min(points.length - 1, i + half); j++) {
-      sumX += points[j]!.x
-      sumY += points[j]!.y
-      count++
-    }
-    result.push({
-      frame: points[i]!.frame,
-      timestamp: points[i]!.timestamp,
-      x: sumX / count,
-      y: sumY / count
-    })
-  }
-  
-  return result
 }
 
 /**
@@ -596,7 +281,7 @@ function smoothPositions(
  * Each segment represents the period between opponent's hit and player's responding hit.
  */
 export function buildMovementSegments(
-  shots: ShotEvent[],
+  shots: SharedShotEvent[],
   frames: SkeletonFrame[],
 ): ShotMovementSegment[] {
   if (shots.length < 2) return []
@@ -710,10 +395,19 @@ export function useShotSegments(
   skeletonData: Ref<SkeletonFrame[] | undefined>,
   homography?: Ref<number[][] | null>,
 ) {
-  const shotEvents = computed<ShotEvent[]>(() => {
+  // Infer fps from frame timestamps when available. Falls back to 30 fps when
+  // the data is insufficient or timestamps collapse (e.g. single-frame clip).
+  const fpsEstimate = computed(() => {
+    const frames = skeletonData.value
+    if (!frames || frames.length < 2) return 30
+    const span = frames[frames.length - 1]!.timestamp - frames[0]!.timestamp
+    return span > 0 ? (frames.length - 1) / span : 30
+  })
+
+  const shotEvents = computed<SharedShotEvent[]>(() => {
     const frames = skeletonData.value
     if (!frames || frames.length === 0) return []
-    return detectShots(frames, homography?.value ?? null)
+    return detectShots(frames, homography?.value ?? null, fpsEstimate.value)
   })
 
   const segments = computed<ShotMovementSegmentWithPeaks[]>(() => {
