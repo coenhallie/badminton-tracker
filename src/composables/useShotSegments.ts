@@ -58,14 +58,19 @@ export function detectShots(
     `${poseClassCount} pose classification frames, ${frames.length} total frames`
   )
 
-  // Primary: shared shuttle-trajectory detector with pause-use-case options.
+  // Primary: shared shuttle-trajectory detector using the SAME options as
+  // useAdvancedAnalytics.ts (rally detection). Previously we layered two
+  // extra gates on top here (minAccelMagPx: 200, wristProximityMeters: 3.5)
+  // to suppress false-positive auto-pauses, but they also silently filtered
+  // legitimate shots — causing the rally timeline (no extra gates) and the
+  // auto-pause modal (extra gates) to report divergent shot counts on the
+  // same video. Between-rally noise is now handled by Layer A's rally-pad
+  // filter in App.vue, which makes those extra gates redundant.
   if (shuttleFrameCount >= 5) {
     const shots = detectShuttleShots(frames, {
       fps,
       cameraAngle: 'overhead',
       homography,
-      minAccelMagPx: 200,
-      wristProximityMeters: homography ? 3.5 : null,
       rejectOutliers: true,
       strideSec: 'auto',
     })
