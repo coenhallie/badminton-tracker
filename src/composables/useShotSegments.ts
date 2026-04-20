@@ -10,10 +10,14 @@ const RIGHT_WRIST = 10
 const WRIST_CONFIDENCE_THRESHOLD = 0.3
 
 // Layer B: at the moment of a shot-candidate direction change, the shuttle
-// must be within this many meters of at least one player's wrist. 1.5 m is
-// generous — racket ~0.65 m + arm reach ~0.6 m = ~1.25 m at full extension —
-// with margin left over for pose-keypoint noise.
-const SHOT_PROXIMITY_METERS = 1.5
+// must be within this many meters of at least one player's wrist. Tuned
+// against real diagnostic samples — the wrist keypoint sits ~0.65 m behind
+// the racket head, and the shuttle typically moves ~1 m between impact and
+// the next frame (30 m/s over 33 ms), plus pose-keypoint noise of ~0.5 m
+// on wide-camera views — so real shots routinely show 2–5 m wrist-to-
+// shuttle distance. 3.5 m catches those while still rejecting the 10 m+
+// ghost-direction-change candidates in empty air.
+const SHOT_PROXIMITY_METERS = 3.5
 
 /**
  * Smallest distance (in court meters) between the shuttle and any confident

@@ -214,17 +214,18 @@ const inRallyShotSegments = computed(() => {
     console.log(`[ShotDetection/LayerA] No rallies detected; passing through all ${segs.length} segments`)
     return segs
   }
-  const kept = segs.filter(seg => {
-    const rally = rallies.find(
+  // Keep any segment whose endShot (the one we'd auto-pause on) lands inside
+  // some detected rally. Earlier logic also required the startShot to be in
+  // the SAME rally, but rally detection occasionally over-segments a single
+  // real rally into multiple short ones — that mislabeled boundary then
+  // dropped legitimate shot pairs. The auto-pause fires at the endShot, so
+  // gating on endShot alone is sufficient to kill between-rally ghosts.
+  const kept = segs.filter(seg =>
+    rallies.some(
       r => seg.endShot.timestamp >= r.startTimestamp &&
            seg.endShot.timestamp <= r.endTimestamp,
-    )
-    if (!rally) return false
-    // Both endpoints of the segment must lie in the SAME rally — a segment
-    // that spans a between-rally gap is nonsense for shot-to-shot stats.
-    return seg.startShot.timestamp >= rally.startTimestamp &&
-           seg.startShot.timestamp <= rally.endTimestamp
-  })
+    ),
+  )
   console.log(
     `[ShotDetection/LayerA] ${kept.length}/${segs.length} segments kept ` +
     `(dropped ${segs.length - kept.length} between-rally); rallies=${rallies.length}`
