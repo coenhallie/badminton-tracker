@@ -68,7 +68,6 @@ export function detectShots(
       wristProximityMeters: homography ? 3.5 : null,
       rejectOutliers: true,
       strideSec: 'auto',
-      logStats: true,
     })
     if (shots.length >= 3) {
       console.log(`[ShotSpeedList] Using shuttle trajectory detection: ${shots.length} shots`)

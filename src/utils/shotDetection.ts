@@ -183,8 +183,6 @@ export interface DetectShuttleShotsOptions {
    *   * null/undefined: no subsampling.
    */
   strideSec?: number | 'auto' | null
-  /** Emit a one-line summary log of per-gate rejection counts. */
-  logStats?: boolean
 }
 
 interface ShuttlePoint {
@@ -323,27 +321,13 @@ export function detectShuttleShots(
   const shots: ShotEvent[] = []
   let lastShotFrame = -Infinity
 
-  const stats = {
-    totalPairs: 0,
-    rejectedSpeed: 0,
-    rejectedTimeGap: 0,
-    rejectedAngle: 0,
-    rejectedAccel: 0,
-    rejectedGap: 0,
-    rejectedNoSkeleton: 0,
-    rejectedWrist: 0,
-    accepted: 0,
-  }
-
   for (let i = 2; i < samples.length; i++) {
     const p0 = samples[i - 2]!
     const p1 = samples[i - 1]!
     const p2 = samples[i]!
-    stats.totalPairs++
 
     // Max-time-gap guard: velocity is meaningless across long idle gaps.
     if ((p1.timestamp - p0.timestamp) > MAX_GAP_S || (p2.timestamp - p1.timestamp) > MAX_GAP_S) {
-      stats.rejectedTimeGap++
       continue
     }
 
@@ -357,7 +341,6 @@ export function detectShuttleShots(
 
     // Both near-stationary → jitter, not a hit.
     if (speed1sq < minSpeedSq && speed2sq < minSpeedSq) {
-      stats.rejectedSpeed++
       continue
     }
 
@@ -368,7 +351,6 @@ export function detectShuttleShots(
       ? cosAngleMax * Math.sqrt(speed1sq * speed2sq)
       : 0
     if (dot >= threshold) {
-      stats.rejectedAngle++
       continue
     }
 
@@ -378,21 +360,18 @@ export function detectShuttleShots(
       const dvy = vy2 - vy1
       const accelMag = Math.sqrt(dvx * dvx + dvy * dvy)
       if (accelMag < opts.minAccelMagPx) {
-        stats.rejectedAccel++
         continue
       }
     }
 
     // Min-shot-gap (frame-based, matches backend).
     if ((p1.frame - lastShotFrame) < minShotGapFrames) {
-      stats.rejectedGap++
       continue
     }
 
     // Skeleton lookup for player assignment.
     const skFrame = frameMap.get(p1.frame)
     if (!skFrame || skFrame.players.length === 0) {
-      stats.rejectedNoSkeleton++
       continue
     }
 
@@ -400,14 +379,12 @@ export function detectShuttleShots(
     if (opts.wristProximityMeters != null && homography) {
       const wristDist = nearestWristMeters(skFrame.players, p1.x, p1.y, homography)
       if (wristDist != null && wristDist > opts.wristProximityMeters) {
-        stats.rejectedWrist++
         continue
       }
     }
 
     const closest = findClosestPlayer(skFrame.players, p1.x, p1.y)
     if (!closest) {
-      stats.rejectedNoSkeleton++
       continue
     }
 
@@ -420,18 +397,6 @@ export function detectShuttleShots(
       detectionMethod: 'shuttle_trajectory',
     })
     lastShotFrame = p1.frame
-    stats.accepted++
-  }
-
-  if (opts.logStats) {
-    // eslint-disable-next-line no-console
-    console.log(
-      `[shotDetection] shuttle: pairs=${stats.totalPairs} | ` +
-      `rej: speed=${stats.rejectedSpeed} timeGap=${stats.rejectedTimeGap} ` +
-      `angle=${stats.rejectedAngle} accel=${stats.rejectedAccel} ` +
-      `gap=${stats.rejectedGap} noSkel=${stats.rejectedNoSkeleton} ` +
-      `wrist=${stats.rejectedWrist} | accepted=${stats.accepted}`,
-    )
   }
 
   return shots

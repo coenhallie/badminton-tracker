@@ -217,11 +217,12 @@ const { segments: shotSegments } = useShotSegments(skeletonDataRef, shotHomograp
 // positives that sit 5+ s outside any rally.
 const RALLY_BOUNDARY_PADDING_SECONDS = 2.0
 
+// Layer A: keep only shot segments whose end-shot falls inside a detected rally
+// (±RALLY_BOUNDARY_PADDING_SECONDS). Falls through unchanged when no rallies.
 const inRallyShotSegments = computed(() => {
   const segs = shotSegments.value
   const rallies = detectedRallies.value
   if (!rallies.length) {
-    console.log(`[ShotDetection/LayerA] No rallies detected; passing through all ${segs.length} segments`)
     return segs
   }
   const pad = RALLY_BOUNDARY_PADDING_SECONDS
@@ -230,11 +231,6 @@ const inRallyShotSegments = computed(() => {
       r => seg.endShot.timestamp >= r.startTimestamp - pad &&
            seg.endShot.timestamp <= r.endTimestamp + pad,
     ),
-  )
-  console.log(
-    `[ShotDetection/LayerA] ${kept.length}/${segs.length} segments kept ` +
-    `(padded ±${pad}s, dropped ${segs.length - kept.length} far from any rally); ` +
-    `rallies=${rallies.length}`
   )
   return kept
 })
