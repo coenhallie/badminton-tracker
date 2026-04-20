@@ -109,7 +109,7 @@ export function findClosestPlayer(
  * wrist keypoint across the given players. Returns null when the homography
  * is missing, no wrist is visible, or a keypoint cannot be projected.
  */
-export function nearestWristMeters(
+function nearestWristMeters(
   players: FramePlayer[],
   shuttleX: number,
   shuttleY: number,
