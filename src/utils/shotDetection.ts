@@ -61,8 +61,8 @@ export interface ShotEvent {
 // -----------------------------------------------------------------------------
 // Constants (exported for reuse)
 // -----------------------------------------------------------------------------
-export const LEFT_WRIST_KP = 9
-export const RIGHT_WRIST_KP = 10
+const LEFT_WRIST_KP = 9
+const RIGHT_WRIST_KP = 10
 
 /** Minimum keypoint confidence for a wrist to be considered visible. */
 const WRIST_CONFIDENCE_THRESHOLD = 0.3
@@ -82,7 +82,7 @@ const MAX_GAP_S = 2.5
 // -----------------------------------------------------------------------------
 
 /** Find the player whose center is closest to (x, y). Returns null when none. */
-export function findClosestPlayer(
+function findClosestPlayer(
   players: FramePlayer[],
   x: number,
   y: number,

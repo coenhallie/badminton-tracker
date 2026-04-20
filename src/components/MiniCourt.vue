@@ -3,12 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted, shallowRef } from 'vue'
 import type { FramePlayer } from '@/types/analysis'
 import { PLAYER_COLORS, COURT_DIMENSIONS } from '@/types/analysis'
 import {
-  normalizePoints,
-  invertMatrix3x3,
-  multiplyMatrix3x3,
   calculateHomography,
-  solveLeastSquares,
-  solveLinearSystem,
   applyHomography,
   COURT_KEYPOINT_POSITIONS,
 } from '@/utils/homography'
