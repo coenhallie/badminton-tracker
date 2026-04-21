@@ -1147,18 +1147,32 @@ class PlayerIdentityTracker:
         n_skeletons = len(active_skeletons)
 
         if n_skeletons == 1:
-            # Only one skeleton visible - find best matching player
+            # Only one skeleton visible - find best matching player.
+            # Priority order (most authoritative first):
+            #   1. Court side — once calibrated, each player is locked to
+            #      a side of the net. A visible skeleton's side is a
+            #      deterministic signal that does not drift with missed
+            #      detections. The user can swap via the identity panel
+            #      for the rare case players actually change ends.
+            #   2. YOLO26 track_id continuity — useful during calibration
+            #      or when the skeleton is near the midline.
+            #   3. Cost-based matching — last resort.
             skel = active_skeletons[0]
             center = skel["center"]
+            sx, sy = center
             skel_tid = skel.get("track_id", -1)
 
-            # Trust YOLO26 track_id continuity when available: if this
-            # skeleton's track_id was most recently bound to a specific pid,
-            # that's authoritative. Otherwise the cost-based fallback can
-            # misattribute the visible skeleton to the missing player when
-            # its predicted position happens to be closer.
             pid: Optional[int] = None
-            if skel_tid >= 0:
+
+            if self.calibration_complete:
+                actual_side = self._get_court_side(sy, sx)
+                for candidate_pid in (0, 1):
+                    if (self.calibrated[candidate_pid]
+                            and self.court_sides[candidate_pid] == actual_side):
+                        pid = candidate_pid
+                        break
+
+            if pid is None and skel_tid >= 0:
                 for candidate_pid, last_tid in self.last_track_ids.items():
                     if last_tid == skel_tid:
                         pid = candidate_pid
