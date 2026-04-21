@@ -1,7 +1,12 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import type { Rally, RallySpeedStats } from '@/types/analysis'
 import { PLAYER_COLORS } from '@/types/analysis'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
 
 const props = defineProps<{
   rallies: Rally[]
@@ -297,7 +302,7 @@ function getPlayerColor(index: number): string {
               class="rally-tooltip-player"
             >
               <span class="rally-tooltip-player-dot" :style="{ background: getPlayerColor(p.playerId) }" />
-              <span class="rally-tooltip-player-label">P{{ p.playerId + 1 }}</span>
+              <span class="rally-tooltip-player-label">P{{ pidDisplayFor(p.playerId) + 1 }}</span>
               <div class="rally-tooltip-player-stats">
                 <span>{{ p.avgSpeed.toFixed(1) }} <small>avg km/h</small></span>
                 <span>{{ p.maxSpeed.toFixed(1) }} <small>max km/h</small></span>

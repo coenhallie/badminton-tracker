@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import type { AnalysisResult, Rally } from '@/types/analysis'
 import { PLAYER_COLORS } from '@/types/analysis'
 import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
 
 const props = defineProps<{
   result: AnalysisResult
@@ -313,7 +318,7 @@ function getQualityColor(quality: string): string {
                   :key="i"
                   class="shot-dot"
                   :style="{ background: getPlayerColor(shot.playerId) }"
-                  :title="`P${shot.playerId + 1}: ${shot.shotType}`"
+                  :title="`P${pidDisplayFor(shot.playerId) + 1}: ${shot.shotType}`"
                 />
                 <span v-if="rally.shots.length > 8" class="shot-more">+{{ rally.shots.length - 8 }}</span>
               </div>
@@ -392,7 +397,7 @@ function getQualityColor(quality: string): string {
               class="aa-stat-card wide"
             >
               <div class="player-badge" :style="{ background: getPlayerColor(stat.playerId) }">
-                P{{ stat.playerId + 1 }}
+                P{{ pidDisplayFor(stat.playerId) + 1 }}
               </div>
               <div class="stat-details">
                 <div class="stat-main">
@@ -420,7 +425,7 @@ function getQualityColor(quality: string): string {
             >
               <div class="recovery-header">
                 <div class="player-badge" :style="{ background: getPlayerColor(stat.playerId) }">
-                  P{{ stat.playerId + 1 }}
+                  P{{ pidDisplayFor(stat.playerId) + 1 }}
                 </div>
                 <span class="recovery-avg">{{ stat.avgRecoveryTime.toFixed(2) }}s avg</span>
               </div>
@@ -459,7 +464,7 @@ function getQualityColor(quality: string): string {
             >
               <div class="efficiency-header">
                 <div class="player-badge" :style="{ background: getPlayerColor(eff.playerId) }">
-                  P{{ eff.playerId + 1 }}
+                  P{{ pidDisplayFor(eff.playerId) + 1 }}
                 </div>
                 <div class="efficiency-score">
                   <svg viewBox="0 0 36 36" class="circular-progress">
