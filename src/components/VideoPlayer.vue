@@ -21,13 +21,6 @@ const DEBUG_MODE = import.meta.env.DEV && false // Disabled even in dev by defau
 // NOTE: CourtDetectionResult interface removed - automatic court detection disabled
 // Manual court keypoints are now the only method for court calibration
 
-// Manual court keypoint type
-interface ManualCourtKeypoint {
-  x: number
-  y: number
-  label: string
-}
-
 // Heatmap data type
 interface HeatmapData {
   video_id: string
@@ -305,15 +298,11 @@ const OTHER_BOX_COLOR = '#00FFFF'       // Cyan for other detections
 const emit = defineEmits<{
   timeUpdate: [time: number]
   frameUpdate: [frame: number]
-  courtKeypointsSet: [keypoints: ExtendedCourtKeypoints]
-  keypointsConfirmed: [keypoints: ExtendedCourtKeypoints]
   play: []
-  keypointSelectionChange: [isActive: boolean, currentCount: number]
 }>()
 
 const videoRef = ref<HTMLVideoElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
-const keypointCanvasRef = ref<HTMLCanvasElement | null>(null)
 const containerRef = ref<HTMLDivElement | null>(null)
 
 const isPlaying = ref(false)
@@ -324,42 +313,6 @@ const isMuted = ref(false)
 const playbackRate = ref(1)
 const isFullscreen = ref(false)
 const showControls = ref(true)
-
-// =============================================================================
-// MANUAL COURT KEYPOINT SELECTION - 12 POINT SYSTEM
-// =============================================================================
-// Users can click on 12 court reference points for precise homography:
-// 1-4: Outer corners (TL, TR, BR, BL)
-// 5-6: Net intersections (NL, NR)
-// 7-8: Near service line corners (SSL_NL, SSL_NR)
-// 9-10: Far service line corners (SSL_FL, SSL_FR)
-// 11-12: Center line endpoints at service lines (CT_N, CT_F)
-// =============================================================================
-const isKeypointSelectionMode = ref(false)
-const manualKeypoints = ref<ManualCourtKeypoint[]>([])
-const TOTAL_KEYPOINTS = 12
-const KEYPOINT_LABELS = [
-  'TL', 'TR', 'BR', 'BL',           // 4 outer corners
-  'NL', 'NR',                        // Net intersections with sidelines
-  'SNL', 'SNR',                      // Service line near court (top half)
-  'SFL', 'SFR',                      // Service line far court (bottom half)
-  'CTN', 'CTF'                       // Center line at service lines
-] as const
-const KEYPOINT_FULL_LABELS = [
-  'Top-Left Corner', 'Top-Right Corner', 'Bottom-Right Corner', 'Bottom-Left Corner',
-  'Net-Left', 'Net-Right',
-  'Service Near-Left', 'Service Near-Right',
-  'Service Far-Left', 'Service Far-Right',
-  'Center Near', 'Center Far'
-] as const
-// 12 distinct colors for each keypoint
-const keypointColors = [
-  '#FF4444', '#44FF44', '#4444FF', '#FFFF44',  // Corners: Red, Green, Blue, Yellow
-  '#FF00FF', '#00FFFF',                         // Net: Magenta, Cyan
-  '#FF8800', '#88FF00',                         // Service near: Orange, Lime
-  '#0088FF', '#FF0088',                         // Service far: Azure, Rose
-  '#FFFFFF', '#888888'                          // Center: White, Gray
-]
 
 // Performance optimization: Pre-built index for O(1) frame lookup
 const frameIndex = shallowRef<Map<number, number>>(new Map())
@@ -731,7 +684,6 @@ function handleLoadedMetadata() {
   if (!videoRef.value) return
   duration.value = videoRef.value.duration
   resizeCanvas()
-  resizeKeypointCanvas()
 }
 
 function handleSeek(event: MouseEvent) {
@@ -783,306 +735,6 @@ function toggleFullscreen() {
 function handleFullscreenChange() {
   isFullscreen.value = !!document.fullscreenElement
 }
-
-// =============================================================================
-// MANUAL KEYPOINT SELECTION FUNCTIONS
-// =============================================================================
-
-/**
- * Toggle keypoint selection mode on/off
- * When entering mode, pause the video for precise clicking
- */
-function toggleKeypointSelectionMode() {
-  isKeypointSelectionMode.value = !isKeypointSelectionMode.value
-  
-  if (isKeypointSelectionMode.value) {
-    // Pause video when entering keypoint selection mode
-    if (videoRef.value && isPlaying.value) {
-      videoRef.value.pause()
-    }
-    // Clear previous keypoints when starting new selection
-    manualKeypoints.value = []
-    // Initialize keypoint canvas
-    nextTick(() => {
-      resizeKeypointCanvas()
-      drawKeypointOverlay()
-    })
-  }
-}
-
-/**
- * Clear all manually selected keypoints and exit selection mode
- */
-function clearManualKeypoints() {
-  manualKeypoints.value = []
-  isKeypointSelectionMode.value = false
-  drawKeypointOverlay()
-}
-
-/**
- * Resize keypoint canvas to match video dimensions
- */
-function resizeKeypointCanvas() {
-  if (!keypointCanvasRef.value || !videoRef.value) return
-  keypointCanvasRef.value.width = videoRef.value.videoWidth || videoRef.value.clientWidth
-  keypointCanvasRef.value.height = videoRef.value.videoHeight || videoRef.value.clientHeight
-}
-
-/**
- * Handle click on keypoint canvas to add a new keypoint
- */
-function handleKeypointCanvasClick(event: MouseEvent) {
-  if (!isKeypointSelectionMode.value) return
-  if (manualKeypoints.value.length >= TOTAL_KEYPOINTS) return
-  
-  const canvas = keypointCanvasRef.value
-  if (!canvas) return
-  
-  // Get click position relative to canvas
-  const rect = canvas.getBoundingClientRect()
-  const clickX = event.clientX - rect.left
-  const clickY = event.clientY - rect.top
-  
-  // Scale click position to video coordinates
-  const scaleX = (videoRef.value?.videoWidth || canvas.width) / rect.width
-  const scaleY = (videoRef.value?.videoHeight || canvas.height) / rect.height
-  
-  const videoX = clickX * scaleX
-  const videoY = clickY * scaleY
-  
-  // Add keypoint
-  const label = KEYPOINT_LABELS[manualKeypoints.value.length] ?? 'Unknown'
-  manualKeypoints.value.push({
-    x: videoX,
-    y: videoY,
-    label
-  })
-  
-  if (DEBUG_MODE) {
-    console.log(`[Keypoint Selection] Added ${label} at (${videoX.toFixed(1)}, ${videoY.toFixed(1)}) [${manualKeypoints.value.length}/${TOTAL_KEYPOINTS}]`)
-  }
-  
-  // Redraw overlay
-  drawKeypointOverlay()
-  
-  // If we have all 12 keypoints, emit them
-  if (manualKeypoints.value.length === TOTAL_KEYPOINTS) {
-    const kp = manualKeypoints.value
-    const keypointsData: ExtendedCourtKeypoints = {
-      // 4 outer corners
-      top_left: [kp[0]?.x ?? 0, kp[0]?.y ?? 0],
-      top_right: [kp[1]?.x ?? 0, kp[1]?.y ?? 0],
-      bottom_right: [kp[2]?.x ?? 0, kp[2]?.y ?? 0],
-      bottom_left: [kp[3]?.x ?? 0, kp[3]?.y ?? 0],
-      // Net intersections
-      net_left: [kp[4]?.x ?? 0, kp[4]?.y ?? 0],
-      net_right: [kp[5]?.x ?? 0, kp[5]?.y ?? 0],
-      // Service line corners (near court)
-      service_line_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
-      service_line_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
-      // Service line corners (far court)
-      service_line_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
-      service_line_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
-      // Center line endpoints
-      center_near: [kp[10]?.x ?? 0, kp[10]?.y ?? 0],
-      center_far: [kp[11]?.x ?? 0, kp[11]?.y ?? 0]
-    }
-    emit('courtKeypointsSet', keypointsData)
-    if (DEBUG_MODE) {
-      console.log('[Keypoint Selection] All 12 keypoints collected:', keypointsData)
-    }
-  }
-}
-
-/**
- * Undo the last added keypoint
- */
-function undoLastKeypoint() {
-  if (manualKeypoints.value.length > 0) {
-    manualKeypoints.value.pop()
-    drawKeypointOverlay()
-  }
-}
-
-/**
- * Confirm and apply the selected keypoints
- * Called when the "Done" button is clicked
- * This triggers zone coverage recalculation with the new homography
- */
-function confirmKeypoints() {
-  if (manualKeypoints.value.length !== TOTAL_KEYPOINTS) {
-    console.warn('[Keypoint Selection] Cannot confirm - need all 12 keypoints')
-    return
-  }
-  
-  const kp = manualKeypoints.value
-  const keypointsData: ExtendedCourtKeypoints = {
-    // 4 outer corners
-    top_left: [kp[0]?.x ?? 0, kp[0]?.y ?? 0],
-    top_right: [kp[1]?.x ?? 0, kp[1]?.y ?? 0],
-    bottom_right: [kp[2]?.x ?? 0, kp[2]?.y ?? 0],
-    bottom_left: [kp[3]?.x ?? 0, kp[3]?.y ?? 0],
-    // Net intersections
-    net_left: [kp[4]?.x ?? 0, kp[4]?.y ?? 0],
-    net_right: [kp[5]?.x ?? 0, kp[5]?.y ?? 0],
-    // Service line corners (near court)
-    service_line_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
-    service_line_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
-    // Service line corners (far court)
-    service_line_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
-    service_line_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
-    // Center line endpoints
-    center_near: [kp[10]?.x ?? 0, kp[10]?.y ?? 0],
-    center_far: [kp[11]?.x ?? 0, kp[11]?.y ?? 0]
-  }
-  
-  console.log('[Keypoint Selection] Keypoints confirmed by user - triggering recalculation')
-  
-  // Emit the confirmed keypoints - this should trigger zone recalculation
-  emit('keypointsConfirmed', keypointsData)
-  
-  // Also emit courtKeypointsSet for initial setup if not already set
-  emit('courtKeypointsSet', keypointsData)
-  
-  // Exit keypoint selection mode
-  isKeypointSelectionMode.value = false
-}
-
-/**
- * Draw the keypoint selection overlay with court guide lines
- */
-function drawKeypointOverlay() {
-  const canvas = keypointCanvasRef.value
-  if (!canvas) return
-  
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-  
-  // Clear canvas
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
-  
-  // If not in selection mode, don't draw anything
-  if (!isKeypointSelectionMode.value && manualKeypoints.value.length === 0) return
-  
-  // Scale factors
-  const videoWidth = videoRef.value?.videoWidth || canvas.width
-  const videoHeight = videoRef.value?.videoHeight || canvas.height
-  const scaleX = canvas.width / videoWidth
-  const scaleY = canvas.height / videoHeight
-  
-  // Draw court structure guide lines based on collected keypoints
-  drawCourtGuideLines(ctx, scaleX, scaleY)
-  
-  // Draw keypoints
-  manualKeypoints.value.forEach((kp, idx) => {
-    const x = kp.x * scaleX
-    const y = kp.y * scaleY
-    const color = keypointColors[idx] ?? '#FFFFFF'
-    
-    // Draw outer glow
-    ctx.beginPath()
-    ctx.arc(x, y, 18, 0, Math.PI * 2)
-    ctx.fillStyle = color + '40'
-    ctx.fill()
-    
-    // Draw circle
-    ctx.beginPath()
-    ctx.arc(x, y, 12, 0, Math.PI * 2)
-    ctx.fillStyle = color
-    ctx.fill()
-    ctx.strokeStyle = '#000000'
-    ctx.lineWidth = 3
-    ctx.stroke()
-    
-    // Draw label
-    ctx.font = 'bold 11px Inter, system-ui, sans-serif'
-    ctx.fillStyle = '#000000'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(kp.label, x, y)
-  })
-}
-
-/**
- * Draw guide lines connecting keypoints to show court structure
- */
-function drawCourtGuideLines(ctx: CanvasRenderingContext2D, scaleX: number, scaleY: number) {
-  const kp = manualKeypoints.value
-  if (kp.length < 2) return
-  
-  ctx.setLineDash([8, 4])
-  ctx.lineWidth = 2
-  
-  // Outer boundary (connect corners: 0-1-2-3-0)
-  if (kp.length >= 4) {
-    ctx.strokeStyle = '#00FF7F'
-    ctx.beginPath()
-    ctx.moveTo((kp[0]?.x ?? 0) * scaleX, (kp[0]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[1]?.x ?? 0) * scaleX, (kp[1]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[2]?.x ?? 0) * scaleX, (kp[2]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[3]?.x ?? 0) * scaleX, (kp[3]?.y ?? 0) * scaleY)
-    ctx.closePath()
-    ctx.stroke()
-  }
-  
-  // Net line (connect 4-5)
-  if (kp.length >= 6) {
-    ctx.strokeStyle = '#FF00FF'
-    ctx.beginPath()
-    ctx.moveTo((kp[4]?.x ?? 0) * scaleX, (kp[4]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[5]?.x ?? 0) * scaleX, (kp[5]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  }
-  
-  // Near service line (connect 6-10-7)
-  if (kp.length >= 8 && kp.length >= 11) {
-    ctx.strokeStyle = '#FF8800'
-    ctx.beginPath()
-    ctx.moveTo((kp[6]?.x ?? 0) * scaleX, (kp[6]?.y ?? 0) * scaleY)
-    if (kp.length >= 11) {
-      ctx.lineTo((kp[10]?.x ?? 0) * scaleX, (kp[10]?.y ?? 0) * scaleY)
-    }
-    ctx.lineTo((kp[7]?.x ?? 0) * scaleX, (kp[7]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  } else if (kp.length >= 8) {
-    ctx.strokeStyle = '#FF8800'
-    ctx.beginPath()
-    ctx.moveTo((kp[6]?.x ?? 0) * scaleX, (kp[6]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[7]?.x ?? 0) * scaleX, (kp[7]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  }
-  
-  // Far service line (connect 8-11-9)
-  if (kp.length >= 10 && kp.length >= 12) {
-    ctx.strokeStyle = '#0088FF'
-    ctx.beginPath()
-    ctx.moveTo((kp[8]?.x ?? 0) * scaleX, (kp[8]?.y ?? 0) * scaleY)
-    if (kp.length >= 12) {
-      ctx.lineTo((kp[11]?.x ?? 0) * scaleX, (kp[11]?.y ?? 0) * scaleY)
-    }
-    ctx.lineTo((kp[9]?.x ?? 0) * scaleX, (kp[9]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  } else if (kp.length >= 10) {
-    ctx.strokeStyle = '#0088FF'
-    ctx.beginPath()
-    ctx.moveTo((kp[8]?.x ?? 0) * scaleX, (kp[8]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[9]?.x ?? 0) * scaleX, (kp[9]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  }
-  
-  // Center line (connect 10-11)
-  if (kp.length >= 12) {
-    ctx.strokeStyle = '#FFFFFF'
-    ctx.beginPath()
-    ctx.moveTo((kp[10]?.x ?? 0) * scaleX, (kp[10]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[11]?.x ?? 0) * scaleX, (kp[11]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  }
-  
-  ctx.setLineDash([])
-}
-
-// NOTE: drawKeypointGuide function removed - point order guide now rendered in App.vue as a fixed modal
 
 function skipTime(seconds: number) {
   if (!videoRef.value || isExporting.value) return
@@ -1947,11 +1599,9 @@ function handleKeydown(event: KeyboardEvent) {
   }
 }
 
-// Resize handler that resizes both canvases
+// Resize handler for the skeleton/overlay canvas
 function handleResize() {
   resizeCanvas()
-  resizeKeypointCanvas()
-  drawKeypointOverlay()
 }
 
 onMounted(() => {
@@ -2032,11 +1682,6 @@ watch(currentSkeletonFrame, () => {
   if (!isPlaying.value && (props.showSkeleton || props.showBoundingBoxes)) {
     drawOverlay()
   }
-})
-
-// Emit keypoint selection state changes to parent
-watch([isKeypointSelectionMode, () => manualKeypoints.value.length], ([isActive, count]) => {
-  emit('keypointSelectionChange', isActive as boolean, count as number)
 })
 
 // =============================================================================
@@ -2133,7 +1778,7 @@ defineExpose({
         @pause="handlePause"
         @timeupdate="handleTimeUpdate"
         @loadedmetadata="handleLoadedMetadata"
-        @click="!isKeypointSelectionMode && !isExporting && togglePlay()"
+        @click="!isExporting && togglePlay()"
       />
       <SyntheticCourtView
         v-if="viewMode === 'court' && manualCourtKeypoints && videoRef?.videoWidth"
@@ -2149,13 +1794,6 @@ defineExpose({
         ref="canvasRef"
         class="skeleton-canvas"
       />
-      <!-- Keypoint selection canvas - clickable when in selection mode -->
-      <canvas
-        ref="keypointCanvasRef"
-        class="keypoint-canvas"
-        :class="{ 'selection-mode': isKeypointSelectionMode }"
-        @click="handleKeypointCanvasClick"
-      />
       <PoseOverlay
         :skeleton-frame="currentSkeletonFrame"
         :visible="showPoseOverlay ?? false"
@@ -2166,50 +1804,16 @@ defineExpose({
         :segment="shotSummarySegment"
         :countdown-sec="shotSummaryCountdown ?? 0"
       />
-      <div v-if="!isPlaying && !isKeypointSelectionMode" class="play-overlay" @click="togglePlay">
+      <div v-if="!isPlaying" class="play-overlay" @click="togglePlay">
         <div class="play-button">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
             <polygon points="5 3 19 12 5 21 5 3" />
           </svg>
         </div>
       </div>
-      
-      <!-- Keypoint selection mode controls -->
-      <div v-if="isKeypointSelectionMode" class="keypoint-controls">
-        <div class="keypoint-info">
-          <span class="keypoint-title">🎯 12-Point Court Mapping</span>
-          <span class="keypoint-count">{{ manualKeypoints.length }} / 12 points set</span>
-        </div>
-        <div class="keypoint-buttons">
-          <button
-            class="keypoint-btn undo"
-            @click="undoLastKeypoint"
-            :disabled="manualKeypoints.length === 0"
-            title="Undo last keypoint"
-          >
-            ↩ Undo
-          </button>
-          <button
-            class="keypoint-btn cancel"
-            @click="clearManualKeypoints"
-            title="Cancel keypoint selection"
-          >
-            ✕ Cancel
-          </button>
-          <button
-            v-if="manualKeypoints.length === 12"
-            class="keypoint-btn apply"
-            @click="confirmKeypoints"
-            title="Confirm keypoints and recalculate zone coverage"
-          >
-            ✓ Done
-          </button>
-        </div>
-      </div>
-      
     </div>
 
-    <div class="controls" :class="{ visible: (showControls || !isPlaying) && !isKeypointSelectionMode }">
+    <div class="controls" :class="{ visible: showControls || !isPlaying }">
       <div class="progress-bar" @click="handleSeek">
         <div class="progress-bg">
           <div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div>
@@ -2287,20 +1891,6 @@ defineExpose({
               {{ rate }}x
             </button>
           </div>
-
-          <!-- Manual keypoint selection button -->
-          <button
-            class="control-btn keypoint-toggle"
-            :class="{ active: isKeypointSelectionMode }"
-            @click="toggleKeypointSelectionMode"
-            title="Set court corners manually"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
-              <path d="M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-            </svg>
-          </button>
 
           <!-- Body angle overlay toggle -->
           <div class="angle-menu-wrapper">
@@ -2585,122 +2175,6 @@ video.video-dimmed {
   background: var(--color-accent);
   border-color: var(--color-accent);
   color: white;
-}
-
-/* ============================ */
-/* Keypoint Selection Styles    */
-/* ============================ */
-
-.keypoint-canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  object-fit: contain;
-  z-index: 10;
-}
-
-.keypoint-canvas.selection-mode {
-  pointer-events: auto;
-  cursor: crosshair;
-}
-
-.keypoint-controls {
-  position: absolute;
-  top: 10px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 24px;
-  background: var(--color-bg);
-  border: 2px solid var(--color-accent);
-  border-radius: 0;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-  z-index: 20;
-}
-
-.keypoint-info {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
-.keypoint-title {
-  color: var(--color-accent);
-  font-weight: bold;
-  font-size: 1rem;
-}
-
-.keypoint-count {
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 0.875rem;
-}
-
-.keypoint-buttons {
-  display: flex;
-  gap: 8px;
-}
-
-.keypoint-btn {
-  padding: 8px 16px;
-  border: 1px solid var(--color-border-secondary);
-  border-radius: 0;
-  font-weight: bold;
-  font-size: 0.875rem;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.keypoint-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.keypoint-btn.undo {
-  background: var(--color-bg-tertiary);
-  border-color: var(--color-border-secondary);
-  color: var(--color-text-heading);
-}
-
-.keypoint-btn.undo:hover:not(:disabled) {
-  background: var(--color-bg-hover);
-  border-color: var(--color-accent);
-}
-
-.keypoint-btn.cancel {
-  background: #1a0000;
-  border-color: #ef4444;
-  color: #ef4444;
-}
-
-.keypoint-btn.cancel:hover {
-  background: #2a0000;
-}
-
-.keypoint-btn.apply {
-  background: #001a00;
-  border-color: #22c55e;
-  color: #22c55e;
-}
-
-.keypoint-btn.apply:hover {
-  background: #002a00;
-}
-
-.control-btn.keypoint-toggle.active {
-  background: #001a00;
-  border: 1px solid var(--color-accent);
-  color: var(--color-accent);
-}
-
-.control-btn.keypoint-toggle.active:hover {
-  background: #002a00;
 }
 
 .angle-menu-wrapper {

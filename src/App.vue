@@ -17,17 +17,13 @@ import { computeHomographyFromKeypoints } from '@/utils/homography'
 import {
   checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl,
   triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
-  clearZoneAnalyticsCache, getRecalculatedZoneAnalytics, setCurrentVideoId
+  getRecalculatedZoneAnalytics, setCurrentVideoId
 } from '@/services/api'
 import type { HealthCheckResponse } from '@/services/api'
 import type { UploadResponse, AnalysisResult, SkeletonFrame, ExtendedCourtKeypoints } from '@/types/analysis'
 import type { SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
-import { useConvexClient } from 'convex-vue'
-import { api } from '../convex/_generated/api'
-import type { Id } from '../convex/_generated/dataModel'
 
 const { isDark, toggleTheme } = useTheme()
-const convex = useConvexClient()
 
 // App states: upload -> court-setup (new!) -> analyzing -> results
 type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
@@ -113,10 +109,6 @@ let resizeObserver: ResizeObserver | null = null
 
 // VideoPlayer template ref for seeking
 const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
-
-// Keypoint selection state (from VideoPlayer)
-const isKeypointSelectionActive = ref(false)
-const keypointSelectionCount = ref(0)
 
 // Court model selection removed - using manual keypoints only
 // Note: The CourtModelType is kept for backwards compatibility but not used in UI
@@ -375,12 +367,6 @@ function handleRallySeek(time: number) {
   if (videoPlayerRef.value) {
     videoPlayerRef.value.seekTo(time)
   }
-}
-
-// Handle keypoint selection mode changes from VideoPlayer
-function handleKeypointSelectionChange(isActive: boolean, count: number) {
-  isKeypointSelectionActive.value = isActive
-  keypointSelectionCount.value = count
 }
 
 // ── Rally auto-pause logic ──────────────────────────────────────────────────
@@ -793,50 +779,6 @@ function startNewAnalysis() {
 function dismissError() {
   errorMessage.value = ''
 }
-
-// Handle manual court keypoints from VideoPlayer's in-player selector.
-// Fires on every individual placement while the user is still picking
-// points — we only update local state here. The single network write
-// happens in handleKeypointsConfirmed when the user clicks Done, so
-// there is exactly one persisted save per calibration run (rather than
-// one per point placed).
-function handleCourtKeypointsSet(keypoints: ExtendedCourtKeypoints) {
-  manualCourtKeypoints.value = keypoints
-  errorMessage.value = ''
-}
-
-// Fires when the user clicks Done inside the VideoPlayer keypoint selector.
-// Persists ALL 12 keypoints (previously only 4 corners were sent, which
-// meant net_left / net_right / service-line / center_* were dropped on
-// the VideoPlayer save path — silently disabling features like the
-// PlayerIdentityTracker's net-line court-side check). Writes directly to
-// the Convex mutation (same path as CourtSetup.vue) so both UI entry
-// points share one save mechanism.
-async function handleKeypointsConfirmed(keypoints: ExtendedCourtKeypoints) {
-  try {
-    console.log('[App] Keypoints confirmed by user - persisting 12-point set')
-    manualCourtKeypoints.value = keypoints
-
-    const videoId = analysisResult.value?.video_id
-    if (videoId) {
-      await convex.mutation(api.videos.setManualCourtKeypoints, {
-        videoId: videoId as Id<'videos'>,
-        keypoints,
-      })
-
-      // Clear zone analytics cache so the dashboard recomputes against
-      // the new homography.
-      clearZoneAnalyticsCache(videoId)
-      zoneRecalculationTrigger.value++
-    }
-
-    errorMessage.value = ''
-  } catch (e) {
-    console.error('Failed to persist manual court keypoints:', e)
-    errorMessage.value = 'Failed to save court keypoints'
-  }
-}
-
 
 // Watch for conditions to trigger delayed speed calculation
 // Speed is calculated when BOTH conditions are met:
@@ -1679,18 +1621,15 @@ watch(videoSectionRef, () => {
                   :video-fps="analysisResult?.fps ?? 30"
                   :shot-summary-segment="currentShotSegment"
                   :shot-summary-countdown="shotPauseCountdown"
-                  @court-keypoints-set="handleCourtKeypointsSet"
-                  @keypoints-confirmed="handleKeypointsConfirmed"
                   @time-update="handleTimeUpdate"
                   @frame-update="handleFrameUpdate"
                   @play="handleVideoPlay"
-                  @keypoint-selection-change="handleKeypointSelectionChange"
                 />
               </div>
 
               <!-- Mini Court Panel (hidden in rally-only mode) -->
               <Transition name="slide-fade">
-                <div v-if="analysisMode !== 'rally_only' && (showMiniCourt || isKeypointSelectionActive)" class="minicourt-section">
+                <div v-if="analysisMode !== 'rally_only' && showMiniCourt" class="minicourt-section">
                   <MiniCourt
                     :court-corners="courtCornersForMiniCourt"
                     :players="videoPlaybackStarted ? currentPlayers : []"
@@ -1705,8 +1644,6 @@ watch(videoSectionRef, () => {
                     :skeleton-data="analysisResult?.skeleton_data"
                     :current-frame="currentFrame"
                     :max-trail-length="150"
-                    :is-keypoint-selection-mode="isKeypointSelectionActive"
-                    :keypoint-selection-count="keypointSelectionCount"
                   />
                 </div>
               </Transition>

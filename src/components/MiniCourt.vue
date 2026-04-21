@@ -79,9 +79,6 @@ const props = withDefaults(defineProps<{
   showShuttle?: boolean
   showTrails?: boolean
   showHitMarkers?: boolean
-  // Keypoint selection mode
-  isKeypointSelectionMode?: boolean
-  keypointSelectionCount?: number
   // Full skeleton data for computing trails dynamically
   // When provided, trails are computed from frame 0 to currentFrame
   skeletonData?: SkeletonFrame[]
@@ -97,8 +94,6 @@ const props = withDefaults(defineProps<{
   showShuttle: true,
   showTrails: true, // Enable trails by default
   showHitMarkers: true, // Enable hit markers by default
-  isKeypointSelectionMode: false,
-  keypointSelectionCount: 0,
   maxTrailLength: 100 // Show last 100 positions (~3.3 seconds at 30fps)
 })
 
@@ -1099,82 +1094,6 @@ function drawShuttle(ctx: CanvasRenderingContext2D) {
 }
 
 /**
- * Draw keypoint selection guide overlay
- * Shows numbered positions on the court for each keypoint
- */
-function drawKeypointSelectionGuide(ctx: CanvasRenderingContext2D) {
-  if (!props.isKeypointSelectionMode) return
-  
-  const count = props.keypointSelectionCount
-  
-  // Keypoint labels (abbreviated)
-  const KEYPOINT_LABELS = ['TL', 'TR', 'BR', 'BL', 'NL', 'NR', 'SNL', 'SNR', 'SFL', 'SFR', 'CTN', 'CTF']
-  
-  // Draw each keypoint position
-  COURT_KEYPOINT_POSITIONS.forEach((pos, index) => {
-    const canvasPos = courtToCanvas(pos[0]!, pos[1]!)
-    const isCompmleted = index < count
-    const isActive = index === count
-    const isPending = index > count
-    
-    // Draw the point circle
-    ctx.beginPath()
-    ctx.arc(canvasPos.x, canvasPos.y, isActive ? 14 : 10, 0, Math.PI * 2)
-    
-    if (isActive) {
-      // Active point - bright green with pulse effect (simulated with glow)
-      ctx.fillStyle = '#22c55e'
-      ctx.shadowColor = '#22c55e'
-      ctx.shadowBlur = 12
-    } else if (isCompmleted) {
-      // Completed point - dimmed green
-      ctx.fillStyle = 'rgba(34, 197, 94, 0.4)'
-      ctx.shadowBlur = 0
-    } else {
-      // Pending point - gray
-      ctx.fillStyle = 'rgba(100, 100, 100, 0.6)'
-      ctx.shadowBlur = 0
-    }
-    
-    ctx.fill()
-    ctx.shadowBlur = 0
-    
-    // Draw border
-    ctx.strokeStyle = isActive ? '#22c55e' : isCompmleted ? 'rgba(34, 197, 94, 0.6)' : 'rgba(150, 150, 150, 0.5)'
-    ctx.lineWidth = 2
-    ctx.stroke()
-    
-    // Draw number
-    ctx.font = isActive ? 'bold 11px Inter, sans-serif' : '10px Inter, sans-serif'
-    ctx.fillStyle = isActive ? '#000' : isCompmleted ? '#22c55e' : 'rgba(255, 255, 255, 0.6)'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(`${index + 1}`, canvasPos.x, canvasPos.y)
-    
-    // Draw label below for active or completed points
-    if (isActive || isCompmleted) {
-      ctx.font = '8px Inter, sans-serif'
-      ctx.fillStyle = isActive ? '#22c55e' : 'rgba(34, 197, 94, 0.7)'
-      ctx.fillText(KEYPOINT_LABELS[index]!, canvasPos.x, canvasPos.y + 18)
-    }
-  })
-  
-  // Draw instruction at the bottom of the canvas
-  const instructionY = canvasHeight.value - 8
-  if (count < 12) {
-    ctx.font = 'bold 11px Inter, sans-serif'
-    ctx.fillStyle = '#22c55e'
-    ctx.textAlign = 'center'
-    ctx.fillText(`Click point ${count + 1}`, props.width / 2, instructionY)
-  } else {
-    ctx.font = 'bold 11px Inter, sans-serif'
-    ctx.fillStyle = '#22c55e'
-    ctx.textAlign = 'center'
-    ctx.fillText('✓ All set!', props.width / 2, instructionY)
-  }
-}
-
-/**
  * Draw "No Court Detected" message
  */
 function drawNoCourtMessage(ctx: CanvasRenderingContext2D) {
@@ -1555,13 +1474,7 @@ function renderFrame() {
   
   // Always draw the court first (even without court corner data)
   drawCourt(ctx)
-  
-  // In keypoint selection mode, show the keypoint guide overlay
-  if (props.isKeypointSelectionMode) {
-    drawKeypointSelectionGuide(ctx)
-    return
-  }
-  
+
   // Only draw players/trails/shuttle when we have valid court corners for tracking
   if (!effectiveCourtCorners.value) {
     return
@@ -1613,8 +1526,6 @@ watch([
   () => props.showShuttle,
   () => props.showTrails,
   () => props.showHitMarkers,
-  () => props.isKeypointSelectionMode,
-  () => props.keypointSelectionCount,
   () => props.height,
   () => props.width,
   () => props.skeletonData
