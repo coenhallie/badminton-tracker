@@ -1,9 +1,16 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, watch } from 'vue'
+import { computed, ref, onMounted, watch, inject } from 'vue'
 import type { AnalysisResult, PlayerMetrics, ShuttleMetrics, CourtDetection, PlayersZoneAnalytics, ZoneCoverage } from '@/types/analysis'
 import { PLAYER_COLORS } from '@/types/analysis'
 import { exportPDFWithFrontendData, getRecalculatedZoneAnalytics, clearZoneAnalyticsCache, type PlayerZoneData } from '@/services/api'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
 import CourtZoneTooltip from './CourtZoneTooltip.vue'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
 
 type ZoneType = 'front' | 'mid' | 'back' | 'left' | 'center' | 'right'
 
@@ -122,6 +129,11 @@ const filteredPlayers = computed(() => {
     avg_speed: capSpeed(p.avg_speed, false),
     max_speed: capSpeed(p.max_speed, true)
   }))
+})
+
+const sortedPlayers = computed(() => {
+  const arr = [...(filteredPlayers.value ?? [])]
+  return arr.sort((a, b) => pidDisplayFor(a.player_id) - pidDisplayFor(b.player_id))
 })
 
 const totalDistance = computed(() => {
@@ -365,16 +377,16 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
       <h3>Player Statistics</h3>
       <div class="players-grid">
         <div
-          v-for="(player, index) in filteredPlayers"
+          v-for="(player, index) in sortedPlayers"
           :key="player.player_id"
           class="player-card"
           :style="{ '--player-color': getPlayerColor(index) }"
         >
           <div class="player-header">
             <div class="player-avatar" :style="{ background: getPlayerColor(index) }">
-              P{{ player.player_id + 1 }}
+              P{{ pidDisplayFor(player.player_id) + 1 }}
             </div>
-            <h4>Player {{ player.player_id + 1 }}</h4>
+            <h4>{{ pidLabelFor(player.player_id) }}</h4>
           </div>
           <div class="player-stats">
             <div class="player-stat">
