@@ -426,12 +426,33 @@ class PlayerIdentityTracker:
     - Player 1 = bottom of video (near side of court, larger Y)
     """
 
-    def __init__(self, video_height: float, fps: float, video_width: float = 1920.0):
+    def __init__(
+        self,
+        video_height: float,
+        fps: float,
+        video_width: float = 1920.0,
+        net_left: Optional[Tuple[float, float]] = None,
+        net_right: Optional[Tuple[float, float]] = None,
+    ):
         self.video_height = video_height
         self.video_width = video_width
         self.fps = fps
-        self.court_midline_y = video_height / 2.0
         self.MAX_INST_VEL = max(40.0, 0.035 * max(video_width, video_height))
+
+        # Court-side split: when manual net-line keypoints are provided, use
+        # the actual net as the top/bottom divider. Otherwise fall back to the
+        # video's pixel centre — which only works for near-perfect overhead
+        # shots and fails badly on any tilted camera.
+        if net_left is not None and net_right is not None:
+            self.net_line: Optional[Tuple[float, float, float, float]] = (
+                net_left[0], net_left[1], net_right[0], net_right[1]
+            )
+            # Fallback midline used only when computing side for very low / very high x
+            # that falls outside the net-endpoint range.
+            self.court_midline_y = (net_left[1] + net_right[1]) / 2.0
+        else:
+            self.net_line = None
+            self.court_midline_y = video_height / 2.0
 
         # Per-player state (indexed by player_id: 0 or 1)
         self.positions: Dict[int, List[Dict]] = {0: [], 1: []}  # history of {x, y, frame}
@@ -454,8 +475,13 @@ class PlayerIdentityTracker:
         self.MAX_MATCH_DISTANCE = 250.0  # Max pixels for valid match
         self.AREA_SMOOTHING = 0.1  # EMA alpha for area
 
-        # Swap detection parameters
-        self.SWAP_CONSECUTIVE_THRESHOLD = 2  # Consecutive violations needed to confirm swap
+        # Swap detection parameters. Raised 2→6 (≈0.2 s @ 30 fps) to avoid
+        # firing on brief glitches: a jump/dive that briefly puts a player on
+        # the wrong side of the net, a 1-2 frame pose-keypoint failure, or a
+        # transient skeleton-index reordering. Real swaps (players actually
+        # trading halves) always persist well past 0.2 s, so raising the
+        # threshold reduces oscillation without missing real events.
+        self.SWAP_CONSECUTIVE_THRESHOLD = 6
         self.swap_violation_count = 0  # Running count of consecutive court-side violations
         self.total_swaps_corrected = 0
 
@@ -524,8 +550,24 @@ class PlayerIdentityTracker:
         if len(self.positions[player_id]) > self.POSITION_HISTORY_LEN:
             self.positions[player_id].pop(0)
     
-    def _get_court_side(self, y: float) -> str:
-        """Determine which side of court a Y coordinate is on."""
+    def _get_court_side(self, y: float, x: Optional[float] = None) -> str:
+        """
+        Determine which side of the court a point is on.
+
+        When the manual net-line keypoints are available, use the actual
+        net's y-at-x (linearly interpolated between net_left and net_right)
+        so tilted-camera frames correctly identify which side of the NET a
+        player is on — not which side of the arbitrary pixel midline.
+        """
+        if self.net_line is not None and x is not None:
+            x0, y0, x1, y1 = self.net_line
+            dx = x1 - x0
+            if abs(dx) > 1e-6:
+                # Linear interp of net line at this x, extrapolated when the
+                # player is outside the net's x-range.
+                t = (x - x0) / dx
+                net_y = y0 + t * (y1 - y0)
+                return "top" if y < net_y else "bottom"
         return "top" if y < self.court_midline_y else "bottom"
     
     def _compute_assignment_cost(
@@ -569,7 +611,7 @@ class PlayerIdentityTracker:
         # --- Component 3: Court-side consistency ---
         if self.calibrated[player_id]:
             expected_side = self.court_sides[player_id]
-            actual_side = self._get_court_side(sy)
+            actual_side = self._get_court_side(sy, sx)
             if actual_side != expected_side:
                 cost += self.W_COURT_SIDE * 1.5  # Heavy penalty for wrong side
         else:
@@ -685,7 +727,7 @@ class PlayerIdentityTracker:
                     obs = self.calibration_observations[pid]
                     avg_y = sum(o[1] for o in obs) / len(obs)
                     avg_x = sum(o[0] for o in obs) / len(obs)
-                    self.court_sides[pid] = self._get_court_side(avg_y)
+                    self.court_sides[pid] = self._get_court_side(avg_y, avg_x)
                     self.calibrated[pid] = True
 
             # Refine court midline based on observed positions
@@ -716,8 +758,8 @@ class PlayerIdentityTracker:
         violations = 0
         for pid, skel_idx in assignments:
             if skel_idx < len(skeletons):
-                skel_y = skeletons[skel_idx]["center"][1]
-                actual_side = self._get_court_side(skel_y)
+                skel_x, skel_y = skeletons[skel_idx]["center"]
+                actual_side = self._get_court_side(skel_y, skel_x)
                 expected_side = self.court_sides[pid]
                 if actual_side != expected_side:
                     violations += 1
@@ -732,6 +774,34 @@ class PlayerIdentityTracker:
                              (assignments[0][0], assignments[1][1])]
                 self.swap_violation_count = 0
                 self.total_swaps_corrected += 1
+                # Exchange every piece of per-player state that we keep
+                # history for, so the next frame's cost matrix reasons
+                # about the CORRECT player for pid 0 / pid 1. Without this
+                # exchange, positions[0] still points to the other player's
+                # trajectory and the cost matrix immediately wants to re-swap,
+                # producing frame-to-frame oscillation in the player labels.
+                # Court_sides[pid] stays fixed — those are the canonical
+                # identity anchors we're correcting _towards_.
+                self.positions[0], self.positions[1] = (
+                    self.positions[1], self.positions[0]
+                )
+                self.velocities[0], self.velocities[1] = (
+                    self.velocities[1], self.velocities[0]
+                )
+                self.avg_areas[0], self.avg_areas[1] = (
+                    self.avg_areas[1], self.avg_areas[0]
+                )
+                if 0 in self.last_track_ids or 1 in self.last_track_ids:
+                    t0 = self.last_track_ids.get(0)
+                    t1 = self.last_track_ids.get(1)
+                    if t0 is not None:
+                        self.last_track_ids[1] = t0
+                    else:
+                        self.last_track_ids.pop(1, None)
+                    if t1 is not None:
+                        self.last_track_ids[0] = t1
+                    else:
+                        self.last_track_ids.pop(0, None)
                 print(f"[TRACKER] Swap detected and corrected at frame {self.frames_processed} "
                       f"(total corrections: {self.total_swaps_corrected})")
                 return corrected
@@ -1402,13 +1472,35 @@ with_reid: False
             await send_log("Starting frame-by-frame analysis...", "info", "processing")
             phase_start = time.time()
 
+            # Extract net-line endpoints from manual keypoints (if supplied) so
+            # the identity tracker can do court-side checks against the real
+            # net rather than the arbitrary pixel midline. For tilted cameras
+            # these two can differ by hundreds of pixels.
+            tracker_net_left: Optional[Tuple[float, float]] = None
+            tracker_net_right: Optional[Tuple[float, float]] = None
+            if manual_court_keypoints:
+                nl = manual_court_keypoints.get("net_left")
+                nr = manual_court_keypoints.get("net_right")
+                if (
+                    isinstance(nl, (list, tuple)) and len(nl) >= 2 and
+                    isinstance(nr, (list, tuple)) and len(nr) >= 2
+                ):
+                    tracker_net_left = (float(nl[0]), float(nl[1]))
+                    tracker_net_right = (float(nr[0]), float(nr[1]))
+
             # Initialize robust player identity tracker
             identity_tracker = PlayerIdentityTracker(
                 video_height=float(height),
                 fps=fps,
-                video_width=float(width)
+                video_width=float(width),
+                net_left=tracker_net_left,
+                net_right=tracker_net_right,
             )
-            await send_log("Player identity tracker initialized (calibration phase: first 15 frames)", "info", "processing")
+            net_src = "manual net keypoints" if tracker_net_left is not None else "video-midline fallback"
+            await send_log(
+                f"Player identity tracker initialized ({net_src}; calibration phase: first 15 frames)",
+                "info", "processing",
+            )
             
             # Write skeleton frames incrementally to a temp file to avoid
             # accumulating hundreds of MB in RAM for long videos.
