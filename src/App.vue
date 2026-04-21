@@ -888,7 +888,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.7
+            alpha v1.8
           </button>
         </div>
 
@@ -936,6 +936,24 @@ watch(videoSectionRef, () => {
             </button>
           </div>
           <div class="changelog-content">
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.8-alpha</span>
+                <span class="version-date">April 21, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - New Player Identity panel in the results view: see both players as cropped thumbnails, swap their labels with one click, and optionally give them real names</li>
+                <li> - Bounding box labels now come straight from the tracker's canonical player ID — no more mismatches between the box label and the stats underneath the video</li>
+                <li> - When the far player briefly disappears from frame, the tracker no longer guesses and mis-labels the near player as Player 1; uncertain boxes render in amber with a neutral label instead</li>
+                <li> - Court side is now the primary signal for single-skeleton frames: once calibrated, a player stays on their side of the net regardless of detection gaps or YOLO track-id recycling</li>
+                <li> - Interpolated frames no longer ghost one player's label onto the other when only one is detected in the next keyframe</li>
+                <li> - Player swaps and names apply everywhere simultaneously: skeleton overlay, stats cards, shot list, speed graph, mini court, rally timeline, and advanced analytics</li>
+                <li> - Zone Analytics cards now show the same "Player 1 / Player 2" labels as the stats above instead of "Player 0 / Player 1"</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
             <div class="changelog-entry">
               <div class="changelog-version">
                 <span class="version-tag">v1.7-alpha</span>
