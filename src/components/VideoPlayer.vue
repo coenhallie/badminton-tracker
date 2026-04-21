@@ -1003,9 +1003,12 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
     }
   }
 
-  // Draw bounding boxes if enabled (requires frame data)
+  // Draw bounding boxes if enabled (requires frame data).
+  // Pass `frame.players` so player bbox labels can resolve canonical
+  // player_id via center-proximity match and stay consistent with the
+  // rest of the UI.
   if (props.showBoundingBoxes && frame?.badminton_detections) {
-    drawBoundingBoxes(ctx, frame.badminton_detections, scaleX, scaleY)
+    drawBoundingBoxes(ctx, frame.badminton_detections, scaleX, scaleY, frame.players)
   }
 
   // Draw shuttle tracking trail + current position dot.
@@ -1161,11 +1164,37 @@ function getTurboColormap(): [number, number, number][] {
   ]
 }
 
+/**
+ * Match a detection bbox to the skeleton player with the closest center in
+ * the same frame. The backend emits one bbox per active skeleton so this is
+ * almost always an exact pair-up; center distance in image pixels is a
+ * robust fallback when the ordering drifts.
+ */
+function nearestFramePlayer(
+  det: BoundingBoxDetection,
+  players: FramePlayer[],
+): FramePlayer | null {
+  let best: FramePlayer | null = null
+  let bestDist = Infinity
+  for (const p of players) {
+    if (!p.center) continue
+    const dx = p.center.x - det.x
+    const dy = p.center.y - det.y
+    const d = dx * dx + dy * dy
+    if (d < bestDist) {
+      bestDist = d
+      best = p
+    }
+  }
+  return best
+}
+
 function drawBoundingBoxes(
   ctx: CanvasRenderingContext2D,
   detections: BadmintonDetections,
   scaleX: number,
-  scaleY: number
+  scaleY: number,
+  framePlayers?: FramePlayer[],
 ) {
   // Helper function to draw a single bounding box
   function drawBox(det: BoundingBoxDetection, color: string, label: string) {
@@ -1195,10 +1224,15 @@ function drawBoundingBoxes(
     ctx.fillText(labelText, x + padding, y - padding - 2)
   }
 
-  // Draw players (green) - only if showPlayers is true
+  // Draw players (green) - only if showPlayers is true.
+  // Label each bbox with the canonical player_id from the matching skeleton
+  // player (nearest center in the same frame) so bbox labels stay in sync
+  // with the skeleton overlay and the stats underneath the video.
   if (props.showPlayers !== false) {
     detections.players?.forEach((player, i) => {
-      drawBox(player, PLAYER_BOX_COLOR, `Player ${i + 1}`)
+      const matched = framePlayers ? nearestFramePlayer(player, framePlayers) : null
+      const label = matched ? pidLabelFor(matched.player_id) : `Player ${i + 1}`
+      drawBox(player, PLAYER_BOX_COLOR, label)
     })
   }
 
