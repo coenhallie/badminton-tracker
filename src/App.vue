@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, provide, shallowRef } from 'vue'
 import { useTheme } from '@/composables/useTheme'
+import { usePlayerLabels, PLAYER_LABELS_KEY, type PlayerLabelsHelper } from '@/composables/usePlayerLabels'
+import type { Id } from '../convex/_generated/dataModel'
 import VideoUpload from '@/components/VideoUpload.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import ResultsDashboard from '@/components/ResultsDashboard.vue'
@@ -58,6 +60,23 @@ const uploadedVideo = ref<UploadResponse | null>(restored.video)
 const analysisMode = ref<'rally_only' | 'full'>(restored.video?.analysisMode ?? 'full')
 const cameraAngle = ref<'overhead' | 'corner'>(restored.video?.cameraAngle ?? 'overhead')
 const analysisResult = ref<AnalysisResult | null>(null)
+
+// Lazily instantiate usePlayerLabels once we have a real videoId — the
+// composable's convex subscription requires a non-nullable videoId.
+// shallowRef avoids Vue unwrapping the nested ComputedRef<labels> inside the helper.
+const playerLabelsHelper = shallowRef<PlayerLabelsHelper | null>(null)
+watch(
+  () => analysisResult.value?.video_id,
+  (id) => {
+    if (id && !playerLabelsHelper.value) {
+      const videoIdRef = computed(() => id as Id<'videos'>)
+      playerLabelsHelper.value = usePlayerLabels(videoIdRef)
+    }
+  },
+  { immediate: true },
+)
+provide(PLAYER_LABELS_KEY, playerLabelsHelper)
+
 const errorMessage = ref('')
 const isApiConnected = ref(false)
 const healthDetails = ref<HealthCheckResponse | null>(null)

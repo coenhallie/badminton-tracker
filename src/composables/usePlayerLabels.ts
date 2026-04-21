@@ -45,4 +45,4 @@ export function usePlayerLabels(videoId: Ref<Id<'videos'>>) {
 }
 
 export type PlayerLabelsHelper = ReturnType<typeof usePlayerLabels>
-export const PLAYER_LABELS_KEY: InjectionKey<PlayerLabelsHelper> = Symbol('playerLabels')
+export const PLAYER_LABELS_KEY: InjectionKey<Ref<PlayerLabelsHelper | null>> = Symbol('playerLabels')

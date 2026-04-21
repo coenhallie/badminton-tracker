@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toRef, type Ref } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toRef, inject, type Ref } from 'vue'
 import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, BoundingBoxDetection, ExtendedCourtKeypoints } from '@/types/analysis'
 import { SKELETON_CONNECTIONS, PLAYER_COLORS } from '@/types/analysis'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
 import PoseOverlay from './PoseOverlay.vue'
 import ShotSummaryOverlay from './ShotSummaryOverlay.vue'
 import type { ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
@@ -17,6 +18,14 @@ import { legStretchMeters } from '@/utils/bodyAngles'
 // MUST be false in production to avoid performance overhead
 // =============================================================================
 const DEBUG_MODE = import.meta.env.DEV && false // Disabled even in dev by default
+
+// Injected lazily from App.vue; null until a videoId is available and the
+// composable has been instantiated. Consumers must tolerate null fallback.
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
 
 // NOTE: CourtDetectionResult interface removed - automatic court detection disabled
 // Manual court keypoints are now the only method for court calibration
@@ -1395,7 +1404,8 @@ function drawSkeleton(
   sortedPlayers.forEach((player) => {
     // Use player_id (not array index) for color assignment
     // Player 0 (far/top) always gets color[0], Player 1 (near/bottom) always gets color[1]
-    const color = PLAYER_COLORS[player.player_id % PLAYER_COLORS.length] ?? '#FF6B6B'
+    const displayPid = pidDisplayFor(player.player_id)
+    const color = PLAYER_COLORS[displayPid % PLAYER_COLORS.length] ?? '#FF6B6B'
     const keypoints = player.keypoints
     
     // Skip if no keypoints
@@ -1457,7 +1467,11 @@ function drawSkeleton(
       ctx.lineWidth = 3
 
       // player_id is 0-indexed, display as 1-indexed (Player 1, Player 2)
-      const label = `P${player.player_id + 1}: ${player.current_speed?.toFixed(1) ?? 0} km/h`
+      const labelName = pidLabelFor(player.player_id)
+      // Shorten "Player 1" → "P1" for the compact on-skeleton label; keep custom
+      // names as-is if the user has set one.
+      const labelPrefix = labelName.startsWith('Player ') ? `P${labelName.slice(7)}` : labelName
+      const label = `${labelPrefix}: ${player.current_speed?.toFixed(1) ?? 0} km/h`
       const x = player.center.x * scaleX
       const y = player.center.y * scaleY - 30
 
