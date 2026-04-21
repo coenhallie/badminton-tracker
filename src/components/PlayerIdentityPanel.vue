@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, inject, watch } from 'vue'
+import { ref, computed, inject, watch, onUnmounted } from 'vue'
 import { useConvexClient } from 'convex-vue'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
@@ -19,6 +19,10 @@ const convex = useConvexClient()
 const labels = computed(() => playerLabels?.value?.labels.value ?? null)
 const swapped = computed(() => labels.value?.swapped ?? false)
 
+// Single timer so every keystroke resets the same debounce. Declared before
+// the watches that need to observe its pending state.
+let nameDebounce: ReturnType<typeof setTimeout> | null = null
+
 // Reactive thumbnail URLs via Convex storage. Refetch when ids change.
 const thumb0Url = ref<string | null>(null)
 const thumb1Url = ref<string | null>(null)
@@ -35,11 +39,20 @@ async function resolveThumbnail(
   }
 }
 
+// Staleness token: a slow in-flight resolution from an earlier labels value
+// must not overwrite state produced by a newer fetch.
+let thumbFetchId = 0
 watch(
   () => [labels.value?.player_0_thumbnail, labels.value?.player_1_thumbnail],
   async ([id0, id1]) => {
-    thumb0Url.value = await resolveThumbnail(id0 as Id<'_storage'> | undefined)
-    thumb1Url.value = await resolveThumbnail(id1 as Id<'_storage'> | undefined)
+    const myId = ++thumbFetchId
+    const [url0, url1] = await Promise.all([
+      resolveThumbnail(id0 as Id<'_storage'> | undefined),
+      resolveThumbnail(id1 as Id<'_storage'> | undefined),
+    ])
+    if (myId !== thumbFetchId) return
+    thumb0Url.value = url0
+    thumb1Url.value = url1
   },
   { immediate: true },
 )
@@ -50,6 +63,9 @@ const name1 = ref('')
 watch(
   labels,
   (l) => {
+    // Skip resets while a save is pending so we don't clobber in-progress
+    // user edits when Convex echoes our own mutation back.
+    if (nameDebounce !== null) return
     name0.value = l?.player_0_name ?? ''
     name1.value = l?.player_1_name ?? ''
   },
@@ -80,17 +96,15 @@ async function toggleSwap() {
   })
 }
 
-// Single module-level timer so every keystroke resets the same debounce.
-let nameDebounce: ReturnType<typeof setTimeout> | null = null
-function scheduleNameSave(canonical: 0 | 1, value: string) {
+function scheduleNameSave() {
   if (nameDebounce) clearTimeout(nameDebounce)
   nameDebounce = setTimeout(async () => {
-    const payload: Record<string, unknown> = {
+    await convex.mutation(api.videos.updatePlayerLabels, {
       videoId: props.videoId as Id<'videos'>,
-    }
-    if (canonical === 0) payload.player_0_name = value
-    else payload.player_1_name = value
-    await convex.mutation(api.videos.updatePlayerLabels, payload as never)
+      player_0_name: name0.value,
+      player_1_name: name1.value,
+    })
+    nameDebounce = null
   }, 500)
 }
 
@@ -98,15 +112,27 @@ function onNameInput(canonical: 0 | 1, event: Event) {
   const value = (event.target as HTMLInputElement).value
   if (canonical === 0) name0.value = value
   else name1.value = value
-  scheduleNameSave(canonical, value)
+  scheduleNameSave()
 }
+
+onUnmounted(() => {
+  if (nameDebounce) {
+    clearTimeout(nameDebounce)
+    nameDebounce = null
+  }
+})
 </script>
 
 <template>
   <div class="player-identity-panel">
     <div class="pip-header">
       <span class="pip-title">Players</span>
-      <button type="button" class="pip-swap-btn" @click="toggleSwap">
+      <button
+        type="button"
+        class="pip-swap-btn"
+        aria-label="Swap players"
+        @click="toggleSwap"
+      >
         &#8646; Swap
       </button>
     </div>
