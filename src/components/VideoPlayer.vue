@@ -1003,12 +1003,9 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
     }
   }
 
-  // Draw bounding boxes if enabled (requires frame data).
-  // Pass `frame.players` so player bbox labels can resolve canonical
-  // player_id via center-proximity match and stay consistent with the
-  // rest of the UI.
+  // Draw bounding boxes if enabled (requires frame data)
   if (props.showBoundingBoxes && frame?.badminton_detections) {
-    drawBoundingBoxes(ctx, frame.badminton_detections, scaleX, scaleY, frame.players)
+    drawBoundingBoxes(ctx, frame.badminton_detections, scaleX, scaleY)
   }
 
   // Draw shuttle tracking trail + current position dot.
@@ -1164,37 +1161,11 @@ function getTurboColormap(): [number, number, number][] {
   ]
 }
 
-/**
- * Match a detection bbox to the skeleton player with the closest center in
- * the same frame. The backend emits one bbox per active skeleton so this is
- * almost always an exact pair-up; center distance in image pixels is a
- * robust fallback when the ordering drifts.
- */
-function nearestFramePlayer(
-  det: BoundingBoxDetection,
-  players: FramePlayer[],
-): FramePlayer | null {
-  let best: FramePlayer | null = null
-  let bestDist = Infinity
-  for (const p of players) {
-    if (!p.center) continue
-    const dx = p.center.x - det.x
-    const dy = p.center.y - det.y
-    const d = dx * dx + dy * dy
-    if (d < bestDist) {
-      bestDist = d
-      best = p
-    }
-  }
-  return best
-}
-
 function drawBoundingBoxes(
   ctx: CanvasRenderingContext2D,
   detections: BadmintonDetections,
   scaleX: number,
   scaleY: number,
-  framePlayers?: FramePlayer[],
 ) {
   // Helper function to draw a single bounding box
   function drawBox(det: BoundingBoxDetection, color: string, label: string) {
@@ -1225,18 +1196,9 @@ function drawBoundingBoxes(
   }
 
   // Draw players (green) - only if showPlayers is true.
-  // Prefer the bbox's own `player_id` (set by the backend when the pipeline
-  // links it to PlayerIdentityTracker). Fall back to nearest-center match
-  // against the skeleton for pre-feature analyses, and finally to the array
-  // index for bboxes with neither.
   if (props.showPlayers !== false) {
-    detections.players?.forEach((player, i) => {
-      let pid = player.player_id ?? null
-      if (pid == null && framePlayers) {
-        pid = nearestFramePlayer(player, framePlayers)?.player_id ?? null
-      }
-      const label = pid != null ? pidLabelFor(pid) : `Player ${i + 1}`
-      drawBox(player, PLAYER_BOX_COLOR, label)
+    detections.players?.forEach((player) => {
+      drawBox(player, PLAYER_BOX_COLOR, pidLabelFor(player.player_id ?? 0))
     })
   }
 
