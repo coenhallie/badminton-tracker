@@ -24,6 +24,16 @@ const retryCount = ref(0)
 const MAX_RETRIES = 2
 const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes
 
+// Monotonic counter used to invalidate stale XHR progress events. Each
+// uploadFileWithProgress call captures the current generation; if a later
+// upload supersedes it (retry, or double-click before Vue hides the button)
+// the captured generation no longer matches the module-level one and that
+// XHR's listeners stop writing to uploadProgress. Without this, browsers
+// can flush queued `progress` events from an aborted XHR after the new
+// XHR has already started, producing the interleaved "53 → 21 → 55 → 24"
+// pattern where two upload trajectories alternate in the UI.
+let uploadGeneration = 0
+
 const allowedTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/webm']
 
 const formattedSize = computed(() => {
@@ -103,6 +113,13 @@ function cancelUpload() {
 }
 
 function uploadFileWithProgress(url: string, file: File): Promise<{ storageId: string }> {
+  // Capture this upload's generation. If a newer upload starts (retry,
+  // double-click, etc.) it bumps uploadGeneration and our isCurrent()
+  // check will return false, causing this XHR's queued progress/speed
+  // events to stop writing to shared UI state.
+  const generation = ++uploadGeneration
+  const isCurrent = () => generation === uploadGeneration
+
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     activeXhr.value = xhr
@@ -110,6 +127,7 @@ function uploadFileWithProgress(url: string, file: File): Promise<{ storageId: s
     let lastTime = Date.now()
 
     xhr.upload.addEventListener('progress', (e) => {
+      if (!isCurrent()) return
       if (e.lengthComputable) {
         uploadProgress.value = (e.loaded / e.total) * 100
 
@@ -131,7 +149,14 @@ function uploadFileWithProgress(url: string, file: File): Promise<{ storageId: s
     })
 
     xhr.addEventListener('load', () => {
-      activeXhr.value = null
+      if (activeXhr.value === xhr) activeXhr.value = null
+      if (!isCurrent()) {
+        // We were superseded mid-flight — our upload happened but the
+        // storageId we got belongs to a stale attempt. Reject so the
+        // caller's await throws, but don't pollute the UI state.
+        reject(new Error('Upload superseded'))
+        return
+      }
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           resolve(JSON.parse(xhr.responseText))
@@ -144,17 +169,17 @@ function uploadFileWithProgress(url: string, file: File): Promise<{ storageId: s
     })
 
     xhr.addEventListener('error', () => {
-      activeXhr.value = null
+      if (activeXhr.value === xhr) activeXhr.value = null
       reject(new Error('Network error during upload'))
     })
 
     xhr.addEventListener('abort', () => {
-      activeXhr.value = null
+      if (activeXhr.value === xhr) activeXhr.value = null
       reject(new Error('Upload cancelled'))
     })
 
     xhr.addEventListener('timeout', () => {
-      activeXhr.value = null
+      if (activeXhr.value === xhr) activeXhr.value = null
       reject(new Error('Upload timed out'))
     })
 
@@ -167,6 +192,19 @@ function uploadFileWithProgress(url: string, file: File): Promise<{ storageId: s
 
 async function startUpload() {
   if (!selectedFile.value) return
+
+  // Guard: second click arriving before Vue hides the button (the click
+  // handler fires synchronously, DOM updates on the next tick). Without
+  // this, two startUpload calls overlap and their XHRs race.
+  if (isUploading.value) return
+
+  // If any XHR from an earlier attempt is somehow still live, abort it
+  // before starting a new one. Combined with the generation guard in
+  // uploadFileWithProgress, this prevents interleaved progress updates.
+  if (activeXhr.value) {
+    activeXhr.value.abort()
+    activeXhr.value = null
+  }
 
   isUploading.value = true
   uploadProgress.value = 0
