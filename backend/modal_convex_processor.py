@@ -105,6 +105,218 @@ def skeleton_bbox_from_keypoints(kpts) -> Optional[Dict]:
     }
 
 
+def _pick_best_two_player_frame(
+    skeleton_frames: List[Dict],
+    video_height: int,
+    max_search_seconds: float,
+    fps: float,
+) -> Optional[Dict]:
+    """
+    Pick the frame best suited for player-identity thumbnails.
+
+    Criteria (in priority order):
+      1. Exactly 2 players detected in the frame.
+      2. Both have valid center coordinates.
+      3. Their center Y-coordinates are separated by >=25% of video_height
+         (so bounding boxes don't overlap).
+      4. Sum of keypoint confidences across both players is maximal.
+
+    Prefer frames within the first max_search_seconds; fall back to
+    "best anywhere" if no early frame qualifies.
+
+    Returns the chosen frame dict or None if no qualifying frame exists.
+    """
+    min_sep_px = video_height * 0.25
+    early_cutoff_frame = int(max_search_seconds * fps)
+
+    def _center_xy(c):
+        if c is None:
+            return None
+        if isinstance(c, dict):
+            x = c.get("x")
+            y = c.get("y")
+            if x is None or y is None:
+                return None
+            return float(x), float(y)
+        try:
+            return float(c[0]), float(c[1])
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    def score(frame: Dict) -> float:
+        players = frame.get("players") or []
+        if len(players) != 2:
+            return -1.0
+        c0 = _center_xy(players[0].get("center"))
+        c1 = _center_xy(players[1].get("center"))
+        if not c0 or not c1:
+            return -1.0
+        if abs(c0[1] - c1[1]) < min_sep_px:
+            return -1.0
+        conf_sum = 0.0
+        for p in players:
+            for kp in p.get("keypoints") or []:
+                if isinstance(kp, dict) and "confidence" in kp:
+                    conf_sum += float(kp.get("confidence") or 0)
+                elif isinstance(kp, (list, tuple)) and len(kp) >= 3:
+                    conf_sum += float(kp[2])
+                elif isinstance(kp, (list, tuple)) and len(kp) >= 2 and kp[0] and kp[1]:
+                    conf_sum += 1.0
+        return conf_sum
+
+    best_early: Optional[Dict] = None
+    best_early_score = -1.0
+    best_any: Optional[Dict] = None
+    best_any_score = -1.0
+    for frame in skeleton_frames:
+        s = score(frame)
+        if s <= 0:
+            continue
+        frame_num = int(frame.get("frame") or 0)
+        if frame_num <= early_cutoff_frame and s > best_early_score:
+            best_early = frame
+            best_early_score = s
+        if s > best_any_score:
+            best_any = frame
+            best_any_score = s
+
+    return best_early or best_any
+
+
+def _bbox_from_player_keypoints(player: Dict) -> Optional[Dict]:
+    """
+    Compute a tight bbox around a player's keypoints.
+    Handles both dict-form keypoints ({name, x, y, confidence}) and
+    raw-array form ([x, y, ...]).
+
+    Returns {x1, y1, x2, y2} or None when insufficient valid keypoints.
+    """
+    kpts = player.get("keypoints") or []
+    xs: List[float] = []
+    ys: List[float] = []
+    for kp in kpts:
+        if isinstance(kp, dict):
+            x = kp.get("x")
+            y = kp.get("y")
+        elif isinstance(kp, (list, tuple)) and len(kp) >= 2:
+            x, y = kp[0], kp[1]
+        else:
+            continue
+        if x is None or y is None:
+            continue
+        try:
+            fx = float(x)
+            fy = float(y)
+        except (TypeError, ValueError):
+            continue
+        if fx <= 0 or fy <= 0:
+            continue
+        xs.append(fx)
+        ys.append(fy)
+    if len(xs) < 5:
+        return None
+    return {"x1": min(xs), "y1": min(ys), "x2": max(xs), "y2": max(ys)}
+
+
+async def _upload_blob_to_convex(
+    http_client,
+    callback_url: str,
+    blob: bytes,
+    content_type: str,
+) -> str:
+    """
+    Upload `blob` to Convex storage via the two-step flow (get URL from
+    /generateUploadUrl, POST bytes to it). Returns the storageId.
+    """
+    url_resp = await http_client.post(f"{callback_url}/generateUploadUrl", json={})
+    url_resp.raise_for_status()
+    upload_url = url_resp.json().get("uploadUrl")
+    if not upload_url:
+        raise Exception("Failed to get upload URL from Convex")
+    blob_resp = await http_client.post(
+        upload_url,
+        content=blob,
+        headers={"Content-Type": content_type},
+    )
+    blob_resp.raise_for_status()
+    storage_id = blob_resp.json().get("storageId")
+    if not storage_id:
+        raise Exception("Failed to get storageId from upload response")
+    return storage_id
+
+
+def _capture_player_thumbnails(
+    video_path: Path,
+    frame_number: int,
+    players: List[Dict],
+    padding_ratio: float = 0.15,
+) -> Optional[Tuple[bytes, bytes]]:
+    """
+    Decode the given frame from disk, crop each player's bounding box with
+    padding, JPEG-encode at ~85% quality.
+
+    Players may carry a bbox directly; otherwise one is derived from their
+    keypoints.
+
+    Returns (player_0_jpeg, player_1_jpeg) in the incoming list order -
+    caller is responsible for matching that order to player_id. Returns
+    None on any failure (disk read, empty bbox, encode error).
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        if not cap.isOpened():
+            return None
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+        ok, img = cap.read()
+        if not ok or img is None:
+            return None
+    finally:
+        cap.release()
+
+    h, w = img.shape[:2]
+    out: List[bytes] = []
+    for p in players:
+        bbox = p.get("bbox")
+        if not bbox:
+            bbox = _bbox_from_player_keypoints(p)
+        if not bbox:
+            return None
+        if isinstance(bbox, dict):
+            x1 = bbox.get("x1")
+            y1 = bbox.get("y1")
+            x2 = bbox.get("x2")
+            y2 = bbox.get("y2")
+        else:
+            try:
+                x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+            except (IndexError, TypeError):
+                return None
+        if x1 is None or y1 is None or x2 is None or y2 is None:
+            return None
+        try:
+            x1f, y1f, x2f, y2f = float(x1), float(y1), float(x2), float(y2)
+        except (TypeError, ValueError):
+            return None
+        pad_x = (x2f - x1f) * padding_ratio
+        pad_y = (y2f - y1f) * padding_ratio
+        ix1 = max(0, int(x1f - pad_x))
+        iy1 = max(0, int(y1f - pad_y))
+        ix2 = min(w, int(x2f + pad_x))
+        iy2 = min(h, int(y2f + pad_y))
+        if ix2 <= ix1 or iy2 <= iy1:
+            return None
+        crop = img[iy1:iy2, ix1:ix2]
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            return None
+        out.append(buf.tobytes())
+    if len(out) != 2:
+        return None
+    return out[0], out[1]
+
+
 def skeleton_center_from_keypoints(kpts) -> Optional[Tuple[float, float]]:
     """
     Calculate center position from skeleton keypoints (ankle/feet midpoint preferred).
@@ -2633,38 +2845,67 @@ with_reid: False
             "info", "processing"
         )
 
+        # Player-identity thumbnails - best-effort. Cosmetic UI feature;
+        # never block the main analysis/results callback on this.
+        # Must run BEFORE `del skeleton_frames` so we still have the frame list.
+        try:
+            chosen_frame = _pick_best_two_player_frame(
+                skeleton_frames,
+                video_height=int(height),
+                max_search_seconds=10.0,
+                fps=fps,
+            )
+            if chosen_frame is None:
+                await send_log(
+                    "No qualifying 2-player frame for player thumbnails; skipping",
+                    "info", "processing",
+                )
+            else:
+                thumbs = _capture_player_thumbnails(
+                    video_path,
+                    frame_number=int(chosen_frame["frame"]),
+                    players=chosen_frame["players"][:2],
+                )
+                if thumbs is None:
+                    await send_log(
+                        "Player thumbnail capture failed; skipping",
+                        "warning", "processing",
+                    )
+                else:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0)) as thumb_client:
+                        thumb0_id = await _upload_blob_to_convex(
+                            thumb_client, callback_url, thumbs[0], "image/jpeg",
+                        )
+                        thumb1_id = await _upload_blob_to_convex(
+                            thumb_client, callback_url, thumbs[1], "image/jpeg",
+                        )
+                        await thumb_client.post(
+                            f"{callback_url}/setPlayerThumbnails",
+                            json={
+                                "videoId": video_id,
+                                "player_0_thumbnail": thumb0_id,
+                                "player_1_thumbnail": thumb1_id,
+                            },
+                        )
+                    await send_log("Player thumbnails uploaded", "success", "processing")
+        except Exception as thumb_err:
+            print(f"[MODAL] Player thumbnail capture error: {thumb_err}")
+            await send_log(
+                f"Player thumbnail capture error (non-fatal): {thumb_err}",
+                "warning", "processing",
+            )
+
         # Free skeleton_frames from memory now that we have the JSON
         del skeleton_frames
         del results_data
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0)) as client:
-            # Step 1: Get upload URL from Convex
-            upload_url_response = await client.post(
-                f"{callback_url}/generateUploadUrl",
-                json={},
+            # Step 1+2: Upload the results JSON to Convex storage
+            results_storage_id = await _upload_blob_to_convex(
+                client, callback_url, results_json, "application/json",
             )
-            upload_url_response.raise_for_status()
-            upload_data = upload_url_response.json()
-            upload_url = upload_data.get("uploadUrl")
-            
-            if not upload_url:
-                raise Exception("Failed to get upload URL from Convex")
-            
-            # Step 2: Upload the results JSON to Convex storage
-            storage_response = await client.post(
-                upload_url,
-                content=results_json,
-                headers={"Content-Type": "application/json"},
-            )
-            storage_response.raise_for_status()
-            storage_result = storage_response.json()
-            results_storage_id = storage_result.get("storageId")
-            
-            if not results_storage_id:
-                raise Exception("Failed to get storageId from upload response")
-            
             print(f"[MODAL] Results uploaded to storage: {results_storage_id}")
-            
+
             # Step 3: Send metadata + storage reference to updateResults
             await client.post(
                 f"{callback_url}/updateResults",

@@ -143,6 +143,45 @@ http.route({
 })
 
 /**
+ * HTTP endpoint for Modal to submit player identity thumbnails.
+ * POST /setPlayerThumbnails
+ *
+ * Body: { videoId, player_0_thumbnail, player_1_thumbnail }
+ * where the thumbnail fields are Convex storage IDs for the cropped JPEGs.
+ */
+http.route({
+  path: "/setPlayerThumbnails",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    try {
+      const body = await request.json()
+      const { videoId, player_0_thumbnail, player_1_thumbnail } = body
+      if (!videoId || !player_0_thumbnail || !player_1_thumbnail) {
+        return new Response(
+          JSON.stringify({ error: "Missing required fields" }),
+          { status: 400, headers: corsHeaders("application/json") },
+        )
+      }
+      await ctx.runMutation(api.videos.setPlayerThumbnails, {
+        videoId: videoId as Id<"videos">,
+        player_0_thumbnail: player_0_thumbnail as Id<"_storage">,
+        player_1_thumbnail: player_1_thumbnail as Id<"_storage">,
+      })
+      return new Response(JSON.stringify({ status: "success" }), {
+        status: 200,
+        headers: corsHeaders("application/json"),
+      })
+    } catch (err) {
+      console.error("setPlayerThumbnails error:", err)
+      return new Response(
+        JSON.stringify({ error: err instanceof Error ? err.message : "Unknown error" }),
+        { status: 500, headers: corsHeaders("application/json") },
+      )
+    }
+  }),
+})
+
+/**
  * HTTP endpoint for Modal to generate an upload URL (for processed videos)
  * POST /generateUploadUrl
  */
