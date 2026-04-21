@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toRef, type Ref } from 'vue'
-import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, BoundingBoxDetection } from '@/types/analysis'
+import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, BoundingBoxDetection, ExtendedCourtKeypoints } from '@/types/analysis'
 import { SKELETON_CONNECTIONS, PLAYER_COLORS } from '@/types/analysis'
 import PoseOverlay from './PoseOverlay.vue'
 import ShotSummaryOverlay from './ShotSummaryOverlay.vue'
@@ -300,26 +300,7 @@ const OTHER_BOX_COLOR = '#00FFFF'       // Cyan for other detections
 
 // NOTE: COURT_REGION_COLORS removed - automatic court detection disabled
 
-// Extended court keypoints type for 12-point system
-interface ExtendedCourtKeypoints {
-  // 4 outer corners
-  top_left: number[]
-  top_right: number[]
-  bottom_right: number[]
-  bottom_left: number[]
-  // Net intersections
-  net_left: number[]
-  net_right: number[]
-  // Service line corners (near court - top half)
-  service_near_left: number[]
-  service_near_right: number[]
-  // Service line corners (far court - bottom half)
-  service_far_left: number[]
-  service_far_right: number[]
-  // Center line endpoints
-  center_near: number[]
-  center_far: number[]
-}
+// Canonical ExtendedCourtKeypoints type lives in @/types/analysis.
 
 const emit = defineEmits<{
   timeUpdate: [time: number]
@@ -897,11 +878,11 @@ function handleKeypointCanvasClick(event: MouseEvent) {
       net_left: [kp[4]?.x ?? 0, kp[4]?.y ?? 0],
       net_right: [kp[5]?.x ?? 0, kp[5]?.y ?? 0],
       // Service line corners (near court)
-      service_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
-      service_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
+      service_line_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
+      service_line_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
       // Service line corners (far court)
-      service_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
-      service_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
+      service_line_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
+      service_line_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
       // Center line endpoints
       center_near: [kp[10]?.x ?? 0, kp[10]?.y ?? 0],
       center_far: [kp[11]?.x ?? 0, kp[11]?.y ?? 0]
@@ -945,11 +926,11 @@ function confirmKeypoints() {
     net_left: [kp[4]?.x ?? 0, kp[4]?.y ?? 0],
     net_right: [kp[5]?.x ?? 0, kp[5]?.y ?? 0],
     // Service line corners (near court)
-    service_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
-    service_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
+    service_line_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
+    service_line_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
     // Service line corners (far court)
-    service_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
-    service_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
+    service_line_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
+    service_line_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
     // Center line endpoints
     center_near: [kp[10]?.x ?? 0, kp[10]?.y ?? 0],
     center_far: [kp[11]?.x ?? 0, kp[11]?.y ?? 0]

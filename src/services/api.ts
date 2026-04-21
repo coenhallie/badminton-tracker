@@ -376,125 +376,21 @@ export function isUsingConvex(): boolean {
 // ============================================================================
 // Manual Court Keypoints API
 // ============================================================================
-
-export interface ManualKeypointsRequest {
-  top_left: number[]
-  top_right: number[]
-  bottom_right: number[]
-  bottom_left: number[]
-  net_left?: number[]
-  net_right?: number[]
-  service_line_near_left?: number[]
-  service_line_near_right?: number[]
-  service_line_far_left?: number[]
-  service_line_far_right?: number[]
-  doubles_left_near?: number[]
-  doubles_right_near?: number[]
-}
-
-export interface ManualKeypointsStatus {
-  has_manual_keypoints: boolean
-  keypoints: ManualKeypointsRequest | null
-}
-
-export interface ManualKeypointsResponse {
-  status: string
-  message: string
-  keypoints: ManualKeypointsRequest
-}
+// Keypoint persistence now goes directly through the Convex mutation
+// `api.videos.setManualCourtKeypoints` from the UI components that own the
+// calibration flow (CourtSetup.vue, App.vue's VideoPlayer handlers). The
+// previous HTTP wrapper + in-memory currentVideoId plumbing was redundant.
 
 // Store current video ID for keypoints operations (set by App.vue)
 let currentVideoId: string | null = null
 
 /**
- * Set the current video ID for keypoints operations
- * Called when video analysis is complete
+ * Set the current video ID for keypoints operations.
+ * Called when video analysis is complete — still used elsewhere (e.g.
+ * speed recalculation) to know which video the current session is about.
  */
 export function setCurrentVideoId(videoId: string | null) {
   currentVideoId = videoId
-}
-
-/**
- * Get manual court keypoints status
- * @param videoId - Optional video ID (uses current video if not provided)
- */
-export async function getManualKeypointsStatus(videoId?: string): Promise<ManualKeypointsStatus> {
-  const vid = videoId || currentVideoId
-  
-  if (USE_CONVEX) {
-    if (!vid) {
-      // Return false if no video context
-      return { has_manual_keypoints: false, keypoints: null }
-    }
-    
-    const response = await fetch(`${CONVEX_SITE_URL}/api/court-keypoints/manual/status?videoId=${encodeURIComponent(vid)}`)
-    
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}))
-      throw new Error(error.error || 'Failed to get manual keypoints status')
-    }
-    
-    return response.json()
-  }
-  
-  // Fallback to local backend
-  const response = await fetch(`${API_BASE_URL}/api/court-keypoints/manual/status`)
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to get manual keypoints status')
-  }
-
-  return response.json()
-}
-
-/**
- * Set manual court keypoints
- * @param keypoints - Court keypoints to set
- * @param videoId - Optional video ID (uses current video if not provided)
- */
-export async function setManualCourtKeypoints(
-  keypoints: ManualKeypointsRequest,
-  videoId?: string
-): Promise<ManualKeypointsResponse> {
-  const vid = videoId || currentVideoId
-  
-  if (USE_CONVEX) {
-    if (!vid) {
-      throw new Error('No video context for setting keypoints')
-    }
-    
-    const response = await fetch(`${CONVEX_SITE_URL}/api/court-keypoints/manual/set`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ videoId: vid, keypoints })
-    })
-    
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}))
-      throw new Error(error.error || 'Failed to set manual keypoints')
-    }
-    
-    return response.json()
-  }
-  
-  // Fallback to local backend
-  const response = await fetch(`${API_BASE_URL}/api/court-keypoints/manual/set`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(keypoints)
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to set manual keypoints')
-  }
-
-  return response.json()
 }
 
 // ============================================================================

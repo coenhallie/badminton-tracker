@@ -15,15 +15,19 @@ import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
 import { useShotSegments, type ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
 import { computeHomographyFromKeypoints } from '@/utils/homography'
 import {
-  checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
+  checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl,
   triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
   clearZoneAnalyticsCache, getRecalculatedZoneAnalytics, setCurrentVideoId
 } from '@/services/api'
 import type { HealthCheckResponse } from '@/services/api'
-import type { UploadResponse, AnalysisResult, SkeletonFrame } from '@/types/analysis'
+import type { UploadResponse, AnalysisResult, SkeletonFrame, ExtendedCourtKeypoints } from '@/types/analysis'
 import type { SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
+import { useConvexClient } from 'convex-vue'
+import { api } from '../convex/_generated/api'
+import type { Id } from '../convex/_generated/dataModel'
 
 const { isDark, toggleTheme } = useTheme()
+const convex = useConvexClient()
 
 // App states: upload -> court-setup (new!) -> analyzing -> results
 type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
@@ -158,28 +162,11 @@ function handleRallySelect(rallyId: number | null) {
   selectedRallyId.value = rallyId
 }
 
-// Extended court keypoints type for 12-point system
-interface ExtendedCourtKeypoints {
-  // 4 outer corners
-  top_left: number[]
-  top_right: number[]
-  bottom_right: number[]
-  bottom_left: number[]
-  // Net intersections
-  net_left: number[]
-  net_right: number[]
-  // Service line corners (near court - top half)
-  service_near_left: number[]
-  service_near_right: number[]
-  // Service line corners (far court - bottom half)
-  service_far_left: number[]
-  service_far_right: number[]
-  // Center line endpoints
-  center_near: number[]
-  center_far: number[]
-}
-
-// Manual court keypoints storage (for mini court when manually set)
+// Manual court keypoints storage (for mini court when manually set).
+// The canonical ExtendedCourtKeypoints type lives in @/types/analysis and
+// matches the Convex schema field names — so there's no remapping layer
+// between persistence and UI. Every consumer (VideoPlayer, CourtSetup,
+// SyntheticCourtView, App) imports the same shape.
 const manualCourtKeypoints = ref<ExtendedCourtKeypoints | null>(null)
 
 // Reactive skeletonData for the composable.
@@ -192,8 +179,8 @@ const shotHomography = computed((): number[][] | null => {
   const videoPts = [
     kp.top_left, kp.top_right, kp.bottom_right, kp.bottom_left,
     kp.net_left, kp.net_right,
-    kp.service_near_left, kp.service_near_right,
-    kp.service_far_left, kp.service_far_right,
+    kp.service_line_near_left, kp.service_line_near_right,
+    kp.service_line_far_left, kp.service_line_far_right,
     kp.center_near, kp.center_far,
   ]
   return computeHomographyFromKeypoints(videoPts)
@@ -335,10 +322,10 @@ const courtCornersForMiniCourt = computed(() => {
       kp.bottom_left,        // 3: BL corner
       kp.net_left,           // 4: Net left
       kp.net_right,          // 5: Net right
-      kp.service_near_left,  // 6: Service near left
-      kp.service_near_right, // 7: Service near right
-      kp.service_far_left,   // 8: Service far left
-      kp.service_far_right,  // 9: Service far right
+      kp.service_line_near_left,  // 6: Service near left
+      kp.service_line_near_right, // 7: Service near right
+      kp.service_line_far_left,   // 8: Service far left
+      kp.service_line_far_right,  // 9: Service far right
       kp.center_near,        // 10: Center line near
       kp.center_far          // 11: Center line far
     ]
@@ -734,27 +721,11 @@ function handleUploadError(message: string) {
   errorMessage.value = message
 }
 
-// Court setup handlers - receives 12-point keypoints from CourtSetup
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function handleCourtSetupComplete(keypoints: any) {
+// Court setup handlers - receives 12-point keypoints from CourtSetup.
+// Field names match the Convex schema 1:1 (no remapping needed).
+function handleCourtSetupComplete(keypoints: ExtendedCourtKeypoints) {
   console.log('[App] 12-point court keypoints saved:', keypoints)
-  // Store the keypoints mapped to the format used by mini court
-  // The CourtSetup uses Convex field names, map to our internal format
-  manualCourtKeypoints.value = {
-    top_left: keypoints.top_left || [0, 0],
-    top_right: keypoints.top_right || [0, 0],
-    bottom_right: keypoints.bottom_right || [0, 0],
-    bottom_left: keypoints.bottom_left || [0, 0],
-    net_left: keypoints.net_left || [0, 0],
-    net_right: keypoints.net_right || [0, 0],
-    service_near_left: keypoints.service_line_near_left || [0, 0],
-    service_near_right: keypoints.service_line_near_right || [0, 0],
-    service_far_left: keypoints.service_line_far_left || [0, 0],
-    service_far_right: keypoints.service_line_far_right || [0, 0],
-    center_near: keypoints.center_near || [0, 0],
-    center_far: keypoints.center_far || [0, 0]
-  }
-  // Now proceed to analysis
+  manualCourtKeypoints.value = keypoints
   currentState.value = 'analyzing'
 }
 
@@ -823,68 +794,46 @@ function dismissError() {
   errorMessage.value = ''
 }
 
-// Handle manual court keypoints from VideoPlayer (12-point system)
-async function handleCourtKeypointsSet(keypoints: ExtendedCourtKeypoints) {
-  try {
-    console.log('[App] Received 12 court keypoints:', keypoints)
-    
-    // Store locally for MiniCourt component
-    manualCourtKeypoints.value = keypoints
-    
-    // Backend API still uses 4-corner format for basic court detection
-    // Send the 4 corners for backward compatibility
-    const fourCornerFormat = {
-      top_left: keypoints.top_left,
-      top_right: keypoints.top_right,
-      bottom_right: keypoints.bottom_right,
-      bottom_left: keypoints.bottom_left
-    }
-    const response = await setManualCourtKeypoints(fourCornerFormat)
-    console.log('[App] Manual keypoints set successfully:', response)
-    // Show success feedback (optional)
-    errorMessage.value = '' // Clear any previous error
-  } catch (e) {
-    console.error('Failed to set manual court keypoints:', e)
-    errorMessage.value = 'Failed to set manual court keypoints'
-  }
+// Handle manual court keypoints from VideoPlayer's in-player selector.
+// Fires on every individual placement while the user is still picking
+// points — we only update local state here. The single network write
+// happens in handleKeypointsConfirmed when the user clicks Done, so
+// there is exactly one persisted save per calibration run (rather than
+// one per point placed).
+function handleCourtKeypointsSet(keypoints: ExtendedCourtKeypoints) {
+  manualCourtKeypoints.value = keypoints
+  errorMessage.value = ''
 }
 
-// Handle keypoints confirmed event from VideoPlayer (when Done button is clicked)
-// This triggers zone coverage recalculation with the new homography
+// Fires when the user clicks Done inside the VideoPlayer keypoint selector.
+// Persists ALL 12 keypoints (previously only 4 corners were sent, which
+// meant net_left / net_right / service-line / center_* were dropped on
+// the VideoPlayer save path — silently disabling features like the
+// PlayerIdentityTracker's net-line court-side check). Writes directly to
+// the Convex mutation (same path as CourtSetup.vue) so both UI entry
+// points share one save mechanism.
 async function handleKeypointsConfirmed(keypoints: ExtendedCourtKeypoints) {
   try {
-    console.log('[App] Keypoints confirmed by user - triggering zone recalculation')
-    
-    // Store locally for MiniCourt component
+    console.log('[App] Keypoints confirmed by user - persisting 12-point set')
     manualCourtKeypoints.value = keypoints
-    
-    // Backend API still uses 4-corner format for basic court detection
-    // Send the 4 corners to backend for homography calculation
-    const fourCornerFormat = {
-      top_left: keypoints.top_left,
-      top_right: keypoints.top_right,
-      bottom_right: keypoints.bottom_right,
-      bottom_left: keypoints.bottom_left
-    }
-    
-    // Set keypoints on backend
-    await setManualCourtKeypoints(fourCornerFormat)
-    console.log('[App] Manual keypoints sent to backend')
-    
-    // Clear zone analytics cache to force fresh recalculation
-    if (analysisResult.value) {
-      console.log('[App] Clearing zone analytics cache for video:', analysisResult.value.video_id)
-      clearZoneAnalyticsCache(analysisResult.value.video_id)
-      
-      // Increment trigger to force ResultsDashboard to reload zone analytics
+
+    const videoId = analysisResult.value?.video_id
+    if (videoId) {
+      await convex.mutation(api.videos.setManualCourtKeypoints, {
+        videoId: videoId as Id<'videos'>,
+        keypoints,
+      })
+
+      // Clear zone analytics cache so the dashboard recomputes against
+      // the new homography.
+      clearZoneAnalyticsCache(videoId)
       zoneRecalculationTrigger.value++
-      console.log('[App] Zone recalculation trigger incremented to:', zoneRecalculationTrigger.value)
     }
-    
-    errorMessage.value = '' // Clear any previous error
+
+    errorMessage.value = ''
   } catch (e) {
-    console.error('Failed to process keypoints confirmation:', e)
-    errorMessage.value = 'Failed to recalculate zone coverage'
+    console.error('Failed to persist manual court keypoints:', e)
+    errorMessage.value = 'Failed to save court keypoints'
   }
 }
 

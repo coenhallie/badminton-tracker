@@ -2,21 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { calculateHomography, applyHomography } from '@/utils/homography'
 import { COURT_DIMENSIONS } from '@/types/analysis'
-
-interface ExtendedCourtKeypoints {
-  top_left: number[]
-  top_right: number[]
-  bottom_right: number[]
-  bottom_left: number[]
-  net_left: number[]
-  net_right: number[]
-  service_near_left: number[]
-  service_near_right: number[]
-  service_far_left: number[]
-  service_far_right: number[]
-  center_near: number[]
-  center_far: number[]
-}
+import type { ExtendedCourtKeypoints } from '@/types/analysis'
 
 const props = defineProps<{
   courtKeypoints: ExtendedCourtKeypoints
@@ -57,8 +43,8 @@ const metersToPixels = computed((): number[][] | null => {
   const videoPts = [
     kp.top_left, kp.top_right, kp.bottom_right, kp.bottom_left,
     kp.net_left, kp.net_right,
-    kp.service_near_left, kp.service_near_right,
-    kp.service_far_left, kp.service_far_right,
+    kp.service_line_near_left, kp.service_line_near_right,
+    kp.service_line_far_left, kp.service_line_far_right,
     kp.center_near, kp.center_far,
   ]
   // Court-meter positions matching the 12 keypoints above.

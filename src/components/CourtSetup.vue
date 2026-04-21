@@ -4,6 +4,7 @@ import { useConvexClient } from 'convex-vue'
 import { api } from '../../convex/_generated/api'
 import type { Id } from '../../convex/_generated/dataModel'
 import { fetchVideoUrl } from '@/services/api'
+import type { ExtendedCourtKeypoints } from '@/types/analysis'
 import MiniCourt from './MiniCourt.vue'
 
 const props = defineProps<{
@@ -30,21 +31,7 @@ const client = useConvexClient()
 // 11-12: Center line endpoints at service lines (CT_N, CT_F)
 // =============================================================================
 
-// Must match the Convex validator in videos.ts (12-point system)
-interface ExtendedCourtKeypoints {
-  top_left: number[]
-  top_right: number[]
-  bottom_right: number[]
-  bottom_left: number[]
-  net_left?: number[]
-  net_right?: number[]
-  service_line_near_left?: number[]
-  service_line_near_right?: number[]
-  service_line_far_left?: number[]
-  service_line_far_right?: number[]
-  center_near?: number[]
-  center_far?: number[]
-}
+// Canonical type lives in @/types/analysis. We import it below.
 
 interface ManualCourtKeypoint {
   x: number

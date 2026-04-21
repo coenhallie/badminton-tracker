@@ -55,6 +55,47 @@ export interface CourtKeypoints22 {
   confidence: number
 }
 
+/**
+ * Manual 12-point court keypoints. Field names match the Convex schema
+ * (`videos.manualCourtKeypoints`) exactly so there is no remapping
+ * between persistence and UI shapes — every consumer imports this type.
+ *
+ * Each value is [x, y] in video-pixel coordinates.
+ *
+ * All 12 are required at the TypeScript layer because every UI entry
+ * point (CourtSetup.vue, VideoPlayer.vue's in-player selector) always
+ * produces the full set. Keypoints the user doesn't click still emit
+ * [0, 0] rather than undefined. The Convex schema keeps the non-corner
+ * fields optional for forward-compat with old records, but when a record
+ * is read into this type we assume all 12 are present — simpler than
+ * guarding every consumer against undefined.
+ *
+ * Anchor points:
+ *   - 4 outer corners
+ *   - 2 net intersections (used by the player-identity tracker to detect
+ *     court-side violations against the real net line, not pixel-midline)
+ *   - 4 service-line corners (near + far × left + right)
+ *   - 2 center-line endpoints (for precise homography)
+ */
+export interface ExtendedCourtKeypoints {
+  // 4 outer corners
+  top_left: number[]
+  top_right: number[]
+  bottom_right: number[]
+  bottom_left: number[]
+  // Net intersections (left/right ends of the net line)
+  net_left: number[]
+  net_right: number[]
+  // Short service line corners (near half + far half)
+  service_line_near_left: number[]
+  service_line_near_right: number[]
+  service_line_far_left: number[]
+  service_line_far_right: number[]
+  // Center-line endpoints at the service lines
+  center_near: number[]
+  center_far: number[]
+}
+
 export interface CourtDetection {
   detected: boolean
   confidence: number
