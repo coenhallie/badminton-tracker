@@ -1225,13 +1225,17 @@ function drawBoundingBoxes(
   }
 
   // Draw players (green) - only if showPlayers is true.
-  // Label each bbox with the canonical player_id from the matching skeleton
-  // player (nearest center in the same frame) so bbox labels stay in sync
-  // with the skeleton overlay and the stats underneath the video.
+  // Prefer the bbox's own `player_id` (set by the backend when the pipeline
+  // links it to PlayerIdentityTracker). Fall back to nearest-center match
+  // against the skeleton for pre-feature analyses, and finally to the array
+  // index for bboxes with neither.
   if (props.showPlayers !== false) {
     detections.players?.forEach((player, i) => {
-      const matched = framePlayers ? nearestFramePlayer(player, framePlayers) : null
-      const label = matched ? pidLabelFor(matched.player_id) : `Player ${i + 1}`
+      let pid = player.player_id ?? null
+      if (pid == null && framePlayers) {
+        pid = nearestFramePlayer(player, framePlayers)?.player_id ?? null
+      }
+      const label = pid != null ? pidLabelFor(pid) : `Player ${i + 1}`
       drawBox(player, PLAYER_BOX_COLOR, label)
     })
   }

@@ -2309,7 +2309,27 @@ with_reid: False
                         matched_players = identity_tracker.match_skeletons(
                             active_skeletons, frame_count
                         )
-                        
+
+                        # Attach canonical player_id to each emitted player bbox
+                        # by mapping its track_id through the identity tracker's
+                        # output. Lets the frontend render labels directly from
+                        # YOLO26 + PlayerIdentityTracker instead of re-deriving
+                        # via center-proximity. Matched_players preserves the
+                        # keypoint-array object identity of the source skeleton,
+                        # so we can link pid -> track_id here.
+                        track_id_to_pid: Dict[Any, int] = {}
+                        for _pid, _kpts, _ in matched_players:
+                            for _skel in active_skeletons:
+                                if _skel["kpts"] is _kpts:
+                                    _tid = _skel.get("track_id")
+                                    if _tid is not None and _tid >= 0:
+                                        track_id_to_pid[_tid] = _pid
+                                    break
+                        for _bbox in badminton_detections["players"]:
+                            _tid = _bbox.get("detection_id")
+                            if _tid is not None and _tid in track_id_to_pid:
+                                _bbox["player_id"] = track_id_to_pid[_tid]
+
                         # Log tracker stats periodically
                         if frame_count == identity_tracker.CALIBRATION_FRAMES + 1:
                             stats = identity_tracker.get_stats()

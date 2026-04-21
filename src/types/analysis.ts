@@ -206,6 +206,10 @@ export interface BoundingBoxDetection {
   height: number
   class_id: number
   detection_id: string | null
+  // Canonical player_id (0 or 1) set by the backend when this bbox comes
+  // from the player pipeline. Absent on pre-feature analyses and on
+  // non-player detections (shuttlecocks, rackets, other).
+  player_id?: number | null
 }
 
 export interface BadmintonDetections {
