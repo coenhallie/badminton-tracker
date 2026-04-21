@@ -294,6 +294,7 @@ const props = defineProps<{
 
 // Colors for bounding boxes (matching backend colors)
 const PLAYER_BOX_COLOR = '#00FF00'      // Green for players
+const PLAYER_UNASSIGNED_BOX_COLOR = '#FFD60A'  // Amber when pid is unknown
 const SHUTTLE_BOX_COLOR = '#FFA500'     // Orange for shuttlecock (YOLO)
 const SHUTTLE_TRACKNET_COLOR = '#00E5FF' // Cyan for TrackNet shuttle detection
 const SHUTTLE_YOLO_COLOR = '#FFA500'     // Orange for YOLO shuttle detection
@@ -616,8 +617,14 @@ function findInterpolatedFrame(targetTime: number): SkeletonFrame | null {
       ceilDets: BoundingBoxDetection[]
     ): BoundingBoxDetection[] => {
       return floorDets.map(fd => {
-        // Match by class and closest position
-        const cd = ceilDets.find(d => d.class === fd.class)
+        // Match by player_id when both frames carry it (player bboxes).
+        // Falling back to class would cross-wire Player 1's label onto
+        // Player 2's interpolated position when one player is missing
+        // in the ceil frame. For non-player detections (shuttle/racket)
+        // player_id is absent; match by class.
+        const cd = fd.player_id != null
+          ? ceilDets.find(d => d.player_id === fd.player_id)
+          : ceilDets.find(d => d.class === fd.class)
         if (!cd) return fd
         return {
           ...fd,
@@ -1195,10 +1202,17 @@ function drawBoundingBoxes(
     ctx.fillText(labelText, x + padding, y - padding - 2)
   }
 
-  // Draw players (green) - only if showPlayers is true.
+  // Draw players - only if showPlayers is true. When player_id is
+  // missing, the tracker was not confident enough to assign an identity
+  // this frame; render the bbox in a distinct color with a generic
+  // label instead of guessing.
   if (props.showPlayers !== false) {
     detections.players?.forEach((player) => {
-      drawBox(player, PLAYER_BOX_COLOR, pidLabelFor(player.player_id ?? 0))
+      if (player.player_id == null) {
+        drawBox(player, PLAYER_UNASSIGNED_BOX_COLOR, 'Player')
+      } else {
+        drawBox(player, PLAYER_BOX_COLOR, pidLabelFor(player.player_id))
+      }
     })
   }
 
