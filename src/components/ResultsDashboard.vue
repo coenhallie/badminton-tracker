@@ -452,13 +452,13 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
           v-for="(playerData, playerId) in zoneAnalytics"
           :key="playerId"
           class="coverage-card"
-          :style="{ '--player-color': getPlayerColor(parseInt(playerId as string) - 1) }"
+          :style="{ '--player-color': getPlayerColor(pidDisplayFor(parseInt(playerId as string) - 1)) }"
         >
           <div class="coverage-header">
-            <div class="player-avatar" :style="{ background: getPlayerColor(parseInt(playerId as string) - 1) }">
-              P{{ playerId }}
+            <div class="player-avatar" :style="{ background: getPlayerColor(pidDisplayFor(parseInt(playerId as string) - 1)) }">
+              P{{ pidDisplayFor(parseInt(playerId as string) - 1) + 1 }}
             </div>
-            <h4>Player {{ playerId }}</h4>
+            <h4>{{ pidLabelFor(parseInt(playerId as string) - 1) }}</h4>
             <span class="position-count">{{ playerData.position_count }} positions</span>
           </div>
           
