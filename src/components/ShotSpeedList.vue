@@ -17,7 +17,7 @@
  * 4. Calculate movement speeds between consecutive hits
  */
 
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, inject } from 'vue'
 import type {
   SkeletonFrame,
   SpeedZone,
@@ -32,6 +32,13 @@ import {
   type ShotEvent,
   type ShotMovementSegment,
 } from '@/composables/useShotSegments'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
 
 // =============================================================================
 // PROPS & EMITS
@@ -152,9 +159,9 @@ function getSpeedUnit(): string {
   return useKmh.value ? 'km/h' : 'm/s'
 }
 
-function getPlayerColor(playerId: number): string {
-  const idx = Math.max(0, playerId - 1) % PLAYER_SPEED_COLORS.length
-  return PLAYER_SPEED_COLORS[idx] ?? '#3B82F6'
+function getPlayerColor(canonicalPlayerId: number): string {
+  const displayIdx = pidDisplayFor(canonicalPlayerId)
+  return PLAYER_SPEED_COLORS[displayIdx % PLAYER_SPEED_COLORS.length] ?? '#3B82F6'
 }
 
 function getZoneColor(zone: SpeedZone): string {
@@ -224,7 +231,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
         >
           <option :value="null">All Players</option>
           <option v-for="pid in playerIds" :key="pid" :value="pid">
-            Player {{ pid }}
+            {{ pidLabelFor(pid) }}
           </option>
         </select>
         
@@ -322,7 +329,7 @@ function getSparklinePath(speedProfile: number[], width: number = 60, height: nu
             class="player-badge"
             :style="{ backgroundColor: getPlayerColor(segment.movingPlayerId) }"
           >
-            P{{ segment.movingPlayerId }}
+            P{{ pidDisplayFor(segment.movingPlayerId) + 1 }}
           </span>
         </span>
         

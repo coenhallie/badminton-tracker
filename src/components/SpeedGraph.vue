@@ -15,7 +15,7 @@
  * - Speed zone indicators with color coding
  */
 
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, inject } from 'vue'
 import { Line } from 'vue-chartjs'
 import {
   Chart as ChartJS,
@@ -42,6 +42,13 @@ import {
   SPEED_ZONE_THRESHOLDS,
   PLAYER_SPEED_COLORS
 } from '@/types/analysis'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
 
 // Register Chart.js components
 ChartJS.register(
@@ -274,7 +281,7 @@ const chartData = computed<ChartData<'line'>>(() => {
   // Create dataset for each player
   for (const [playerIdStr, data] of playerEntries) {
     const playerId = parseInt(playerIdStr)
-    const colorIndex = Math.max(0, playerId - 1) % PLAYER_SPEED_COLORS.length
+    const colorIndex = pidDisplayFor(playerId) % PLAYER_SPEED_COLORS.length
     const color = PLAYER_SPEED_COLORS[colorIndex]
     
     // Map data to labels
@@ -290,7 +297,7 @@ const chartData = computed<ChartData<'line'>>(() => {
     })
     
     datasets.push({
-      label: `Player ${playerId}`,
+      label: pidLabelFor(playerId),
       data: speedData,
       borderColor: color,
       backgroundColor: color + '33', // 20% opacity
@@ -520,14 +527,14 @@ const getZoneName = (zone: SpeedZone): string => {
         v-for="(stats, playerId) in playerStats"
         :key="playerId"
         class="player-stats"
-        :style="{ borderColor: PLAYER_SPEED_COLORS[Math.max(0, Number(playerId) - 1) % PLAYER_SPEED_COLORS.length] }"
+        :style="{ borderColor: PLAYER_SPEED_COLORS[pidDisplayFor(Number(playerId)) % PLAYER_SPEED_COLORS.length] }"
       >
         <div class="player-label">
           <span
             class="player-dot"
-            :style="{ backgroundColor: PLAYER_SPEED_COLORS[Math.max(0, Number(playerId) - 1) % PLAYER_SPEED_COLORS.length] }"
+            :style="{ backgroundColor: PLAYER_SPEED_COLORS[pidDisplayFor(Number(playerId)) % PLAYER_SPEED_COLORS.length] }"
           ></span>
-          Player {{ playerId }}
+          {{ pidLabelFor(Number(playerId)) }}
         </div>
         
         <div class="stats-grid">
