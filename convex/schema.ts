@@ -67,7 +67,18 @@ export default defineSchema({
       doubles_left_near: v.optional(v.array(v.number())),
       doubles_right_near: v.optional(v.array(v.number())),
     })),
-    
+
+    playerLabels: v.optional(v.object({
+      // Storage IDs of cropped thumbnails written by the Modal worker.
+      player_0_thumbnail: v.optional(v.id("_storage")),
+      player_1_thumbnail: v.optional(v.id("_storage")),
+      // User-controlled display state. Defaults to identity mapping
+      // (no swap, no custom names) when absent.
+      swapped: v.optional(v.boolean()),
+      player_0_name: v.optional(v.string()),
+      player_1_name: v.optional(v.string()),
+    })),
+
     // Metadata
     createdAt: v.number(),
     completedAt: v.optional(v.number()),

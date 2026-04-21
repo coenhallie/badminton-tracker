@@ -280,6 +280,8 @@ export const deleteVideo = mutation({
       video.resultsStorageId,
       video.processedVideoStorageId,
       video.skeletonDataStorageId,
+      video.playerLabels?.player_0_thumbnail,
+      video.playerLabels?.player_1_thumbnail,
     ].filter((id): id is Id<"_storage"> => id != null)
 
     await Promise.allSettled(blobIds.map(id => ctx.storage.delete(id)))
@@ -405,11 +407,61 @@ export const getManualCourtKeypoints = query({
   handler: async (ctx, { videoId }) => {
     const video = await ctx.db.get(videoId)
     if (!video) return null
-    
+
     return {
       has_manual_keypoints: !!video.manualCourtKeypoints,
       keypoints: video.manualCourtKeypoints || null,
     }
+  },
+})
+
+export const getPlayerLabels = query({
+  args: { videoId: v.id("videos") },
+  handler: async (ctx, { videoId }) => {
+    const video = await ctx.db.get(videoId)
+    if (!video) return null
+    return video.playerLabels ?? null
+  },
+})
+
+export const updatePlayerLabels = mutation({
+  args: {
+    videoId: v.id("videos"),
+    swapped: v.optional(v.boolean()),
+    player_0_name: v.optional(v.string()),
+    player_1_name: v.optional(v.string()),
+  },
+  handler: async (ctx, { videoId, swapped, player_0_name, player_1_name }) => {
+    const video = await ctx.db.get(videoId)
+    if (!video) throw new Error("Video not found")
+
+    const next = { ...(video.playerLabels ?? {}) }
+    if (swapped !== undefined) next.swapped = swapped
+    if (player_0_name !== undefined) next.player_0_name = player_0_name
+    if (player_1_name !== undefined) next.player_1_name = player_1_name
+
+    await ctx.db.patch(videoId, { playerLabels: next })
+    return { success: true, playerLabels: next }
+  },
+})
+
+export const setPlayerThumbnails = mutation({
+  args: {
+    videoId: v.id("videos"),
+    player_0_thumbnail: v.id("_storage"),
+    player_1_thumbnail: v.id("_storage"),
+  },
+  handler: async (ctx, { videoId, player_0_thumbnail, player_1_thumbnail }) => {
+    const video = await ctx.db.get(videoId)
+    if (!video) throw new Error("Video not found")
+
+    const next = {
+      ...(video.playerLabels ?? {}),
+      player_0_thumbnail,
+      player_1_thumbnail,
+    }
+    await ctx.db.patch(videoId, { playerLabels: next })
+    return { success: true }
   },
 })
 
