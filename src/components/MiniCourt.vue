@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, shallowRef } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, shallowRef, inject } from 'vue'
 import type { FramePlayer } from '@/types/analysis'
 import { PLAYER_COLORS, COURT_DIMENSIONS } from '@/types/analysis'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
 import {
   calculateHomography,
   applyHomography,
   COURT_KEYPOINT_POSITIONS,
 } from '@/utils/homography'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
 
 // Debug mode - set to true to see coordinate transformation logs
 const DEBUG_MODE = import.meta.env.DEV && false
@@ -804,7 +811,8 @@ function drawPlayerTrails(ctx: CanvasRenderingContext2D) {
     if (trail.length < 2) return
     
     // Use same color mapping as drawPlayers (player_id is 0-based)
-    const color = PLAYER_COLORS[playerId % PLAYER_COLORS.length] ?? '#FF6B6B'
+    const displayPid = pidDisplayFor(playerId)
+    const color = PLAYER_COLORS[displayPid % PLAYER_COLORS.length] ?? '#FF6B6B'
     
     // Draw trail as a gradient line that fades from old to new
     ctx.lineCap = 'round'
@@ -1017,7 +1025,8 @@ function drawPlayers(ctx: CanvasRenderingContext2D) {
     const canvasPos = courtToCanvas(smoothed.courtX, smoothed.courtY)
     
     // Use gray when not recognized, normal player color when recognized
-    const normalColor = PLAYER_COLORS[playerId % PLAYER_COLORS.length] ?? '#FF6B6B'
+    const displayPid = pidDisplayFor(playerId)
+    const normalColor = PLAYER_COLORS[displayPid % PLAYER_COLORS.length] ?? '#FF6B6B'
     const color = smoothed.isRecognized ? normalColor : UNRECOGNIZED_COLOR
     
     // Draw player circle with glow effect
@@ -1055,7 +1064,10 @@ function drawPlayers(ctx: CanvasRenderingContext2D) {
     ctx.fillStyle = smoothed.isRecognized ? '#FFFFFF' : 'rgba(255, 255, 255, 0.7)'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(`P${playerId + 1}`, canvasPos.x, canvasPos.y)
+    const labelName = pidLabelFor(playerId)
+    // Compact form for the dot overlay: "Player 1" → "P1"; custom names stay as-is.
+    const labelText = labelName.startsWith('Player ') ? `P${labelName.slice(7)}` : labelName
+    ctx.fillText(labelText, canvasPos.x, canvasPos.y)
     
     // Speed indicator below player (only when recognized and moving)
     if (smoothed.isRecognized && smoothed.speed > 0.1) {

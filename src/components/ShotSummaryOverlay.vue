@@ -1,10 +1,18 @@
 <script setup lang="ts">
+import { inject } from 'vue'
 import type { ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
 
 const props = defineProps<{
   segment: ShotMovementSegmentWithPeaks
   countdownSec: number
 }>()
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
 
 function fmtNumber(v: number | null, digits: number, unit: string): string {
   if (v == null || !isFinite(v)) return '—'
@@ -15,7 +23,7 @@ function fmtNumber(v: number | null, digits: number, unit: string): string {
 <template>
   <div class="shot-summary-overlay">
     <div class="shot-summary-header">
-      <span class="shot-summary-player">Player {{ segment.movingPlayerId + 1 }} responded</span>
+      <span class="shot-summary-player">{{ pidLabelFor(segment.movingPlayerId) }} responded</span>
       <span class="shot-summary-countdown">⏱ {{ countdownSec.toFixed(1) }}s</span>
     </div>
 
