@@ -5,6 +5,7 @@ import { PLAYER_COLORS } from '@/types/analysis'
 import { exportPDFWithFrontendData, getRecalculatedZoneAnalytics, clearZoneAnalyticsCache, type PlayerZoneData } from '@/services/api'
 import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
 import CourtZoneTooltip from './CourtZoneTooltip.vue'
+import PlayerIdentityPanel from './PlayerIdentityPanel.vue'
 
 const playerLabelsRef = inject(PLAYER_LABELS_KEY)
 const pidDisplayFor = (canonical: number): number =>
@@ -371,6 +372,12 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
         </div>
       </div>
     </section>
+
+    <!-- Player Identity (thumbnails + swap + rename) -->
+    <PlayerIdentityPanel
+      v-if="props.result.video_id"
+      :video-id="props.result.video_id"
+    />
 
     <!-- Player Stats -->
     <section class="players-section">

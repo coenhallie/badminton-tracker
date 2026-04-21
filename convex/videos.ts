@@ -424,6 +424,18 @@ export const getPlayerLabels = query({
   },
 })
 
+/**
+ * Resolve a Convex storage id to a signed, time-limited URL suitable
+ * for <img src>. Used by the Player Identity panel to render player
+ * thumbnail blobs stored at `playerLabels.player_{0,1}_thumbnail`.
+ */
+export const getStorageUrl = query({
+  args: { storageId: v.id("_storage") },
+  handler: async (ctx, { storageId }) => {
+    return await ctx.storage.getUrl(storageId)
+  },
+})
+
 export const updatePlayerLabels = mutation({
   args: {
     videoId: v.id("videos"),
