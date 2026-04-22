@@ -1405,8 +1405,9 @@ function drawAngleArc(
   const angle1 = Math.atan2(ay - vy, ax - vx)
   const angle2 = Math.atan2(by - vy, bx - vx)
 
-  // Draw arc
-  const radius = camera.pixelSize(20)
+  // Draw arc — radius and label scale with zoom so the angle decoration
+  // grows with the joint. Only the arc stroke stays thin (pixelSize).
+  const radius = 20
   ctx.beginPath()
   ctx.arc(vx, vy, radius, Math.min(angle1, angle2), Math.max(angle1, angle2))
   ctx.strokeStyle = color
@@ -1415,17 +1416,18 @@ function drawAngleArc(
   ctx.stroke()
   ctx.globalAlpha = 1.0
 
-  // Draw label
+  // Draw label — font and offsets scale with zoom so the number is
+  // readable at high magnification (key reason to zoom in).
   const midAngle = (angle1 + angle2) / 2
-  const labelX = vx + Math.cos(midAngle) * (radius + camera.pixelSize(14))
-  const labelY = vy + Math.sin(midAngle) * (radius + camera.pixelSize(14))
+  const labelX = vx + Math.cos(midAngle) * (radius + 14)
+  const labelY = vy + Math.sin(midAngle) * (radius + 14)
 
-  ctx.font = `bold ${camera.pixelSize(11)}px Inter, system-ui, sans-serif`
+  ctx.font = 'bold 11px Inter, system-ui, sans-serif'
   ctx.fillStyle = '#ffffff'
   ctx.strokeStyle = '#000000'
-  ctx.lineWidth = camera.pixelSize(2.5)
-  ctx.strokeText(`${Math.round(angleDegrees)}°`, labelX - camera.pixelSize(10), labelY + camera.pixelSize(4))
-  ctx.fillText(`${Math.round(angleDegrees)}°`, labelX - camera.pixelSize(10), labelY + camera.pixelSize(4))
+  ctx.lineWidth = 2.5
+  ctx.strokeText(`${Math.round(angleDegrees)}°`, labelX - 10, labelY + 4)
+  ctx.fillText(`${Math.round(angleDegrees)}°`, labelX - 10, labelY + 4)
 }
 
 function drawLegStretch(
@@ -1445,6 +1447,8 @@ function drawLegStretch(
   const lax = la.x * scaleX, lay = la.y * scaleY
   const rax = ra.x * scaleX, ray = ra.y * scaleY
 
+  // Dashed line stays a uniform thin indicator (pixelSize on the stroke
+  // and dash pattern). The meter label scales with zoom.
   ctx.beginPath()
   ctx.setLineDash([camera.pixelSize(6), camera.pixelSize(4)])
   ctx.moveTo(lax, lay)
@@ -1460,12 +1464,12 @@ function drawLegStretch(
   const my = (lay + ray) / 2
   const label = `${distMeters.toFixed(2)}m`
 
-  ctx.font = `bold ${camera.pixelSize(12)}px Inter, system-ui, sans-serif`
+  ctx.font = 'bold 12px Inter, system-ui, sans-serif'
   ctx.fillStyle = '#ffffff'
   ctx.strokeStyle = '#000000'
-  ctx.lineWidth = camera.pixelSize(2.5)
-  ctx.strokeText(label, mx - camera.pixelSize(15), my - camera.pixelSize(8))
-  ctx.fillText(label, mx - camera.pixelSize(15), my - camera.pixelSize(8))
+  ctx.lineWidth = 2.5
+  ctx.strokeText(label, mx - 15, my - 8)
+  ctx.fillText(label, mx - 15, my - 8)
 }
 
 function drawSkeleton(
@@ -1551,12 +1555,13 @@ function drawSkeleton(
         'drew', keypointsDrawn, 'keypoints,', connectionsDrawn, 'connections')
     }
 
-    // Draw player label and speed (always draw if center exists)
+    // Draw player label and speed (always draw if center exists).
+    // Text grows with zoom so it's readable when inspecting posture close-up.
     if (player.center) {
-      ctx.font = `bold ${camera.pixelSize(14)}px Inter, system-ui, sans-serif`
+      ctx.font = 'bold 14px Inter, system-ui, sans-serif'
       ctx.fillStyle = color
       ctx.strokeStyle = '#000000'
-      ctx.lineWidth = camera.pixelSize(3)
+      ctx.lineWidth = 3
 
       // player_id is 0-indexed, display as 1-indexed (Player 1, Player 2)
       const labelName = pidLabelFor(player.player_id)
@@ -1565,10 +1570,10 @@ function drawSkeleton(
       const labelPrefix = labelName.startsWith('Player ') ? `P${labelName.slice(7)}` : labelName
       const label = `${labelPrefix}: ${player.current_speed?.toFixed(1) ?? 0} km/h`
       const x = player.center.x * scaleX
-      const y = player.center.y * scaleY - camera.pixelSize(30)
+      const y = player.center.y * scaleY - 30
 
-      ctx.strokeText(label, x - camera.pixelSize(30), y)
-      ctx.fillText(label, x - camera.pixelSize(30), y)
+      ctx.strokeText(label, x - 30, y)
+      ctx.fillText(label, x - 30, y)
     }
 
     // Draw enabled angle overlays
@@ -1582,19 +1587,19 @@ function drawSkeleton(
         }
       }
 
-      // Torso lean — label near shoulder midpoint
+      // Torso lean — label near shoulder midpoint. Scales with zoom.
       if (enabledOverlays.value.has('torso_lean') && angles.torso_lean != null) {
         const ls = keypoints[KP.left_shoulder], rs = keypoints[KP.right_shoulder]
         if (ls?.x && ls?.y && rs?.x && rs?.y) {
           const mx = ((ls.x + rs.x) / 2) * scaleX
           const my = ((ls.y + rs.y) / 2) * scaleY
-          ctx.font = `bold ${camera.pixelSize(11)}px Inter, system-ui, sans-serif`
+          ctx.font = 'bold 11px Inter, system-ui, sans-serif'
           ctx.fillStyle = '#ffffff'
           ctx.strokeStyle = '#000000'
-          ctx.lineWidth = camera.pixelSize(2.5)
+          ctx.lineWidth = 2.5
           const lbl = `${Math.round(angles.torso_lean)}°`
-          ctx.strokeText(lbl, mx + camera.pixelSize(15), my)
-          ctx.fillText(lbl, mx + camera.pixelSize(15), my)
+          ctx.strokeText(lbl, mx + 15, my)
+          ctx.fillText(lbl, mx + 15, my)
         }
       }
 
