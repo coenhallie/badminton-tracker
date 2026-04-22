@@ -896,7 +896,7 @@ function drawShuttleTrail(
       ctx.moveTo(x1, y1)
       ctx.lineTo(x2, y2)
       ctx.strokeStyle = 'rgba(0,0,0,' + alpha.toFixed(2) + ')'
-      ctx.lineWidth = lineWidth + 3
+      ctx.lineWidth = camera.pixelSize(lineWidth + 3)
       ctx.lineCap = 'round'
       ctx.stroke()
     }
@@ -922,7 +922,7 @@ function drawShuttleTrail(
       ctx.moveTo(x1, y1)
       ctx.lineTo(x2, y2)
       ctx.strokeStyle = trailColor + Math.round(alpha * 255).toString(16).padStart(2, '0')
-      ctx.lineWidth = lineWidth
+      ctx.lineWidth = camera.pixelSize(lineWidth)
       ctx.lineCap = 'round'
       ctx.stroke()
     }
@@ -931,36 +931,37 @@ function drawShuttleTrail(
   // Current position — large glowing dot
   const cx = current.x * scaleX
   const cy = current.y * scaleY
+  const glowRadius = camera.pixelSize(20)
 
   // Soft outer glow
-  const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, 20)
+  const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowRadius)
   gradient.addColorStop(0, trailColor + '66')
   gradient.addColorStop(0.5, trailColor + '22')
   gradient.addColorStop(1, trailColor + '00')
   ctx.beginPath()
-  ctx.arc(cx, cy, 20, 0, Math.PI * 2)
+  ctx.arc(cx, cy, glowRadius, 0, Math.PI * 2)
   ctx.fillStyle = gradient
   ctx.fill()
 
   // Dark outline ring for contrast
   ctx.beginPath()
-  ctx.arc(cx, cy, 10, 0, Math.PI * 2)
+  ctx.arc(cx, cy, camera.pixelSize(10), 0, Math.PI * 2)
   ctx.strokeStyle = 'rgba(0,0,0,0.6)'
-  ctx.lineWidth = 4
+  ctx.lineWidth = camera.pixelSize(4)
   ctx.stroke()
 
   // Main dot
   ctx.beginPath()
-  ctx.arc(cx, cy, 9, 0, Math.PI * 2)
+  ctx.arc(cx, cy, camera.pixelSize(9), 0, Math.PI * 2)
   ctx.fillStyle = trailColor
   ctx.fill()
   ctx.strokeStyle = '#FFFFFF'
-  ctx.lineWidth = 2.5
+  ctx.lineWidth = camera.pixelSize(2.5)
   ctx.stroke()
 
   // Inner bright center
   ctx.beginPath()
-  ctx.arc(cx, cy, 4, 0, Math.PI * 2)
+  ctx.arc(cx, cy, camera.pixelSize(4), 0, Math.PI * 2)
   ctx.fillStyle = '#FFFFFF'
   ctx.fill()
 }
@@ -1260,22 +1261,22 @@ function drawBoundingBoxes(
 
     // Draw box
     ctx.strokeStyle = color
-    ctx.lineWidth = 2
+    ctx.lineWidth = camera.pixelSize(2)
     ctx.strokeRect(x, y, width, height)
 
     // Draw label background
-    ctx.font = 'bold 12px Inter, system-ui, sans-serif'
+    ctx.font = `bold ${camera.pixelSize(12)}px Inter, system-ui, sans-serif`
     const labelText = `${label}: ${(det.confidence * 100).toFixed(0)}%`
     const textMetrics = ctx.measureText(labelText)
-    const textHeight = 16
-    const padding = 4
+    const textHeight = camera.pixelSize(16)
+    const padding = camera.pixelSize(4)
 
     ctx.fillStyle = color
     ctx.fillRect(x, y - textHeight - padding, textMetrics.width + padding * 2, textHeight + padding)
 
     // Draw label text
     ctx.fillStyle = '#000000'
-    ctx.fillText(labelText, x + padding, y - padding - 2)
+    ctx.fillText(labelText, x + padding, y - padding - camera.pixelSize(2))
   }
 
   // Draw players - only if showPlayers is true. When player_id is
@@ -1740,6 +1741,9 @@ watch(() => props.showSkeleton, () => {
 // playing).
 watch([() => camera.scale.value, () => camera.tx.value, () => camera.ty.value], () => {
   if (!isPlaying.value) {
+    // Bypass drawOverlay's same-frame early-exit — the frame hasn't
+    // changed, but the transform has, so we need to re-render.
+    lastFrameNumber = -1
     drawOverlay()
   }
 })
