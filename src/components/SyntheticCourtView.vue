@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { calculateHomography, applyHomography } from '@/utils/homography'
 import { COURT_DIMENSIONS } from '@/types/analysis'
 import type { ExtendedCourtKeypoints } from '@/types/analysis'
@@ -12,7 +12,7 @@ const props = defineProps<{
   skeletonData?: Array<{ frame: number; shuttle_position?: { x: number; y: number; visible?: boolean } | null }>
   currentFrame?: number
   fps?: number
-  camera?: ViewportCamera
+  camera: ViewportCamera
 }>()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -110,42 +110,6 @@ function courtLineSegments(): Array<[[number, number], [number, number], 'normal
   ]
 }
 
-// Draw court lines to an offscreen canvas; re-created whenever homography changes.
-const offscreenCourt = ref<HTMLCanvasElement | null>(null)
-
-function buildOffscreenCourt() {
-  const H = metersToPixels.value
-  if (!H) { offscreenCourt.value = null; return }
-
-  const off = document.createElement('canvas')
-  off.width = props.videoWidth
-  off.height = props.videoHeight
-  const ctx = off.getContext('2d')
-  if (!ctx) return
-
-  ctx.fillStyle = '#0f1419'
-  ctx.fillRect(0, 0, off.width, off.height)
-
-  ctx.strokeStyle = '#f5f5f5'
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-
-  for (const [[x1, y1], [x2, y2], kind] of courtLineSegments()) {
-    const a = m2p(H, x1, y1)
-    const b = m2p(H, x2, y2)
-    if (!a || !b) continue
-    ctx.lineWidth = kind === 'net' ? 3 : 2
-    ctx.beginPath()
-    ctx.moveTo(a[0], a[1])
-    ctx.lineTo(b[0], b[1])
-    ctx.stroke()
-  }
-
-  drawNet(ctx, H)
-
-  offscreenCourt.value = off
-}
-
 // Render the net as a vertical rectangle standing on the ground net line.
 // Posts drawn at the taller 1.55m post height; top edge curves down to the
 // 1.524m center as a quadratic Bezier, matching a real taut net's sag.
@@ -195,13 +159,13 @@ function drawNet(ctx: CanvasRenderingContext2D, H: number[][]) {
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
-  ctx.lineWidth = 3
+  ctx.lineWidth = props.camera.pixelSize(3)
   ctx.beginPath()
   ctx.moveTo(tL[0], tL[1])
   ctx.quadraticCurveTo(ctrl[0], ctrl[1], tR[0], tR[1])
   ctx.stroke()
 
-  ctx.lineWidth = 2
+  ctx.lineWidth = props.camera.pixelSize(2)
   ctx.beginPath()
   ctx.moveTo(bL[0], bL[1])
   ctx.lineTo(tL[0], tL[1])
@@ -220,14 +184,29 @@ function render() {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
 
+  // Identity for clear + background fill, then apply camera.
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#0f1419'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  props.camera.applyToContext(ctx)
 
-  if (offscreenCourt.value) {
-    ctx.drawImage(offscreenCourt.value, 0, 0)
-  } else {
-    // Fallback: solid dark background when homography is unavailable.
-    ctx.fillStyle = '#0f1419'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
+  const H = metersToPixels.value
+  if (H) {
+    ctx.strokeStyle = '#f5f5f5'
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    for (const [[x1, y1], [x2, y2], kind] of courtLineSegments()) {
+      const a = m2p(H, x1, y1)
+      const b = m2p(H, x2, y2)
+      if (!a || !b) continue
+      ctx.lineWidth = props.camera.pixelSize(kind === 'net' ? 3 : 2)
+      ctx.beginPath()
+      ctx.moveTo(a[0], a[1])
+      ctx.lineTo(b[0], b[1])
+      ctx.stroke()
+    }
+    drawNet(ctx, H)
   }
 
   drawShuttle(ctx)
@@ -272,7 +251,7 @@ function drawShuttle(ctx: CanvasRenderingContext2D) {
     ctx.globalAlpha = alpha * 0.9
     ctx.fillStyle = '#ffffff'
     ctx.beginPath()
-    ctx.arc(x, y, 3, 0, Math.PI * 2)
+    ctx.arc(x, y, props.camera.pixelSize(3), 0, Math.PI * 2)
     ctx.fill()
   }
   ctx.globalAlpha = 1
@@ -280,10 +259,10 @@ function drawShuttle(ctx: CanvasRenderingContext2D) {
   // Current position: bright dot + glow.
   const head = pts[0]!
   ctx.shadowColor = '#ffffff'
-  ctx.shadowBlur = 12
+  ctx.shadowBlur = props.camera.pixelSize(12)
   ctx.fillStyle = '#ffffff'
   ctx.beginPath()
-  ctx.arc(head.x, head.y, 6, 0, Math.PI * 2)
+  ctx.arc(head.x, head.y, props.camera.pixelSize(6), 0, Math.PI * 2)
   ctx.fill()
   ctx.shadowBlur = 0
 }
@@ -295,17 +274,11 @@ function tick() {
 }
 
 onMounted(() => {
-  buildOffscreenCourt()
   rafId = requestAnimationFrame(tick)
 })
 
-watch([() => props.courtKeypoints, () => props.videoWidth, () => props.videoHeight], () => {
-  buildOffscreenCourt()
-}, { deep: true })
-
 onUnmounted(() => {
   if (rafId !== null) cancelAnimationFrame(rafId)
-  offscreenCourt.value = null
 })
 </script>
 
