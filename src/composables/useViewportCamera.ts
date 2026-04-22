@@ -53,12 +53,11 @@ export function useViewportCamera(options: ViewportCameraOptions = {}): Viewport
     // Equivalent: the world's [0,w] × [0,h] rect maps to screen [tx, tx + w*s] × [ty, ty + h*s].
     // Require at least MIN_VISIBLE * w (resp. h) of that rect to stay inside [0, w] (resp. [0, h]).
     const s = scale.value
-    const minOverlap = MIN_VISIBLE
-    const maxTx = w * (1 - minOverlap)
-    const minTx = w * minOverlap - w * s
+    const maxTx = w * (1 - MIN_VISIBLE)
+    const minTx = w * MIN_VISIBLE - w * s
     tx.value = Math.min(maxTx, Math.max(minTx, tx.value))
-    const maxTy = h * (1 - minOverlap)
-    const minTy = h * minOverlap - h * s
+    const maxTy = h * (1 - MIN_VISIBLE)
+    const minTy = h * MIN_VISIBLE - h * s
     ty.value = Math.min(maxTy, Math.max(minTy, ty.value))
   }
 
