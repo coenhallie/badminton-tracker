@@ -1718,6 +1718,11 @@ onUnmounted(() => {
   stopSkeletonAnimation()
   if (controlsTimeout) clearTimeout(controlsTimeout)
   detachZoomResizeObserver()
+  // Defensive: ensure window listeners attached during an in-flight
+  // pan drag are removed even if the component unmounts mid-drag.
+  window.removeEventListener('mousemove', onZoomMouseMove)
+  window.removeEventListener('mouseup', onZoomMouseUp)
+  isPanning = false
 })
 
 watch(() => props.showSkeleton, () => {
