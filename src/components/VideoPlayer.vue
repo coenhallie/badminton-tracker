@@ -7,6 +7,7 @@ import PoseOverlay from './PoseOverlay.vue'
 import ShotSummaryOverlay from './ShotSummaryOverlay.vue'
 import type { ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
 import SyntheticCourtView from './SyntheticCourtView.vue'
+import ViewportControls from '@/components/ViewportControls.vue'
 import { useVideoExport } from '@/composables/useVideoExport'
 import { useViewportCamera } from '@/composables/useViewportCamera'
 import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
@@ -1927,7 +1928,7 @@ defineExpose({
         @mousedown="onZoomMouseDown"
         @dblclick="onZoomDoubleClick"
       >
-        <!-- ViewportControls HUD mounts here in Task 5 -->
+        <ViewportControls :camera="camera" :capture-el="zoomCaptureRef" />
       </div>
       <PoseOverlay
         :skeleton-frame="currentSkeletonFrame"
