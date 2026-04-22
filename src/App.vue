@@ -29,35 +29,13 @@ const { isDark, toggleTheme } = useTheme()
 // App states: upload -> court-setup (new!) -> analyzing -> results
 type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
 
-// Restore session state if the page was reloaded (e.g., Mac sleep/tab discard)
-function loadSessionState(): { state: AppState; video: UploadResponse | null } {
-  try {
-    const saved = sessionStorage.getItem('badminton-session')
-    if (saved) {
-      const parsed = JSON.parse(saved)
-      if (parsed.state && parsed.video?.video_id) {
-        return { state: parsed.state as AppState, video: parsed.video }
-      }
-    }
-  } catch { /* ignore corrupt storage */ }
-  return { state: 'upload', video: null }
-}
-
-function saveSessionState(state: AppState, video: UploadResponse | null) {
-  try {
-    if (state === 'upload' || !video) {
-      sessionStorage.removeItem('badminton-session')
-    } else {
-      sessionStorage.setItem('badminton-session', JSON.stringify({ state, video }))
-    }
-  } catch { /* storage full or unavailable */ }
-}
-
-const restored = loadSessionState()
-const currentState = ref<AppState>(restored.state)
-const uploadedVideo = ref<UploadResponse | null>(restored.video)
-const analysisMode = ref<'rally_only' | 'full'>(restored.video?.analysisMode ?? 'full')
-const cameraAngle = ref<'overhead' | 'corner'>(restored.video?.cameraAngle ?? 'overhead')
+// Each browser session starts fresh: no persistence of prior video / state.
+// This guarantees the UI always reflects the video the user just uploaded
+// and the court keypoints they just confirmed — never a stale session.
+const currentState = ref<AppState>('upload')
+const uploadedVideo = ref<UploadResponse | null>(null)
+const analysisMode = ref<'rally_only' | 'full'>('full')
+const cameraAngle = ref<'overhead' | 'corner'>('overhead')
 const analysisResult = ref<AnalysisResult | null>(null)
 
 const errorMessage = ref('')
@@ -828,11 +806,6 @@ async function refreshHealthStatus() {
   await performHealthCheck()
 }
 
-// Persist session state on changes
-watch([currentState, uploadedVideo], ([state, video]) => {
-  saveSessionState(state, video)
-}, { deep: true })
-
 onMounted(async () => {
   // Initial health check
   await performHealthCheck()
@@ -843,21 +816,9 @@ onMounted(async () => {
   // Setup resize observer after mount
   setupResizeObserver()
 
-  // Handle restored session state after sleep/reload
-  if (currentState.value !== 'upload' && uploadedVideo.value) {
-    if (currentState.value === 'court-setup') {
-      // Court setup state is ephemeral — go to analyzing
-      currentState.value = 'analyzing'
-    }
-    if (currentState.value === 'results') {
-      // Results aren't persisted — the AnalysisProgress component
-      // needs to re-fetch them, so restart from analyzing
-      currentState.value = 'analyzing'
-    }
-  } else if (currentState.value !== 'upload') {
-    // No video data to resume — reset
-    currentState.value = 'upload'
-  }
+  // Remove any leftover session key from previous app versions that used
+  // sessionStorage to resume state. Harmless if the key isn't there.
+  try { sessionStorage.removeItem('badminton-session') } catch {}
 })
 
 onUnmounted(() => {
