@@ -67,4 +67,4 @@ runs/
 
 # Misc
 *.tsbuildinfo
-.cache
+.cache.claude/
