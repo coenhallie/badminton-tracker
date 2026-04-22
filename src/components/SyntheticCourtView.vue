@@ -259,7 +259,10 @@ function drawShuttle(ctx: CanvasRenderingContext2D) {
   // Current position: bright dot + glow.
   const head = pts[0]!
   ctx.shadowColor = '#ffffff'
-  ctx.shadowBlur = props.camera.pixelSize(12)
+  // shadowBlur is defined in screen pixels per the Canvas spec and is
+  // unaffected by the current transform, so it must NOT be divided by
+  // camera.scale — use the literal pixel value.
+  ctx.shadowBlur = 12
   ctx.fillStyle = '#ffffff'
   ctx.beginPath()
   ctx.arc(head.x, head.y, props.camera.pixelSize(6), 0, Math.PI * 2)
