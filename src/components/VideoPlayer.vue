@@ -320,10 +320,21 @@ const containerRef = ref<HTMLDivElement | null>(null)
 const camera = useViewportCamera()
 const zoomCaptureRef = ref<HTMLDivElement | null>(null)
 
-// Drag state for pan.
+// Follow-player state. null = free camera; 0 or 1 = lock onto that player_id
+// and re-center every frame. Click a player's skeleton to lock; grab-pan the
+// canvas to release.
+const followedPlayerId = ref<number | null>(null)
+
+// Drag vs click distinction: a mousedown+mouseup within CLICK_THRESHOLD_PX
+// is treated as a click (for follow hit-test); anything beyond that becomes
+// a pan drag and exits follow mode.
 let isPanning = false
+let didPanMove = false
+let panStartX = 0
+let panStartY = 0
 let lastPanX = 0
 let lastPanY = 0
+const CLICK_THRESHOLD_PX = 5
 
 function onZoomWheel(e: WheelEvent) {
   e.preventDefault()
@@ -337,6 +348,9 @@ function onZoomWheel(e: WheelEvent) {
 function onZoomMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
   isPanning = true
+  didPanMove = false
+  panStartX = e.clientX
+  panStartY = e.clientY
   lastPanX = e.clientX
   lastPanY = e.clientY
   window.addEventListener('mousemove', onZoomMouseMove)
@@ -347,21 +361,86 @@ function onZoomMouseMove(e: MouseEvent) {
   if (!isPanning) return
   const el = zoomCaptureRef.value
   if (!el) return
-  const dx = e.clientX - lastPanX
-  const dy = e.clientY - lastPanY
+
+  if (!didPanMove) {
+    const totalDx = e.clientX - panStartX
+    const totalDy = e.clientY - panStartY
+    if (Math.hypot(totalDx, totalDy) > CLICK_THRESHOLD_PX) {
+      didPanMove = true
+      // Deliberate pan movement — release follow-lock so the user's pan sticks.
+      followedPlayerId.value = null
+    }
+  }
+
+  if (didPanMove) {
+    const dx = e.clientX - lastPanX
+    const dy = e.clientY - lastPanY
+    camera.panBy(el, dx, dy)
+  }
   lastPanX = e.clientX
   lastPanY = e.clientY
-  camera.panBy(el, dx, dy)
 }
 
-function onZoomMouseUp() {
+function onZoomMouseUp(e: MouseEvent) {
+  const wasClick = isPanning && !didPanMove
   isPanning = false
   window.removeEventListener('mousemove', onZoomMouseMove)
   window.removeEventListener('mouseup', onZoomMouseUp)
+  if (wasClick) handleZoomCaptureClick(e)
 }
 
 function onZoomDoubleClick() {
   camera.reset()
+}
+
+// Click hit-test: find which player's keypoint bbox contains the click, and
+// lock the follow-camera onto them. Clicks on empty area do nothing (to
+// avoid stealing clicks away from ongoing follow sessions).
+function handleZoomCaptureClick(e: MouseEvent) {
+  const el = zoomCaptureRef.value
+  const canvas = canvasRef.value
+  const video = videoRef.value
+  if (!el || !canvas || !video) return
+
+  const rect = el.getBoundingClientRect()
+  const screenX = e.clientX - rect.left
+  const screenY = e.clientY - rect.top
+  const world = camera.screenToWorld(screenX, screenY)
+
+  // Convert world (canvas-pixel) coords back to video-pixel coords so we can
+  // hit-test against raw keypoint.x / keypoint.y values.
+  const vw = video.videoWidth || video.clientWidth || 1
+  const vh = video.videoHeight || video.clientHeight || 1
+  const sx = canvas.width / vw
+  const sy = canvas.height / vh
+  const videoX = world.x / sx
+  const videoY = world.y / sy
+
+  const frame = findInterpolatedFrame(video.currentTime ?? 0)
+  if (!frame?.players?.length) return
+
+  // Generous click target in video-pixel space — users rarely click a bone
+  // exactly, so extend the keypoint bbox by a padding margin.
+  const HIT_PAD = 40
+  for (const player of frame.players) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    let any = false
+    for (const k of player.keypoints ?? []) {
+      if (k == null || k.x == null || k.y == null) continue
+      if (k.confidence <= KEYPOINT_CONFIDENCE_THRESHOLD) continue
+      any = true
+      if (k.x < minX) minX = k.x
+      if (k.x > maxX) maxX = k.x
+      if (k.y < minY) minY = k.y
+      if (k.y > maxY) maxY = k.y
+    }
+    if (!any) continue
+    if (videoX >= minX - HIT_PAD && videoX <= maxX + HIT_PAD &&
+        videoY >= minY - HIT_PAD && videoY <= maxY + HIT_PAD) {
+      followedPlayerId.value = player.player_id
+      return
+    }
+  }
 }
 
 let zoomResizeObserver: ResizeObserver | null = null
@@ -1054,19 +1133,33 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   const ctx = cachedCtx
   if (!ctx) return
 
-  // Clear canvas under identity transform so we wipe the entire canvas
-  // regardless of the current pan/zoom state; otherwise clearRect only
-  // clears the transformed sub-region and leaves ghost frames.
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
-  camera.applyToContext(ctx)
-
   // Scale factors for canvas (pre-compute once)
   // BUGFIX: Use video dimensions for accurate scaling, fallback to 1 to prevent NaN
   const videoWidth = videoRef.value?.videoWidth || videoRef.value?.clientWidth || 1
   const videoHeight = videoRef.value?.videoHeight || videoRef.value?.clientHeight || 1
   const scaleX = canvasRef.value.width / videoWidth
   const scaleY = canvasRef.value.height / videoHeight
+
+  // Follow-player: update camera tx/ty so the locked player is centered
+  // BEFORE applying the transform below. Needs scaleX/Y to map the player's
+  // video-pixel center into canvas-pixel (world) space.
+  if (followedPlayerId.value !== null && frame && zoomCaptureRef.value) {
+    const target = frame.players.find(p => p.player_id === followedPlayerId.value)
+    if (target?.center) {
+      camera.centerAt(
+        zoomCaptureRef.value,
+        target.center.x * scaleX,
+        target.center.y * scaleY,
+      )
+    }
+  }
+
+  // Clear canvas under identity transform so we wipe the entire canvas
+  // regardless of the current pan/zoom state; otherwise clearRect only
+  // clears the transformed sub-region and leaves ghost frames.
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
+  camera.applyToContext(ctx)
 
   // NOTE: Court overlay drawing removed - automatic court detection disabled
   // Manual court keypoints are now the only method for court calibration
@@ -1754,6 +1847,16 @@ watch([() => camera.scale.value, () => camera.tx.value, () => camera.ty.value], 
   }
 })
 
+// Redraw immediately when the follow-target changes while paused so the
+// camera snaps onto the newly-selected player without waiting for the next
+// video frame.
+watch(followedPlayerId, () => {
+  if (!isPlaying.value) {
+    lastFrameNumber = -1
+    drawOverlay()
+  }
+})
+
 watch(() => props.showBoundingBoxes, () => {
   if (!isPlaying.value) {
     drawOverlay()
@@ -1933,7 +2036,11 @@ defineExpose({
         @mousedown="onZoomMouseDown"
         @dblclick="onZoomDoubleClick"
       >
-        <ViewportControls :camera="camera" :capture-el="zoomCaptureRef" />
+        <ViewportControls
+          :camera="camera"
+          :capture-el="zoomCaptureRef"
+          v-model:followed-pid="followedPlayerId"
+        />
       </div>
       <PoseOverlay
         :skeleton-frame="currentSkeletonFrame"

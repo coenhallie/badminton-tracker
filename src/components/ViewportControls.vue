@@ -4,6 +4,10 @@ import type { ViewportCamera } from '@/composables/useViewportCamera'
 
 const props = defineProps<{ camera: ViewportCamera; captureEl?: HTMLElement | null }>()
 
+// Two-way binding for the follow-player lock. null = free camera; 0 / 1
+// = track that player_id. Parent sets via v-model:followed-pid.
+const followedPid = defineModel<number | null>('followedPid', { default: null })
+
 const zoomPercent = computed(() => Math.round(props.camera.scale.value * 100))
 
 function stepZoom(factor: number, event: MouseEvent) {
@@ -21,6 +25,11 @@ function reset(event: MouseEvent) {
   event.stopPropagation()
   props.camera.reset()
 }
+
+function setFollow(pid: number | null, event: MouseEvent) {
+  event.stopPropagation()
+  followedPid.value = pid
+}
 </script>
 
 <template>
@@ -29,6 +38,28 @@ function reset(event: MouseEvent) {
     <span class="zoom-readout">{{ zoomPercent }}%</span>
     <button type="button" title="Zoom in" @click="stepZoom(1.5, $event)">+</button>
     <button type="button" title="Reset view" class="reset" @click="reset">⟲</button>
+    <span class="separator" aria-hidden="true"></span>
+    <button
+      type="button"
+      title="Free camera (click a player to follow them, or use these buttons)"
+      class="follow"
+      :class="{ active: followedPid === null }"
+      @click="setFollow(null, $event)"
+    >Free</button>
+    <button
+      type="button"
+      title="Follow Player 1"
+      class="follow"
+      :class="{ active: followedPid === 0 }"
+      @click="setFollow(0, $event)"
+    >P1</button>
+    <button
+      type="button"
+      title="Follow Player 2"
+      class="follow"
+      :class="{ active: followedPid === 1 }"
+      @click="setFollow(1, $event)"
+    >P2</button>
   </div>
 </template>
 
@@ -67,4 +98,23 @@ function reset(event: MouseEvent) {
   font-variant-numeric: tabular-nums;
 }
 .viewport-controls .reset { font-size: 12px; }
+.viewport-controls .separator {
+  width: 1px;
+  align-self: stretch;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 0 2px;
+}
+.viewport-controls .follow {
+  width: auto;
+  min-width: 32px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.viewport-controls .follow.active {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.45);
+  color: #ffffff;
+}
 </style>

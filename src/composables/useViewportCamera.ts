@@ -30,6 +30,9 @@ export interface ViewportCamera {
   worldToScreen(x: number, y: number): { x: number; y: number }
   /** Re-clamp pan against the current viewport size. Call after canvas resize. */
   reclamp(el: HTMLElement): void
+  /** Center the viewport on the given world-space point at the current scale.
+   *  Used by follow-player tracking to re-center each frame. */
+  centerAt(el: HTMLElement, worldX: number, worldY: number): void
 }
 
 export function useViewportCamera(options: ViewportCameraOptions = {}): ViewportCamera {
@@ -112,6 +115,17 @@ export function useViewportCamera(options: ViewportCameraOptions = {}): Viewport
     clampPan(el)
   }
 
+  function centerAt(el: HTMLElement, worldX: number, worldY: number): void {
+    const w = el.clientWidth
+    const h = el.clientHeight
+    if (w <= 0 || h <= 0) return
+    // Solve worldToScreen(worldX, worldY) = (w/2, h/2)
+    //   w/2 = worldX * scale + tx   →   tx = w/2 - worldX * scale
+    tx.value = w / 2 - worldX * scale.value
+    ty.value = h / 2 - worldY * scale.value
+    clampPan(el)
+  }
+
   return {
     scale: readonly(scale),
     tx: readonly(tx),
@@ -124,5 +138,6 @@ export function useViewportCamera(options: ViewportCameraOptions = {}): Viewport
     screenToWorld,
     worldToScreen,
     reclamp,
+    centerAt,
   }
 }
