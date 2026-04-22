@@ -8,6 +8,7 @@ import ShotSummaryOverlay from './ShotSummaryOverlay.vue'
 import type { ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
 import SyntheticCourtView from './SyntheticCourtView.vue'
 import { useVideoExport } from '@/composables/useVideoExport'
+import { useViewportCamera } from '@/composables/useViewportCamera'
 import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
 import { legStretchMeters } from '@/utils/bodyAngles'
 
@@ -314,6 +315,77 @@ const emit = defineEmits<{
 const videoRef = ref<HTMLVideoElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const containerRef = ref<HTMLDivElement | null>(null)
+
+const camera = useViewportCamera()
+const zoomCaptureRef = ref<HTMLDivElement | null>(null)
+
+// Drag state for pan.
+let isPanning = false
+let lastPanX = 0
+let lastPanY = 0
+
+function onZoomWheel(e: WheelEvent) {
+  e.preventDefault()
+  const el = zoomCaptureRef.value
+  if (!el) return
+  // Wheel up (deltaY < 0) = zoom in. One notch ≈ 1.15×.
+  const delta = e.deltaY < 0 ? 1.15 : 1 / 1.15
+  camera.zoomAt(el, e.clientX, e.clientY, delta)
+}
+
+function onZoomMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return
+  isPanning = true
+  lastPanX = e.clientX
+  lastPanY = e.clientY
+  window.addEventListener('mousemove', onZoomMouseMove)
+  window.addEventListener('mouseup', onZoomMouseUp)
+}
+
+function onZoomMouseMove(e: MouseEvent) {
+  if (!isPanning) return
+  const el = zoomCaptureRef.value
+  if (!el) return
+  const dx = e.clientX - lastPanX
+  const dy = e.clientY - lastPanY
+  lastPanX = e.clientX
+  lastPanY = e.clientY
+  camera.panBy(el, dx, dy)
+}
+
+function onZoomMouseUp() {
+  isPanning = false
+  window.removeEventListener('mousemove', onZoomMouseMove)
+  window.removeEventListener('mouseup', onZoomMouseUp)
+}
+
+function onZoomDoubleClick() {
+  camera.reset()
+}
+
+let zoomResizeObserver: ResizeObserver | null = null
+
+function attachZoomResizeObserver() {
+  const el = zoomCaptureRef.value
+  if (!el || zoomResizeObserver) return
+  zoomResizeObserver = new ResizeObserver(() => camera.reclamp(el))
+  zoomResizeObserver.observe(el)
+}
+
+function detachZoomResizeObserver() {
+  if (zoomResizeObserver) {
+    zoomResizeObserver.disconnect()
+    zoomResizeObserver = null
+  }
+}
+
+watch(zoomCaptureRef, (el) => {
+  if (el) {
+    attachZoomResizeObserver()
+  } else {
+    detachZoomResizeObserver()
+  }
+})
 
 const isPlaying = ref(false)
 const currentTime = ref(0)
@@ -1636,6 +1708,7 @@ onMounted(() => {
   document.addEventListener('fullscreenchange', handleFullscreenChange)
   document.addEventListener('keydown', handleKeydown)
   window.addEventListener('resize', handleResize)
+  attachZoomResizeObserver()
 })
 
 onUnmounted(() => {
@@ -1644,6 +1717,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   stopSkeletonAnimation()
   if (controlsTimeout) clearTimeout(controlsTimeout)
+  detachZoomResizeObserver()
 })
 
 watch(() => props.showSkeleton, () => {
@@ -1816,12 +1890,23 @@ defineExpose({
         :skeleton-data="skeletonData"
         :current-frame="currentFrame"
         :fps="videoFps"
+        :camera="camera"
       />
       <canvas
         v-if="(showSkeleton || showBoundingBoxes || showHeatmap) && skeletonData"
         ref="canvasRef"
         class="skeleton-canvas"
       />
+      <div
+        v-if="viewMode === 'court'"
+        ref="zoomCaptureRef"
+        class="zoom-capture"
+        @wheel="onZoomWheel"
+        @mousedown="onZoomMouseDown"
+        @dblclick="onZoomDoubleClick"
+      >
+        <!-- ViewportControls HUD mounts here in Task 5 -->
+      </div>
       <PoseOverlay
         :skeleton-frame="currentSkeletonFrame"
         :visible="showPoseOverlay ?? false"
@@ -2027,6 +2112,16 @@ video.video-dimmed {
      and bounding boxes remain visible in court mode. */
   z-index: 3;
 }
+
+.zoom-capture {
+  position: absolute;
+  inset: 0;
+  z-index: 5; /* above .skeleton-canvas (z=3) and synthetic court (z=2),
+                 below .play-overlay (z=25) */
+  cursor: grab;
+  touch-action: none; /* prevent default scroll on trackpad pinch */
+}
+.zoom-capture:active { cursor: grabbing; }
 
 .play-overlay {
   position: absolute;

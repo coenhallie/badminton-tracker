@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { calculateHomography, applyHomography } from '@/utils/homography'
 import { COURT_DIMENSIONS } from '@/types/analysis'
 import type { ExtendedCourtKeypoints } from '@/types/analysis'
+import type { ViewportCamera } from '@/composables/useViewportCamera'
 
 const props = defineProps<{
   courtKeypoints: ExtendedCourtKeypoints
@@ -11,6 +12,7 @@ const props = defineProps<{
   skeletonData?: Array<{ frame: number; shuttle_position?: { x: number; y: number; visible?: boolean } | null }>
   currentFrame?: number
   fps?: number
+  camera?: ViewportCamera
 }>()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
