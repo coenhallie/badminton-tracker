@@ -144,8 +144,6 @@ function nearestWristMeters(
 export interface DetectShuttleShotsOptions {
   /** Video frame rate (frames per second). Required for stride + gap math. */
   fps: number
-  /** Camera angle preset — used to resolve undefined threshold options. */
-  cameraAngle?: 'overhead' | 'corner'
   /** Forward homography (video pixels → court meters). Optional. */
   homography?: number[][] | null
   /** Minimum gap between consecutive shots in seconds. */
@@ -179,7 +177,7 @@ export interface DetectShuttleShotsOptions {
    * Stride subsampling control (seconds between kept samples).
    *   * number: always subsample with stride = max(3, round(fps * strideSec)).
    *   * 'auto': enable subsampling only when coverage > 50%, using the
-   *            camera-angle default stride (0.3s overhead / 0.5s corner).
+   *            overhead-camera default stride of 0.3s.
    *   * null/undefined: no subsampling.
    */
   strideSec?: number | 'auto' | null
@@ -192,19 +190,22 @@ interface ShuttlePoint {
   y: number
 }
 
-/** Resolve camera-angle defaults. Only fills values that are `undefined`. */
+/**
+ * Resolve overhead-camera defaults. Only fills values that are `undefined`.
+ * The app only supports an overhead camera centered above the court — these
+ * thresholds are tuned for that single viewpoint.
+ */
 function resolveShuttleDefaults(opts: DetectShuttleShotsOptions): {
   minShotGapSec: number
   minSpeedSq: number
   cosAngleMax: number
   autoStrideSec: number
 } {
-  const isCorner = opts.cameraAngle === 'corner'
   return {
-    minShotGapSec: opts.minShotGapSec ?? (isCorner ? 0.8 : 0.6),
-    minSpeedSq: opts.minSpeedSq ?? (isCorner ? 900 : 225),
-    cosAngleMax: opts.cosAngleMax ?? (isCorner ? -0.25 : 0),
-    autoStrideSec: isCorner ? 0.5 : 0.3,
+    minShotGapSec: opts.minShotGapSec ?? 0.6,
+    minSpeedSq: opts.minSpeedSq ?? 225,
+    cosAngleMax: opts.cosAngleMax ?? 0,
+    autoStrideSec: 0.3,
   }
 }
 
@@ -236,7 +237,7 @@ function filterOutliers(points: ShuttlePoint[]): ShuttlePoint[] {
  * Implements, in order:
  *   1. Collect visible shuttle positions.
  *   2. Optional outlier rejection (default on).
- *   3. Resolve camera-angle defaults for undefined options.
+ *   3. Resolve overhead-camera defaults for undefined options.
  *   4. Optional stride subsampling ('auto' gates on >50% coverage).
  *   5. For each triple (p0, p1, p2):
  *        - skip when both per-step speeds are below `minSpeedSq`.

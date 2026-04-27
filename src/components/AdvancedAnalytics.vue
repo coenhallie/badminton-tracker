@@ -13,7 +13,6 @@ const props = defineProps<{
   result: AnalysisResult
   currentFrame: number
   courtKeypoints?: number[][] | null
-  cameraAngle?: 'overhead' | 'corner'
 }>()
 
 const emit = defineEmits<{
@@ -32,7 +31,6 @@ const {
   computed(() => props.result),
   computed(() => props.currentFrame),
   computed(() => props.courtKeypoints ?? null),
-  computed(() => props.cameraAngle ?? 'overhead'),
 )
 
 type Tab = 'rallies' | 'shots' | 'movement'

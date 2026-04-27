@@ -1,5 +1,7 @@
 # OC-SORT A/B Testing Implementation Plan
 
+> **Status: obsolete** — the feature described here was removed in v1.9. Kept as a historical design record; do not implement or reference.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add per-video tracker toggle (BoT-SORT vs OC-SORT) so users can A/B test player tracking quality.

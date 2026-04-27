@@ -1,5 +1,7 @@
 # Camera Angle Rally Detection Presets
 
+> **Status: obsolete** — the feature described here was removed in v1.9. Kept as a historical design record; do not implement or reference.
+
 **Date**: 2026-04-09
 **Status**: Approved
 

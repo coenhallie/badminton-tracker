@@ -116,13 +116,6 @@ export interface CourtRegion {
   confidence: number
 }
 
-export interface CourtDetectionStatus {
-  enabled: boolean
-  model_id: string
-  api_url: string
-  court_dimensions: CourtDimensions
-}
-
 export interface CourtPosition {
   x: number | null
   y: number | null
@@ -234,49 +227,6 @@ export interface SkeletonFrame {
 // Shot type classification
 export type ShotType = 'smash' | 'clear' | 'drop' | 'drive' | 'net_shot' | 'lob' | 'serve' | 'unknown'
 
-// Shuttle trajectory position
-export interface ShuttleTrajectoryPosition {
-  frame: number
-  pixel: { x: number; y: number }
-  court: { x: number | null; y: number | null } | null
-  confidence: number
-}
-
-// Single shuttle trajectory (one shot)
-export interface ShuttleTrajectory {
-  id: number
-  shot_type: ShotType
-  peak_speed_kmh: number
-  avg_speed_kmh: number
-  distance_m: number
-  direction_angle: number
-  positions: ShuttleTrajectoryPosition[]
-}
-
-// Shot type counts
-export interface ShotTypeCounts {
-  smash: number
-  clear: number
-  drop: number
-  drive: number
-  net_shot: number
-}
-
-// Speed statistics
-export interface SpeedStats {
-  fastest_shot_kmh: number
-  avg_shot_speed_kmh: number
-  all_shot_speeds: number[]
-}
-
-// Enhanced shuttle analytics
-export interface ShuttleAnalytics {
-  total_shots: number
-  shot_types: ShotTypeCounts
-  speed_stats: SpeedStats
-  trajectories: ShuttleTrajectory[]
-}
-
 // Player zone coverage
 export interface ZoneCoverage {
   front: number  // percentage
@@ -310,16 +260,6 @@ export interface BackendRally {
   duration_seconds: number
 }
 
-export interface RallyStats {
-  total_rallies: number
-  total_rally_time_s: number
-  total_idle_time_s: number
-  rally_percentage: number
-  avg_rally_duration_s: number
-  min_rally_duration_s: number
-  max_rally_duration_s: number
-}
-
 export interface AnalysisResult {
   video_id: string
   duration: number // seconds
@@ -330,11 +270,8 @@ export interface AnalysisResult {
   shuttle: ShuttleMetrics | null
   skeleton_data: SkeletonFrame[]
   court_detection: CourtDetection | null
-  shuttle_analytics?: ShuttleAnalytics | null
   player_zone_analytics?: PlayersZoneAnalytics | null
   rallies?: BackendRally[] | null
-  rally_stats?: RallyStats | null
-  camera_angle?: 'overhead' | 'corner'
 }
 
 export interface UploadResponse {
@@ -342,8 +279,6 @@ export interface UploadResponse {
   filename: string
   size: number
   status: string
-  analysisMode: 'rally_only' | 'full'
-  cameraAngle?: 'overhead' | 'corner'
 }
 
 export interface AnalyzeResponse {

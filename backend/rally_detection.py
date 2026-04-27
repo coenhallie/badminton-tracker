@@ -49,7 +49,6 @@ def detect_rallies(
     zero_gradient_ratio: float = 0.80,
     frame_width: int = 0,
     frame_height: int = 0,
-    camera_angle: str = "overhead",
 ) -> List[Dict]:
     """
     Detect rally boundaries from shuttle tracking data.
@@ -71,22 +70,13 @@ def detect_rallies(
     if not shuttle_positions or fps <= 0:
         return []
 
-    # Camera-angle presets: corner angles produce more TrackNet jitter,
-    # requiring stricter thresholds to avoid false rallies.
-    if camera_angle == "corner":
-        min_rally_duration_s = max(min_rally_duration_s, 1.2)
-        min_gap_duration_s = max(min_gap_duration_s, 4.0)
-        min_shot_gap_s = 0.8
-        min_speed_sq = 30.0 * 30.0  # 900 — reject jitter
-        min_shots = 2
-        dot_threshold = -0.25  # cos(~105deg), reject slight wobbles
-        stride_s = 0.5  # longer stride smooths noise
-    else:
-        min_shot_gap_s = 0.6
-        min_speed_sq = 15.0 * 15.0  # 225
-        min_shots = 2
-        dot_threshold = 0.0  # any reversal (>90deg)
-        stride_s = 0.3
+    # Overhead-camera thresholds. The app only supports an overhead camera
+    # centered above the court, which produces stable TrackNet trajectories.
+    min_shot_gap_s = 0.6
+    min_speed_sq = 15.0 * 15.0  # 225
+    min_shots = 2
+    dot_threshold = 0.0  # any reversal (>90deg)
+    stride_s = 0.3
 
     min_shot_gap_frames = max(3, int(fps * min_shot_gap_s))
 
@@ -247,40 +237,3 @@ def _group_shots_into_rallies(
             rally_start_idx = i
 
     return rallies
-
-
-def compute_rally_stats(
-    rallies: List[Dict],
-    shuttle_positions: Dict[int, Dict],
-    fps: float,
-) -> Dict:
-    """Compute summary statistics from detected rallies."""
-    if not rallies:
-        return {
-            "total_rallies": 0,
-            "total_rally_time_s": 0,
-            "total_idle_time_s": 0,
-            "rally_percentage": 0,
-            "avg_rally_duration_s": 0,
-            "min_rally_duration_s": 0,
-            "max_rally_duration_s": 0,
-        }
-
-    durations = [r["duration_seconds"] for r in rallies]
-    total_rally_time = sum(durations)
-
-    first_start = rallies[0]["start_timestamp"]
-    last_end = rallies[-1]["end_timestamp"]
-    total_time = last_end - first_start if last_end > first_start else 0
-
-    return {
-        "total_rallies": len(rallies),
-        "total_rally_time_s": round(total_rally_time, 1),
-        "total_idle_time_s": round(max(0, total_time - total_rally_time), 1),
-        "rally_percentage": round(
-            100 * total_rally_time / total_time if total_time > 0 else 0, 1
-        ),
-        "avg_rally_duration_s": round(total_rally_time / len(rallies), 1),
-        "min_rally_duration_s": round(min(durations), 1),
-        "max_rally_duration_s": round(max(durations), 1),
-    }

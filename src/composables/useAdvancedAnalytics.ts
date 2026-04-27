@@ -73,7 +73,6 @@ export function useAdvancedAnalytics(
   analysisResult: Ref<AnalysisResult | null>,
   currentFrame: Ref<number>,
   courtKeypoints?: Ref<number[][] | null>,
-  cameraAngle?: Ref<'overhead' | 'corner'>
 ) {
   const isComputing = ref(false)
 
@@ -112,12 +111,9 @@ export function useAdvancedAnalytics(
    * classification when shuttle data is too sparse, then merges.
    */
   function detectAllShots(frames: SkeletonFrame[], fps: number): RallyShot[] {
-    const camera = cameraAngle?.value === 'corner' ? 'corner' : 'overhead'
-
     // Primary: shared shuttle trajectory detector.
     const shuttleShots = detectShuttleShots(frames, {
       fps,
-      cameraAngle: camera,
       wristProximityMeters: null,
       minAccelMagPx: null,
       rejectOutliers: true,
@@ -133,12 +129,12 @@ export function useAdvancedAnalytics(
       fps,
       hittingClasses: HITTING_POSES,
       minConfidence: 0.65,
-      minShotGapSec: camera === 'corner' ? 0.8 : 0.6,
+      minShotGapSec: 0.6,
       perPlayerGapSec: 0.8,
     })
 
     // Merge shuttle + pose, preferring shuttle
-    const minGapFrames = Math.max(3, Math.floor(fps * (camera === 'corner' ? 0.8 : 0.6)))
+    const minGapFrames = Math.max(3, Math.floor(fps * 0.6))
     const merged = mergeShots([...shuttleShots, ...poseShots], minGapFrames)
     return merged.map(toRallyShot)
   }
@@ -166,13 +162,11 @@ export function useAdvancedAnalytics(
     const frames = result.skeleton_data
     const fps = result.fps || 30
     const shots = detectAllShots(frames, fps)
-    const isCorner = cameraAngle?.value === 'corner'
-    // Align with backend (min_shots = 2) — accept 2-shot rallies (serve+return)
-    // regardless of camera angle.
+    // Align with backend (min_shots = 2) — accept 2-shot rallies (serve+return).
     const MIN_SHOTS = 2
     if (shots.length < MIN_SHOTS) return []
 
-    const RALLY_GAP_SECONDS = isCorner ? 4.0 : 3.1
+    const RALLY_GAP_SECONDS = 3.1
 
     // Replay/close-up rejection: use shuttle-data coverage instead of
     // "both players visible". Pose detection frequently drops the far
@@ -199,9 +193,9 @@ export function useAdvancedAnalytics(
       if (gap > RALLY_GAP_SECONDS || i === shots.length - 1) {
         const rallyShots = shots.slice(rallyStart, i === shots.length - 1 ? i + 1 : i)
         // A serve + return is a legitimate 2-shot rally lasting ~1.3s; the
-        // previous 2.0s/3.0s minimums silently dropped them. 0.8s overhead /
-        // 1.2s corner keeps those while still rejecting single-shot flukes.
-        const MIN_RALLY_DURATION_S = isCorner ? 1.2 : 0.8
+        // previous 2.0s/3.0s minimums silently dropped them. 0.8s keeps
+        // those while still rejecting single-shot flukes.
+        const MIN_RALLY_DURATION_S = 0.8
         if (rallyShots.length >= MIN_SHOTS) {
           const first = rallyShots[0]!
           const last = rallyShots[rallyShots.length - 1]!

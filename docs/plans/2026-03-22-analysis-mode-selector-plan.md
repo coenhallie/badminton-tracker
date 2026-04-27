@@ -1,5 +1,7 @@
 # Analysis Mode Selector — Implementation Plan
 
+> **Status: obsolete** — the feature described here was removed in v1.9. Kept as a historical design record; do not implement or reference.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add a mode selector so users can choose between fast rally-only analysis and full analytics.

@@ -18,7 +18,7 @@ import { computeHomographyFromKeypoints } from '@/utils/homography'
 import {
   checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl,
   triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
-  getRecalculatedZoneAnalytics, setCurrentVideoId
+  setCurrentVideoId
 } from '@/services/api'
 import type { HealthCheckResponse } from '@/services/api'
 import type { UploadResponse, AnalysisResult, SkeletonFrame, ExtendedCourtKeypoints } from '@/types/analysis'
@@ -34,8 +34,6 @@ type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
 // and the court keypoints they just confirmed — never a stale session.
 const currentState = ref<AppState>('upload')
 const uploadedVideo = ref<UploadResponse | null>(null)
-const analysisMode = ref<'rally_only' | 'full'>('full')
-const cameraAngle = ref<'overhead' | 'corner'>('overhead')
 const analysisResult = ref<AnalysisResult | null>(null)
 
 const errorMessage = ref('')
@@ -117,8 +115,6 @@ let shotPauseTimer: ReturnType<typeof setInterval> | null = null
 const { rallies: detectedRallies, backendRallies, rallySource, rallySpeedStats } = useAdvancedAnalytics(
   computed(() => analysisResult.value),
   currentFrame,
-  undefined,
-  cameraAngle,
 )
 
 // Selected rally for per-rally heatmap filtering
@@ -364,7 +360,7 @@ watch(currentVideoTime, (time) => {
   for (let i = 0; i < detectedRallies.value.length; i++) {
     const rally = detectedRallies.value[i]
     const next = detectedRallies.value[i + 1]
-    if (!next) continue // don't pause after the last rally
+    if (!rally || !next) continue // guard against sparse arrays; skip last rally
 
     const endTime = rally.endTimestamp
     if (time >= endTime && time < endTime + 1.0 && endTime > lastTriggeredRallyEnd.value) {
@@ -676,10 +672,7 @@ async function loadVideoUrl(videoId: string) {
 
 function handleUploadComplete(response: UploadResponse) {
   uploadedVideo.value = response
-  analysisMode.value = response.analysisMode
-  cameraAngle.value = response.cameraAngle ?? 'overhead'
-  // Skip court setup for rally-only mode (no player analysis needs it)
-  currentState.value = response.analysisMode === 'rally_only' ? 'analyzing' : 'court-setup'
+  currentState.value = 'court-setup'
   errorMessage.value = ''
 }
 
@@ -709,9 +702,6 @@ function handleCourtSetupError(message: string) {
 
 async function handleAnalysisComplete(result: AnalysisResult) {
   analysisResult.value = result
-  if (result.camera_angle) {
-    cameraAngle.value = result.camera_angle
-  }
   currentState.value = 'results'
   
   // Set the current video ID for keypoints operations
@@ -849,7 +839,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.8
+            alpha v1.9
           </button>
         </div>
 
@@ -897,6 +887,25 @@ watch(videoSectionRef, () => {
             </button>
           </div>
           <div class="changelog-content">
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.9-alpha</span>
+                <span class="version-date">April 23, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - New pan &amp; zoom viewport for the synthetic court: scroll to zoom, drag to pan, double-click or ⟲ to reset. HUD shows the zoom % with Free / P1 / P2 buttons to switch tracking targets instantly</li>
+                <li> - Click-to-follow: clicking a player's bounding box or skeleton locks the camera onto them — it re-centers every frame as they move. Pan anywhere to release the lock</li>
+                <li> - Skeleton overlay, bounding boxes, angle labels and the synthetic court now share one camera transform so everything stays pixel-aligned at any zoom level</li>
+                <li> - Camera zoom / pan now clears automatically when you toggle back to the real-video view, so the skeleton overlay always re-aligns 1:1 with the footage</li>
+                <li> - Arrow keys (← / →) now step one frame at a time (auto-pausing) for frame-accurate review. The ±10s skip buttons are still there for coarse navigation</li>
+                <li> - Consolidated player tracking to a single BoT-SORT tracker tuned for badminton: our A/B showed ~19× fewer ID swaps vs the alternative on a 20-minute match. Removed the user-facing tracker toggle</li>
+                <li> - Removed the Corner / Side camera option from the upload flow — the app now always assumes an overhead camera centered above the court, which matches every supported video and trims a lot of unused code paths</li>
+                <li> - Fixed: click-to-follow no longer gets swallowed by the paused-video overlay; hit-testing also uses the full detection bounding box (not just keypoints) so clicks anywhere on the visible player register reliably</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
             <div class="changelog-entry">
               <div class="changelog-version">
                 <span class="version-tag">v1.8-alpha</span>
@@ -1325,7 +1334,6 @@ watch(videoSectionRef, () => {
           <AnalysisProgress
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
-            :analysis-mode="analysisMode"
             @complete="handleAnalysisComplete"
             @error="handleAnalysisError"
             @cancel="handleAnalysisCancel"
@@ -1344,7 +1352,7 @@ watch(videoSectionRef, () => {
               New Analysis
             </button>
 
-            <div v-if="analysisMode !== 'rally_only'" class="results-header-right">
+            <div class="results-header-right">
               <!-- Export Video Button -->
               <button
                 class="export-btn"
@@ -1585,18 +1593,18 @@ watch(videoSectionRef, () => {
                 <VideoPlayer
                   ref="videoPlayerRef"
                   :video-url="videoUrl"
-                  :skeleton-data="analysisMode !== 'rally_only' ? analysisResult.skeleton_data : []"
+                  :skeleton-data="analysisResult.skeleton_data"
 
-                  :show-skeleton="analysisMode !== 'rally_only' && showSkeleton"
-                  :show-bounding-boxes="analysisMode !== 'rally_only' && showBoundingBoxes"
-                  :show-players="analysisMode !== 'rally_only' && showPlayers"
-                  :show-shuttles="analysisMode !== 'rally_only' && showShuttleTracking"
-                  :show-rackets="analysisMode !== 'rally_only' && showRackets"
-                  :show-pose-overlay="analysisMode !== 'rally_only' && showPoseOverlay"
+                  :show-skeleton="showSkeleton"
+                  :show-bounding-boxes="showBoundingBoxes"
+                  :show-players="showPlayers"
+                  :show-shuttles="showShuttleTracking"
+                  :show-rackets="showRackets"
+                  :show-pose-overlay="showPoseOverlay"
                   :pose-source="poseSource"
-                  :show-heatmap="analysisMode !== 'rally_only' && showHeatmap"
+                  :show-heatmap="showHeatmap"
                   :heatmap-frame-range="heatmapFrameRange"
-                  :show-shuttle-tracking="analysisMode !== 'rally_only' && showShuttleTracking"
+                  :show-shuttle-tracking="showShuttleTracking"
                   :court-keypoints="courtCornersForMiniCourt"
                   :view-mode="viewMode"
                   :manual-court-keypoints="manualCourtKeypoints"
@@ -1611,7 +1619,7 @@ watch(videoSectionRef, () => {
 
               <!-- Mini Court Panel (hidden in rally-only mode) -->
               <Transition name="slide-fade">
-                <div v-if="analysisMode !== 'rally_only' && showMiniCourt" class="minicourt-section">
+                <div v-if="showMiniCourt" class="minicourt-section">
                   <MiniCourt
                     :court-corners="courtCornersForMiniCourt"
                     :players="videoPlaybackStarted ? currentPlayers : []"
@@ -1656,7 +1664,7 @@ watch(videoSectionRef, () => {
 
             <!-- Speed Graph Panel (hidden in rally-only mode) -->
             <Transition name="slide-fade">
-              <div v-if="analysisMode !== 'rally_only' && showSpeedGraph && analysisResult" class="speedgraph-section">
+              <div v-if="showSpeedGraph && analysisResult" class="speedgraph-section">
                 <SpeedGraph
                   :skeleton-data="analysisResult.skeleton_data"
                   :fps="analysisResult.fps"
@@ -1673,7 +1681,7 @@ watch(videoSectionRef, () => {
 
             <!-- Shot Speed Analysis Panel (hidden in rally-only mode) -->
             <Transition name="slide-fade">
-              <div v-if="analysisMode !== 'rally_only' && showShotSpeedList && analysisResult" class="shotspeed-section">
+              <div v-if="showShotSpeedList && analysisResult" class="shotspeed-section">
                 <ShotSpeedList
                   :skeleton-data="analysisResult.skeleton_data"
                   :fps="analysisResult.fps"
@@ -1686,7 +1694,7 @@ watch(videoSectionRef, () => {
               </div>
             </Transition>
 
-            <div v-if="analysisMode !== 'rally_only'" class="dashboard-section">
+            <div class="dashboard-section">
               <ResultsDashboard
                 :result="analysisResult"
                 :manual-keypoints-set="manualCourtKeypoints !== null"
@@ -1694,12 +1702,11 @@ watch(videoSectionRef, () => {
               />
             </div>
 
-            <div v-if="analysisMode !== 'rally_only'" class="dashboard-section">
+            <div class="dashboard-section">
               <AdvancedAnalytics
                 :result="analysisResult"
                 :current-frame="currentFrame"
                 :court-keypoints="courtCornersForMiniCourt"
-                :camera-angle="cameraAngle"
                 @seek-to-time="handleRallySeek"
               />
             </div>

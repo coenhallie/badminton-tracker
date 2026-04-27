@@ -1,5 +1,7 @@
 # Camera Angle Rally Detection Presets — Implementation Plan
 
+> **Status: obsolete** — the feature described here was removed in v1.9. Kept as a historical design record; do not implement or reference.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add a camera position selector ("Overhead" / "Corner / Side") that tunes rally detection parameters on both backend and client-side to reduce false rallies from corner-angle amateur footage.

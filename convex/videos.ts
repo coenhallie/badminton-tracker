@@ -92,9 +92,6 @@ export const createVideo = mutation({
     storageId: v.id("_storage"),
     filename: v.string(),
     size: v.number(),
-    analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
-    cameraAngle: v.optional(v.union(v.literal("overhead"), v.literal("corner"))),
-    trackerType: v.optional(v.union(v.literal("botsort"), v.literal("ocsort"))),
   },
   handler: async (ctx, args) => {
     const videoId = await ctx.db.insert("videos", {
@@ -102,9 +99,6 @@ export const createVideo = mutation({
       filename: args.filename,
       size: args.size,
       status: "uploaded",
-      analysisMode: args.analysisMode ?? "full",
-      cameraAngle: args.cameraAngle ?? "overhead",
-      trackerType: args.trackerType ?? "botsort",
       createdAt: Date.now(),
     })
     
@@ -173,6 +167,7 @@ export const updateResults = mutation({
       processed_frames: v.number(),
       player_count: v.optional(v.number()),
       has_court_detection: v.optional(v.boolean()),
+      // Backwards-compat shim for v1.8-era records; see schema.ts.
       has_shuttle_analytics: v.optional(v.boolean()),
       has_rally_detection: v.optional(v.boolean()),
       rally_count: v.optional(v.number()),
@@ -498,11 +493,6 @@ export const processVideo = action({
       throw new Error("Failed to get video URL")
     }
     
-    // Get analysis mode (default to "full" for backwards compatibility)
-    const analysisMode = video.analysisMode ?? "full"
-    const cameraAngle = video.cameraAngle ?? "overhead"
-    const trackerType = video.trackerType ?? "botsort"
-
     // Get manual court keypoints if available (for ROI filtering)
     const keypointsData = await ctx.runQuery(api.videos.getManualCourtKeypoints, { videoId })
     
@@ -574,9 +564,6 @@ export const processVideo = action({
           callbackUrl: convexSiteUrl,
           // Pass manual keypoints for court ROI filtering
           manualCourtKeypoints: hasCourtKeypoints ? keypointsData.keypoints : null,
-          analysisMode,
-          cameraAngle,
-          trackerType,
         }),
       })
 

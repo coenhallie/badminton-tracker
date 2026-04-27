@@ -125,21 +125,25 @@ export function useVideoExport({
     video.addEventListener('ended', onEnded, { once: true })
 
     function requestCompositeFrame() {
-      if (cancelled) return
+      if (cancelled || !video) return
 
-      // Use requestVideoFrameCallback if available for frame-accurate compositing
-      if ('requestVideoFrameCallback' in video) {
-        (video as HTMLVideoElement & { requestVideoFrameCallback(cb: (now: number, metadata: { mediaTime: number }) => void): number })
-          .requestVideoFrameCallback((_now, metadata) => {
-            if (cancelled) return
-            compositeFrame(metadata.mediaTime)
-            requestCompositeFrame()
-          })
+      // Prefer requestVideoFrameCallback for frame-accurate compositing.
+      // Guarded via runtime lookup so older browsers fall back to rAF —
+      // lib.dom's type declares rVFC as always-present, which would
+      // otherwise make TS narrow the else branch to never.
+      const rvfc = (video as HTMLVideoElement).requestVideoFrameCallback?.bind(video)
+      if (rvfc) {
+        rvfc((_now, metadata) => {
+          if (cancelled) return
+          compositeFrame(metadata.mediaTime)
+          requestCompositeFrame()
+        })
       } else {
         // Fallback: use requestAnimationFrame
+        const v = video
         requestAnimationFrame(() => {
           if (cancelled) return
-          compositeFrame(video.currentTime)
+          compositeFrame(v.currentTime)
           requestCompositeFrame()
         })
       }

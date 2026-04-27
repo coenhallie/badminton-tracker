@@ -7,13 +7,6 @@ export default defineSchema({
     storageId: v.id("_storage"),
     filename: v.string(),
     size: v.number(),
-    
-    // Analysis mode
-    analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
-    // Camera position (affects rally detection parameters)
-    cameraAngle: v.optional(v.union(v.literal("overhead"), v.literal("corner"))),
-    // Tracker algorithm for player tracking (A/B testing)
-    trackerType: v.optional(v.union(v.literal("botsort"), v.literal("ocsort"))),
 
     // Processing status
     status: v.union(
@@ -35,6 +28,8 @@ export default defineSchema({
       processed_frames: v.number(),
       player_count: v.optional(v.number()),
       has_court_detection: v.optional(v.boolean()),
+      // Backwards-compat shim: v1.8 and earlier wrote this field. Kept as
+      // optional so existing records validate; never written by new runs.
       has_shuttle_analytics: v.optional(v.boolean()),
       has_rally_detection: v.optional(v.boolean()),
       rally_count: v.optional(v.number()),

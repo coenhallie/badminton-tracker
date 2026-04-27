@@ -892,7 +892,6 @@ export interface PDFExportWithDataConfig {
     court_dimensions?: { width_meters: number; length_meters: number }
     court_corners?: number[][] | null
   } | null
-  shuttle_analytics?: Record<string, unknown> | null
   player_zone_analytics?: Record<string, unknown> | null
 }
 
@@ -916,7 +915,6 @@ export interface PDFExportPreview {
       max_speed_kmh: number
     }
     shuttle_data_available: boolean
-    shuttle_analytics_available: boolean
     court_detected: boolean
     zone_analytics_available: boolean
     skeleton_frames_available: boolean
@@ -1167,7 +1165,6 @@ export async function exportPDFWithFrontendData(
             players: data.players,
             shuttle: data.shuttle,
             court_detection: data.court_detection,
-            shuttle_analytics: data.shuttle_analytics,
             player_zone_analytics: data.player_zone_analytics,
           }
         }

@@ -86,7 +86,6 @@ async function handleExportPDF() {
         court_dimensions: props.result.court_detection.court_dimensions,
         court_corners: props.result.court_detection.court_corners ?? undefined
       } : null,
-      shuttle_analytics: props.result.shuttle_analytics as Record<string, unknown> | null ?? null,
       player_zone_analytics: props.result.player_zone_analytics as Record<string, unknown> | null ?? null
     })
   } catch (error) {

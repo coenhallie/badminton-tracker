@@ -69,7 +69,6 @@ export function detectShots(
   if (shuttleFrameCount >= 5) {
     const shots = detectShuttleShots(frames, {
       fps,
-      cameraAngle: 'overhead',
       homography,
       rejectOutliers: true,
       strideSec: 'auto',

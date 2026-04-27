@@ -393,14 +393,16 @@ function onZoomDoubleClick() {
   camera.reset()
 }
 
-// Click hit-test: find which player's keypoint bbox contains the click, and
-// lock the follow-camera onto them. Clicks on empty area do nothing (to
-// avoid stealing clicks away from ongoing follow sessions).
+// Click hit-test: find which player the click lands on and lock the
+// follow-camera onto them. Prefers the tracker's detection bbox (what the
+// user sees when showBoundingBoxes is on), then falls back to the
+// keypoint bbox (for when boxes are hidden and the user clicks a bone).
+// Clicks on empty area do nothing (to avoid stealing clicks away from
+// ongoing follow sessions).
 function handleZoomCaptureClick(e: MouseEvent) {
   const el = zoomCaptureRef.value
-  const canvas = canvasRef.value
   const video = videoRef.value
-  if (!el || !canvas || !video) return
+  if (!el || !video) return
 
   const rect = el.getBoundingClientRect()
   const screenX = e.clientX - rect.left
@@ -408,21 +410,43 @@ function handleZoomCaptureClick(e: MouseEvent) {
   const world = camera.screenToWorld(screenX, screenY)
 
   // Convert world (canvas-pixel) coords back to video-pixel coords so we can
-  // hit-test against raw keypoint.x / keypoint.y values.
+  // hit-test against raw detection / keypoint coordinates. The canvas-pixel
+  // grid matches the video-pixel grid after resizeCanvas(), so sx/sy are
+  // ≈ 1; we still compute them defensively in case resizeCanvas hasn't run.
   const vw = video.videoWidth || video.clientWidth || 1
   const vh = video.videoHeight || video.clientHeight || 1
-  const sx = canvas.width / vw
-  const sy = canvas.height / vh
+  const canvasW = canvasRef.value?.width || vw
+  const canvasH = canvasRef.value?.height || vh
+  const sx = canvasW / vw
+  const sy = canvasH / vh
   const videoX = world.x / sx
   const videoY = world.y / sy
 
   const frame = findInterpolatedFrame(video.currentTime ?? 0)
-  if (!frame?.players?.length) return
+  if (!frame) return
 
-  // Generous click target in video-pixel space — users rarely click a bone
-  // exactly, so extend the keypoint bbox by a padding margin.
-  const HIT_PAD = 40
-  for (const player of frame.players) {
+  // 1. Preferred: detection bbox from the backend tracker. x/y are the
+  //    bbox CENTER (see drawBoundingBoxes). A small pad handles slightly-
+  //    off clicks near the edge.
+  const BBOX_PAD = 8
+  for (const det of frame.badminton_detections?.players ?? []) {
+    if (det.player_id == null) continue
+    const minX = det.x - det.width / 2
+    const maxX = det.x + det.width / 2
+    const minY = det.y - det.height / 2
+    const maxY = det.y + det.height / 2
+    if (videoX >= minX - BBOX_PAD && videoX <= maxX + BBOX_PAD &&
+        videoY >= minY - BBOX_PAD && videoY <= maxY + BBOX_PAD) {
+      followedPlayerId.value = det.player_id
+      return
+    }
+  }
+
+  // 2. Fallback: keypoint bbox. Generous pad because users rarely click a
+  //    bone exactly, and the keypoint bbox can be much tighter than the
+  //    player's visible silhouette.
+  const KP_PAD = 40
+  for (const player of frame.players ?? []) {
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
     let any = false
     for (const k of player.keypoints ?? []) {
@@ -435,8 +459,8 @@ function handleZoomCaptureClick(e: MouseEvent) {
       if (k.y > maxY) maxY = k.y
     }
     if (!any) continue
-    if (videoX >= minX - HIT_PAD && videoX <= maxX + HIT_PAD &&
-        videoY >= minY - HIT_PAD && videoY <= maxY + HIT_PAD) {
+    if (videoX >= minX - KP_PAD && videoX <= maxX + KP_PAD &&
+        videoY >= minY - KP_PAD && videoY <= maxY + KP_PAD) {
       followedPlayerId.value = player.player_id
       return
     }
@@ -907,6 +931,16 @@ function handleFullscreenChange() {
 function skipTime(seconds: number) {
   if (!videoRef.value || isExporting.value) return
   videoRef.value.currentTime = Math.max(0, Math.min(duration.value, videoRef.value.currentTime + seconds))
+}
+
+// Step the video by an integer number of frames. Pauses playback first so
+// the seek isn't immediately overwritten by the next playing frame.
+function stepFrames(frames: number) {
+  const v = videoRef.value
+  if (!v || isExporting.value) return
+  if (!v.paused) v.pause()
+  const fps = props.videoFps && props.videoFps > 0 ? props.videoFps : 30
+  v.currentTime = Math.max(0, Math.min(duration.value, v.currentTime + frames / fps))
 }
 
 function showControlsTemporarily() {
@@ -1779,10 +1813,12 @@ function handleKeydown(event: KeyboardEvent) {
       togglePlay()
       break
     case 'ArrowLeft':
-      skipTime(-5)
+      event.preventDefault()
+      stepFrames(-1)
       break
     case 'ArrowRight':
-      skipTime(5)
+      event.preventDefault()
+      stepFrames(1)
       break
     case 'ArrowUp':
       event.preventDefault()
@@ -1854,6 +1890,21 @@ watch(followedPlayerId, () => {
   if (!isPlaying.value) {
     lastFrameNumber = -1
     drawOverlay()
+  }
+})
+
+// Reset the camera (and drop any active follow-lock) when leaving court
+// view. The skeleton canvas always applies camera.applyToContext before
+// drawing, so a leftover zoom/pan would keep the bones scaled up relative
+// to the real video, creating a visible mis-registration.
+watch(() => props.viewMode, (mode) => {
+  if (mode !== 'court') {
+    followedPlayerId.value = null
+    camera.reset()
+    if (!isPlaying.value) {
+      lastFrameNumber = -1
+      drawOverlay()
+    }
   }
 })
 
@@ -2052,13 +2103,6 @@ defineExpose({
         :segment="shotSummarySegment"
         :countdown-sec="shotSummaryCountdown ?? 0"
       />
-      <div v-if="!isPlaying" class="play-overlay" @click="togglePlay">
-        <div class="play-button">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3" />
-          </svg>
-        </div>
-      </div>
     </div>
 
     <div class="controls" :class="{ visible: showControls || !isPlaying }">
@@ -2251,48 +2295,11 @@ video.video-dimmed {
 .zoom-capture {
   position: absolute;
   inset: 0;
-  z-index: 5; /* above .skeleton-canvas (z=3) and synthetic court (z=2),
-                 below .play-overlay (z=25) */
+  z-index: 5; /* above .skeleton-canvas (z=3) and synthetic court (z=2) */
   cursor: grab;
   touch-action: none; /* prevent default scroll on trackpad pinch */
 }
 .zoom-capture:active { cursor: grabbing; }
-
-.play-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.3);
-  cursor: pointer;
-  /* Above PoseOverlay (z-index: 20) so the center play button is
-     clickable even when skeletons are drawn near the middle. */
-  z-index: 25;
-}
-
-.play-button {
-  width: 80px;
-  height: 80px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-accent);
-  border-radius: 0;
-  color: white;
-  transition: transform 0.2s ease, background 0.2s ease;
-}
-
-.play-button:hover {
-  transform: scale(1.05);
-  background: var(--color-accent-dark);
-}
-
-.play-button svg {
-  width: 32px;
-  height: 32px;
-  margin-left: 4px;
-}
 
 .controls {
   position: absolute;

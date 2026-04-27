@@ -1,5 +1,7 @@
 # OC-SORT A/B Testing Design
 
+> **Status: obsolete** — the feature described here was removed in v1.9. Kept as a historical design record; do not implement or reference.
+
 **Date:** 2026-04-16
 **Status:** Approved
 **Goal:** Add per-video tracker toggle (BoT-SORT vs OC-SORT) for A/B testing player tracking quality. Remove the losing tracker once evaluation is complete.

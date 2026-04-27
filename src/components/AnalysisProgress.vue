@@ -8,7 +8,6 @@ import type { Id } from '../../convex/_generated/dataModel'
 const props = defineProps<{
   videoId: string
   filename: string
-  analysisMode: 'rally_only' | 'full'
 }>()
 
 const emit = defineEmits<{
@@ -137,10 +136,8 @@ watch(videoStatus, async (newStatus) => {
           shuttle: (results.shuttle as AnalysisResult['shuttle']) ?? null,
           skeleton_data: Array.isArray(results.skeleton_data) ? (results.skeleton_data as AnalysisResult['skeleton_data']) : [],
           court_detection: (results.court_detection as AnalysisResult['court_detection']) ?? null,
-          shuttle_analytics: (results.shuttle_analytics as AnalysisResult['shuttle_analytics']) ?? null,
           player_zone_analytics: (results.player_zone_analytics as AnalysisResult['player_zone_analytics']) ?? null,
           rallies: (results.rallies as AnalysisResult['rallies']) ?? null,
-          rally_stats: (results.rally_stats as AnalysisResult['rally_stats']) ?? null,
         }
         emit('complete', analysisResult)
       } catch (err) {
@@ -161,7 +158,6 @@ watch(videoStatus, async (newStatus) => {
           shuttle: null,
           skeleton_data: [],
           court_detection: null,
-          shuttle_analytics: null,
           player_zone_analytics: null,
         }
         emit('complete', analysisResult)
