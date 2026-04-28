@@ -711,6 +711,65 @@ Estimate (single developer): 2–3 weeks if Compose Multiplatform / KMP are new;
 | SSR / Nuxt / `@supabase/auth-helpers`      | App is SPA                                                             |
 | Pinia/Vuex for auth                        | Module-scope composable shares state                                   |
 
+## 14. Analytics endpoints migration (extension to Sections 5–8)
+
+Discovered during plan-writing: `convex/http.ts` is ~1577 lines and `src/services/api.ts` is ~1434 lines. Beyond the Modal callbacks already covered, there are **server-side compute endpoints** consumed by the frontend that the earlier sections did not address. They must migrate too — no Convex leftovers means no leftovers from these consumers either.
+
+### 14.1 Endpoints in scope
+
+| Endpoint family                           | Consumer in `src/services/api.ts`                                                            | Today's compute location              |
+|---                                        |---                                                                                           |---                                    |
+| Heatmap rendering                         | `getHeatmap`, `preloadHeatmap`                                                               | Convex httpAction (TS)                |
+| Zone analytics                            | `getRecalculatedZoneAnalytics`                                                               | Convex httpAction (TS)                |
+| Speed recalculation w/ homography         | `getSpeedData`, `getSpeedTimeline`, `triggerSpeedRecalculation`, `recalculateSpeedsFromSkeleton` | Convex httpAction (TS)            |
+| PDF export                                | `downloadPDFExport`, `exportPDFWithFrontendData`                                             | Convex httpAction → Modal (`modal_pdf_export.py`) |
+| Manual court keypoints status/set         | `getManualKeypointsStatus`, `setManualCourtKeypoints`                                        | Convex httpAction (trivial DB writes) |
+| Health check, video-url fetch             | `checkApiHealth`, `getApiHealthDetails`, `fetchVideoUrl`                                     | Convex httpAction (trivial)           |
+
+### 14.2 Migration target — Option D (mixed)
+
+| Endpoint                          | Migration target                                                                                             |
+|---                                |---                                                                                                           |
+| Heatmap                           | **Client-side** Vue composable. Port the existing TS implementation from `convex/http.ts` into the browser. Reads results JSON via signed URL, computes the 2D intensity grid in memory. |
+| Zone analytics                    | **Client-side** Vue composable. Same approach — port TS math to browser.                                     |
+| Speed (recalc with homography)    | **New Modal endpoint** behind Edge Function. The math is heavier and benefits from the GPU container's memory headroom. Edge Function HMAC-signs the request, Modal reads results from Supabase Storage, computes, returns JSON. |
+| PDF export                        | **Edge Function → existing `modal_pdf_export.py`**. Update `modal_pdf_export.py` to verify HMAC, read inputs from Supabase Storage, write the PDF blob back via Supabase Storage (or return base64 inline if small). |
+| Manual court keypoints            | **Direct `supabase.from("videos").update({manual_court_keypoints: ...})`** from the frontend. No server endpoint needed — it's a JSONB write subject to RLS. JSON encoding preserves float precision losslessly; accuracy unchanged. |
+| Health check                      | **Delete.** No analog needed — Supabase exposes its own status; if needed, the frontend can ping `supabase.from("videos").select("id").limit(1)`. |
+| Video-url fetch                   | **Delete.** Replaced by `supabase.storage.from("videos").createSignedUrl(path)` called inline where needed.   |
+
+### 14.3 Local Flask backend removal
+
+`src/services/api.ts` contains dual-mode code: `if (USE_CONVEX) { ... } else { fetch(API_BASE_URL/...) }`. The local Flask backend referenced by `API_BASE_URL` no longer exists in the repo (`backend/` contains only Modal-related Python files: `modal_convex_processor.py`, `modal_inference.py`, `modal_pdf_export.py`, `rally_detection.py`, `tracknet/`, `upload_tracknet.py`). The fallback paths are dead code.
+
+**Action:** delete every `API_BASE_URL` branch and the `VITE_API_URL` env var from `.env*`. After cutover, all backend traffic goes through Supabase or through Edge Function → Modal.
+
+### 14.4 New Modal endpoints introduced
+
+Two new Modal HTTP entry points, both gated by HMAC verification of the body using `MODAL_SHARED_SECRET`:
+
+- `recalculate_speeds` — input: `{video_id, owner_id, results_storage_path}`. Reads `results.json` from Supabase Storage with the service-role key, recomputes speeds with homography, returns the speed payload as JSON. Lives in a new module `backend/modal_speed.py` or as a new function in `modal_supabase_processor.py`.
+- `export_pdf` — input: `{video_id, owner_id, config}`. Already exists as `modal_pdf_export.py`; adapt to read from Supabase Storage and verify HMAC.
+
+The Edge Function `process-video` is extended to be a router for these calls — `/process-video`, `/recalculate-speeds`, `/export-pdf` — or split into three Edge Functions. Implementation choice deferred to plan; routing is straightforward either way.
+
+### 14.5 Schema impact
+
+None. `results_storage_path` already covers the input data location; `manual_court_keypoints` is already on `videos` as JSONB. No table additions needed.
+
+### 14.6 Frontend impact
+
+`src/services/api.ts` is rewritten end-to-end:
+- All `USE_CONVEX` branching removed.
+- All `API_BASE_URL` branching removed.
+- Heatmap and zone analytics functions become local computations (or move into composables under `src/composables/`).
+- Speed and PDF functions call Edge Function endpoints with the user's JWT.
+- Manual keypoints functions become 2-line `supabase.from("videos")` calls.
+
+Estimated reduction: ~1434 lines → ~300 lines.
+
+---
+
 ## 13. Risks and trade-offs
 
 | Risk                                                                                              | Acceptance / mitigation                                                                                        |
