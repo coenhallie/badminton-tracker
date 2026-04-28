@@ -39,6 +39,7 @@ create table public.processing_logs (
   timestamp   timestamptz not null default now()
 );
 create index processing_logs_video_ts_idx on public.processing_logs (video_id, timestamp);
+create index processing_logs_owner_idx on public.processing_logs (owner_id);
 
 create table public.rally_clips (
   id                 uuid primary key default gen_random_uuid(),
@@ -53,4 +54,3 @@ create table public.rally_clips (
   unique (video_id, rally_index)
 );
 create index rally_clips_owner_created_idx on public.rally_clips (owner_id, created_at desc);
-create index rally_clips_video_idx         on public.rally_clips (video_id, rally_index);
