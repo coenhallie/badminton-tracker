@@ -26,3 +26,11 @@ create policy "clips_owner_select" on public.rally_clips
   for select using (owner_id = auth.uid());
 -- INSERT only via service role (Modal).
 -- DELETE: cascade from videos handles this.
+
+-- Column-level UPDATE restrictions on public.videos.
+-- The owner_id RLS policy above scopes WHICH rows can be updated; this
+-- scopes WHICH COLUMNS the authenticated role can update. Modal uses the
+-- service_role key, which has BYPASSRLS and is unaffected by these grants.
+revoke update on public.videos from authenticated;
+grant update (filename, manual_court_keypoints, player_labels)
+  on public.videos to authenticated;
