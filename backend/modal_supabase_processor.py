@@ -1150,6 +1150,7 @@ image = (
     )
     .add_local_dir(str(_backend_dir / "tracknet"), remote_path="/root/tracknet")
     .add_local_file(str(_backend_dir / "rally_detection.py"), remote_path="/root/rally_detection.py")
+    .add_local_file(str(_backend_dir / "speed_calc.py"), remote_path="/root/speed_calc.py")
 )
 
 
@@ -1201,6 +1202,102 @@ async def process_video(request: Request) -> Dict[str, Any]:
     )
 
     return {"status": "accepted", "video_id": video_id, "owner_id": owner_id}
+
+
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name("supabase-secrets")],
+    timeout=120,
+)
+@modal.fastapi_endpoint(method="POST")
+async def recalculate_speeds(request: Request) -> Any:
+    """
+    Recompute player speeds from stored skeleton data, optionally with
+    user-supplied manual court keypoints. HMAC-verified against
+    MODAL_SHARED_SECRET (same scheme as `process_video`).
+
+    Request body (JSON):
+      {
+        "video_id": str,
+        "owner_id": str,
+        "results_storage_path": str,
+        "manual_court_keypoints": Optional[dict],
+      }
+
+    Response (JSON):
+      {
+        "video_id": str,
+        "speed_data": <speed_calc result>,
+        "manual_keypoints_used": bool,
+        "detection_source": "modal",
+        "status": "success",
+      }
+    """
+    from fastapi.responses import JSONResponse
+
+    raw_body = await request.body()
+    signature = request.headers.get("X-Signature")
+    secret = os.environ.get("MODAL_SHARED_SECRET", "")
+    if not verify_hmac(raw_body, signature, secret):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+
+    video_id = payload.get("video_id")
+    owner_id = payload.get("owner_id")
+    results_storage_path = payload.get("results_storage_path")
+    manual_keypoints = payload.get("manual_court_keypoints")
+
+    if not all([video_id, owner_id, results_storage_path]):
+        return JSONResponse(
+            {
+                "error": "Missing required fields: "
+                         "video_id, owner_id, results_storage_path"
+            },
+            status_code=400,
+        )
+
+    # Download results.json from Supabase Storage. supabase-py is sync; run
+    # in a worker thread to avoid blocking the event loop.
+    sb = supabase_client()
+    try:
+        blob = await asyncio.to_thread(
+            lambda: sb.storage.from_("results").download(results_storage_path)
+        )
+    except Exception as e:  # noqa: BLE001 — surface the underlying message
+        return JSONResponse(
+            {"error": f"failed to fetch results: {str(e)[:200]}"},
+            status_code=404,
+        )
+    if not blob:
+        return JSONResponse({"error": "results not found"}, status_code=404)
+
+    try:
+        results = json.loads(blob)
+    except (json.JSONDecodeError, TypeError):
+        return JSONResponse({"error": "results not valid JSON"}, status_code=500)
+
+    # Late import — keeps cold-start cost out of unrelated function paths.
+    from speed_calc import calculate_speeds_from_skeleton
+
+    speed_data = calculate_speeds_from_skeleton(
+        skeleton_data=results.get("skeleton_data", []),
+        fps=float(results.get("fps", 30.0)),
+        video_width=int(results.get("video_width", 1920)),
+        video_height=int(results.get("video_height", 1080)),
+        manual_court_keypoints=manual_keypoints,
+    )
+
+    return JSONResponse({
+        "video_id": video_id,
+        "speed_data": speed_data,
+        "manual_keypoints_used": speed_data.get("manual_keypoints_used", False),
+        "detection_source": "modal",
+        "status": "success",
+    })
 
 
 @app.function(
