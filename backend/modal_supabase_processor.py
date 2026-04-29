@@ -2662,7 +2662,48 @@ with_reid: False
             .eq("id", video_id)
             .execute()
         )
-        
+
+        # Cut per-rally clips and upload to the 'clips' bucket. Runs AFTER the
+        # results JSON is durable on Storage, and BEFORE the status flip to
+        # 'completed' so the UI sees "completed" only when clips are also
+        # ready. Soft-failure: if clip generation throws, the video still
+        # reaches 'completed' (the mobile rally library is just empty for
+        # this video and a warning log row is written).
+        if detected_rallies:
+            await send_log(
+                f"Cutting {len(detected_rallies)} rally clips...",
+                "info", "processing"
+            )
+            try:
+                await asyncio.to_thread(
+                    lambda: cut_and_upload_rally_clips(
+                        video_path=str(video_path),
+                        rallies=detected_rallies,
+                        video_id=video_id,
+                        owner_id=owner_id,
+                    )
+                )
+                await send_log(
+                    f"Rally clips uploaded for {len(detected_rallies)} rallies",
+                    "success", "processing"
+                )
+            except Exception as e:
+                try:
+                    await asyncio.to_thread(
+                        lambda: supabase_client()
+                        .table("processing_logs")
+                        .insert({
+                            "video_id": video_id,
+                            "owner_id": owner_id,
+                            "message": f"clip generation pass failed: {str(e)[:200]}",
+                            "level": "warning",
+                            "category": "processing",
+                        })
+                        .execute()
+                    )
+                except Exception:
+                    pass
+
         upload_time = time.time() - phase_start
         total_time = time.time() - pipeline_start
         await send_log(
@@ -2671,7 +2712,17 @@ with_reid: False
             "success", "processing"
         )
 
-        # Cleanup
+        # Flip the videos row to 'completed' now that results JSON is durable
+        # on Storage and per-rally clips have been cut + uploaded. Per the
+        # chunk B note above, this status flip was deferred to chunk C.
+        await send_status_update(
+            "completed",
+            progress=1.0,
+            current_frame=processed_count,
+            total_frames=total_frames,
+        )
+
+        # Cleanup (must run AFTER clip cutting — clip cutter reads video_path)
         video_path.unlink(missing_ok=True)
         if 'skeleton_frames_path' in locals():
             skeleton_frames_path.unlink(missing_ok=True)
