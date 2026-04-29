@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, inject, watch, onUnmounted } from 'vue'
-import { useConvexClient } from 'convex-vue'
-import { api } from '../../convex/_generated/api'
-import type { Id } from '../../convex/_generated/dataModel'
-import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
+import { supabase } from '@/lib/supabase'
+import { PLAYER_LABELS_KEY, type PlayerLabels } from '@/composables/usePlayerLabels'
 
 const props = defineProps<{
   videoId: string
@@ -14,7 +12,6 @@ const props = defineProps<{
 // `labels`, `displayId`, or `labelFor`. See ResultsDashboard.vue for the same
 // pattern.
 const playerLabels = inject(PLAYER_LABELS_KEY)
-const convex = useConvexClient()
 
 const labels = computed(() => playerLabels?.value?.labels.value ?? null)
 const swapped = computed(() => labels.value?.swapped ?? false)
@@ -23,17 +20,18 @@ const swapped = computed(() => labels.value?.swapped ?? false)
 // the watches that need to observe its pending state.
 let nameDebounce: ReturnType<typeof setTimeout> | null = null
 
-// Reactive thumbnail URLs via Convex storage. Refetch when ids change.
+// Reactive thumbnail URLs via Supabase Storage. Refetch when paths change.
 const thumb0Url = ref<string | null>(null)
 const thumb1Url = ref<string | null>(null)
 
-async function resolveThumbnail(
-  storageId: Id<'_storage'> | undefined,
-): Promise<string | null> {
-  if (!storageId) return null
+async function resolveThumbnail(path: string | undefined): Promise<string | null> {
+  if (!path) return null
   try {
-    const url = await convex.query(api.videos.getStorageUrl, { storageId })
-    return url ?? null
+    const { data, error } = await supabase.storage
+      .from('thumbnails')
+      .createSignedUrl(path, 3600)
+    if (error) return null
+    return data?.signedUrl ?? null
   } catch {
     return null
   }
@@ -43,12 +41,12 @@ async function resolveThumbnail(
 // must not overwrite state produced by a newer fetch.
 let thumbFetchId = 0
 watch(
-  () => [labels.value?.player_0_thumbnail, labels.value?.player_1_thumbnail],
-  async ([id0, id1]) => {
+  () => [labels.value?.player_0_thumbnail_path, labels.value?.player_1_thumbnail_path],
+  async ([p0, p1]) => {
     const myId = ++thumbFetchId
     const [url0, url1] = await Promise.all([
-      resolveThumbnail(id0 as Id<'_storage'> | undefined),
-      resolveThumbnail(id1 as Id<'_storage'> | undefined),
+      resolveThumbnail(p0 as string | undefined),
+      resolveThumbnail(p1 as string | undefined),
     ])
     if (myId !== thumbFetchId) return
     thumb0Url.value = url0
@@ -64,7 +62,7 @@ watch(
   labels,
   (l) => {
     // Skip resets while a save is pending so we don't clobber in-progress
-    // user edits when Convex echoes our own mutation back.
+    // user edits when the realtime subscription echoes our own update back.
     if (nameDebounce !== null) return
     name0.value = l?.player_0_name ?? ''
     name1.value = l?.player_1_name ?? ''
@@ -89,18 +87,32 @@ const slots = computed(() => {
   return a.displayIndex < b.displayIndex ? [a, b] : [b, a]
 })
 
+// Merge updates into the videos.player_labels JSONB column. We must read
+// existing values first so user-set fields don't clobber Modal-set ones
+// (thumbnail paths) and vice versa.
+async function updatePlayerLabels(updates: Partial<PlayerLabels>): Promise<void> {
+  const { data: row, error: readErr } = await supabase
+    .from('videos')
+    .select('player_labels')
+    .eq('id', props.videoId)
+    .single()
+  if (readErr) throw readErr
+  const merged: PlayerLabels = { ...((row?.player_labels as PlayerLabels | null) ?? {}), ...updates }
+  const { error: writeErr } = await supabase
+    .from('videos')
+    .update({ player_labels: merged })
+    .eq('id', props.videoId)
+  if (writeErr) throw writeErr
+}
+
 async function toggleSwap() {
-  await convex.mutation(api.videos.updatePlayerLabels, {
-    videoId: props.videoId as Id<'videos'>,
-    swapped: !swapped.value,
-  })
+  await updatePlayerLabels({ swapped: !swapped.value })
 }
 
 function scheduleNameSave() {
   if (nameDebounce) clearTimeout(nameDebounce)
   nameDebounce = setTimeout(async () => {
-    await convex.mutation(api.videos.updatePlayerLabels, {
-      videoId: props.videoId as Id<'videos'>,
+    await updatePlayerLabels({
       player_0_name: name0.value,
       player_1_name: name1.value,
     })

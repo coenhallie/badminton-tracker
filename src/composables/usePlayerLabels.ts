@@ -1,27 +1,44 @@
 import { computed, type Ref, type InjectionKey } from 'vue'
-import { useConvexQuery } from 'convex-vue'
-import { api } from '../../convex/_generated/api'
-import type { Id } from '../../convex/_generated/dataModel'
+import { useReactiveRow } from '@/composables/useReactiveRow'
 
 /**
- * Reactive player-label helper. Reads the video's `playerLabels` sub-object
- * from Convex and exposes display-layer accessors.
+ * Reactive player-label helper. Subscribes to the video row's
+ * `player_labels` JSONB column and exposes display-layer accessors.
  *
  * Stored analysis data (skeleton_data[].players[].player_id) is authoritative
  * and never rewritten — these helpers translate canonical 0/1 ids into what
  * the UI should show, applying the user's swap + any custom names.
  *
+ * Shape of `player_labels` (set partly by the Modal worker — thumbnail paths —
+ * and partly by the user via PlayerIdentityPanel — swapped flag + names):
+ *   {
+ *     swapped?: boolean,
+ *     player_0_name?: string,
+ *     player_1_name?: string,
+ *     player_0_thumbnail_path?: string,
+ *     player_1_thumbnail_path?: string,
+ *   }
+ *
  * Caller contract: `videoId` must already be resolved to a real video id.
- * This composable does not have a skip mode — convex-vue's useConvexQuery
- * subscribes unconditionally. Mount the consumer only once you have a videoId.
+ * Mount the consumer only once you have a videoId.
  */
-export function usePlayerLabels(videoId: Ref<Id<'videos'>>) {
-  const { data } = useConvexQuery(
-    api.videos.getPlayerLabels,
-    computed(() => ({ videoId: videoId.value })),
-  )
+export interface PlayerLabels {
+  swapped?: boolean
+  player_0_name?: string
+  player_1_name?: string
+  player_0_thumbnail_path?: string
+  player_1_thumbnail_path?: string
+}
 
-  const labels = computed(() => data.value)
+interface VideoRowSlim {
+  id: string
+  player_labels: PlayerLabels | null
+}
+
+export function usePlayerLabels(videoId: Ref<string>) {
+  const { row } = useReactiveRow<VideoRowSlim>('videos', videoId)
+
+  const labels = computed<PlayerLabels | null>(() => row.value?.player_labels ?? null)
 
   /** Canonical id (0/1) → display id (0/1). Identity unless swapped. */
   function displayId(canonical: number): number {
