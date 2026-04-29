@@ -1130,7 +1130,10 @@ image = (
 
 @app.function(
     image=image,
-    secrets=[modal.Secret.from_name("supabase-secrets")],
+    secrets=[
+        modal.Secret.from_name("supabase-secrets"),
+        modal.Secret.from_name("modal-shared-secret"),
+    ],
 )
 @modal.fastapi_endpoint(method="POST")
 async def process_video(request: Request) -> Dict[str, Any]:
@@ -1180,7 +1183,10 @@ async def process_video(request: Request) -> Dict[str, Any]:
 
 @app.function(
     image=image,
-    secrets=[modal.Secret.from_name("supabase-secrets")],
+    secrets=[
+        modal.Secret.from_name("supabase-secrets"),
+        modal.Secret.from_name("modal-shared-secret"),
+    ],
     timeout=120,
 )
 @modal.fastapi_endpoint(method="POST")
