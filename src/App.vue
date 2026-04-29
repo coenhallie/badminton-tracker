@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useTheme } from '@/composables/useTheme'
-import { useSession } from '@/composables/useSession'
+import { useSession, signOut } from '@/composables/useSession'
 import LoginView from '@/views/LoginView.vue'
-const { isAuthenticated, ready } = useSession()
+const { isAuthenticated, ready, user } = useSession()
 import VideoUpload from '@/components/VideoUpload.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import ResultsDashboard from '@/components/ResultsDashboard.vue'
@@ -881,6 +881,18 @@ watch(videoSectionRef, () => {
           >
             <span class="status-dot" :class="{ pulse: isCheckingHealth }" />
             {{ isApiConnected ? 'API Connected' : 'API Disconnected' }}
+          </button>
+          <button
+            class="signout-btn"
+            @click="signOut"
+            :title="user ? `Signed in as ${user.email}` : 'Sign out'"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <polyline points="16 17 21 12 16 7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+            Sign out
           </button>
         </nav>
       </div>
@@ -1790,6 +1802,26 @@ a:hover {
 
 .api-status.checking {
   opacity: 0.8;
+}
+
+.signout-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 0;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.signout-btn:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-hover);
+  color: var(--color-text-primary);
 }
 
 .status-dot {
