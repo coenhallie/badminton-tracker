@@ -1,12 +1,13 @@
 """
-Modal PDF Export for Badminton Tracker (Convex Integration)
+Modal PDF Export for Badminton Tracker (Supabase Integration)
 
 This module provides GPU-accelerated PDF report generation that:
-1. Downloads video and results from Convex storage
+1. Downloads video and results from Supabase storage
 2. Generates heatmaps and extracts frames
 3. Creates a professional PDF report
 4. Returns the PDF bytes
 """
+from __future__ import annotations
 
 import os
 import json
@@ -17,6 +18,15 @@ from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 
 import modal
+
+try:
+    # fastapi is installed in the Modal image; guarded so the module is still
+    # importable for tooling/tests that don't need the Modal HTTP entry point.
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+except ImportError:  # pragma: no cover - tooling contexts
+    Request = Any  # type: ignore[assignment,misc]
+    JSONResponse = None  # type: ignore[assignment]
 
 
 # =============================================================================
@@ -41,10 +51,18 @@ pdf_image = (
         "numpy>=1.24.0",
         "opencv-python-headless>=4.8.0",
         "reportlab>=4.0.0",
-        "httpx>=0.25.0",
         "pillow>=10.0.0",  # For image processing in PDF
         "fastapi[standard]>=0.104.0",  # Required for Modal web endpoints
+        "supabase>=2.5.0",
     ])
+)
+
+# Mount the shared Supabase/HMAC helpers module into the Modal image so
+# `from supabase_helpers import ...` works inside the container.
+_BACKEND_DIR = Path(__file__).resolve().parent
+pdf_image = pdf_image.add_local_file(
+    str(_BACKEND_DIR / "supabase_helpers.py"),
+    remote_path="/root/supabase_helpers.py",
 )
 
 # Initialize Modal app
@@ -727,86 +745,78 @@ def generate_pdf_report(
 @app.function(
     timeout=300,  # 5 minute timeout
     memory=2048,  # 2GB memory
+    secrets=[
+        modal.Secret.from_name("supabase-secrets"),
+        modal.Secret.from_name("modal-shared-secret"),
+    ],
 )
 @modal.fastapi_endpoint(method="POST")
-async def generate_pdf(request: Dict[str, Any]) -> Dict[str, Any]:
+async def generate_pdf(request: Request):
     """
     Generate a PDF report from video analysis data.
-    
-    Request body:
-        videoUrl: URL to download video from Convex storage
-        resultsUrl: URL to download analysis results from Convex storage
-        config: PDF export configuration
-            - title: Report title
-            - heatmap_colormap: Colormap for heatmap (turbo, jet, hot, etc.)
-            - heatmap_alpha: Heatmap overlay alpha (0-1)
-            - frame_number: Frame to use for visualization
-            - include_heatmap: Whether to include heatmap
-    
-    Returns:
-        pdfBase64: Base64 encoded PDF file
-        success: Boolean indicating success
-        error: Error message if failed
+
+    HMAC-verified. Reads video bytes and results JSON from Supabase Storage
+    using the service-role key (mounted via 'supabase-secrets' Modal Secret).
+
+    Request body (JSON):
+        { video_id, owner_id, results_storage_path, video_storage_path, config }
+
+    Response (JSON):
+        { success: bool, pdfBase64?: str, size?: int, error?: str }
     """
-    import httpx
     import base64
+    import json as _json
     import numpy as np
-    
+
+    raw_body = await request.body()
+    sig = request.headers.get("X-Signature")
+    secret = os.environ.get("MODAL_SHARED_SECRET", "")
+
+    from supabase_helpers import verify_hmac, supabase_client
+    if not verify_hmac(raw_body, sig, secret):
+        return JSONResponse({"success": False, "error": "unauthorized"}, status_code=401)
+
     try:
-        video_url = request.get("videoUrl")
-        results_url = request.get("resultsUrl")
-        config = request.get("config", {})
-        
-        if not video_url or not results_url:
-            return {
-                "success": False,
-                "error": "Missing videoUrl or resultsUrl"
-            }
-        
-        print(f"[PDF EXPORT] Downloading video from: {video_url[:80]}...")
-        print(f"[PDF EXPORT] Downloading results from: {results_url[:80]}...")
-        
-        async with httpx.AsyncClient(timeout=120) as client:
-            # Download video
-            video_response = await client.get(video_url)
-            if video_response.status_code != 200:
-                return {
-                    "success": False,
-                    "error": f"Failed to download video: {video_response.status_code}"
-                }
-            video_bytes = video_response.content
-            print(f"[PDF EXPORT] Downloaded video: {len(video_bytes)} bytes")
-            
-            # Download results
-            results_response = await client.get(results_url)
-            if results_response.status_code != 200:
-                return {
-                    "success": False,
-                    "error": f"Failed to download results: {results_response.status_code}"
-                }
-            
-            try:
-                analysis_result = results_response.json()
-            except:
-                analysis_result = json.loads(results_response.text)
-            print(f"[PDF EXPORT] Downloaded analysis results")
-            
-            # Merge frontend player data into analysis_result if provided.
-            # This ensures the PDF shows the same calibrated speed values
-            # as the dashboard (which may have recalculated speeds with
-            # court keypoints and proper filtering).
-            if config.get("players"):
-                frontend_players = config["players"]
-                print(f"[PDF EXPORT] Using frontend player data ({len(frontend_players)} players) for consistency with dashboard")
-                analysis_result["players"] = frontend_players
-            
-            # Also merge other frontend data if provided
-            for key in ("duration", "fps", "total_frames", "processed_frames",
-                         "video_width", "video_height"):
-                if config.get(key) is not None:
-                    analysis_result[key] = config[key]
-            
-            # Extract frame
+        payload = _json.loads(raw_body)
+        video_id = payload.get("video_id")
+        results_storage_path = payload.get("results_storage_path")
+        video_storage_path = payload.get("video_storage_path")
+        config = payload.get("config", {}) or {}
+
+        if not results_storage_path or not video_storage_path:
+            return {"success": False, "error": "Missing results_storage_path or video_storage_path"}
+
+        sb = supabase_client()
+
+        print(f"[PDF EXPORT] Downloading video from Supabase Storage: {video_storage_path}")
+        video_bytes = sb.storage.from_("videos").download(video_storage_path)
+        if video_bytes is None:
+            return {"success": False, "error": "Video not found in storage"}
+        print(f"[PDF EXPORT] Downloaded video: {len(video_bytes)} bytes")
+
+        print(f"[PDF EXPORT] Downloading results from Supabase Storage: {results_storage_path}")
+        results_bytes = sb.storage.from_("results").download(results_storage_path)
+        if results_bytes is None:
+            return {"success": False, "error": "Results not found in storage"}
+        analysis_result = _json.loads(results_bytes)
+        print("[PDF EXPORT] Downloaded analysis results")
+
+        # Merge frontend player data into analysis_result if provided.
+        # This ensures the PDF shows the same calibrated speed values
+        # as the dashboard (which may have recalculated speeds with
+        # court keypoints and proper filtering).
+        if config.get("players"):
+            frontend_players = config["players"]
+            print(f"[PDF EXPORT] Using frontend player data ({len(frontend_players)} players) for consistency with dashboard")
+            analysis_result["players"] = frontend_players
+
+        # Also merge other frontend data if provided
+        for key in ("duration", "fps", "total_frames", "processed_frames",
+                    "video_width", "video_height"):
+            if config.get(key) is not None:
+                analysis_result[key] = config[key]
+
+        # Extract frame
         video_frame = None
         if config.get("include_heatmap", True):
             frame_number = config.get("frame_number")
