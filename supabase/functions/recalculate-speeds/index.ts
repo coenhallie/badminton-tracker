@@ -9,10 +9,16 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const MODAL_SPEED_URL = Deno.env.get("MODAL_SPEED_URL")!;
 const MODAL_SHARED_SECRET = Deno.env.get("MODAL_SHARED_SECRET")!;
 
+if (!MODAL_SHARED_SECRET) {
+  throw new Error("MODAL_SHARED_SECRET environment variable is not set");
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
-  const jwt = req.headers.get("Authorization")?.replace("Bearer ", "");
+  const auth = req.headers.get("Authorization") ?? "";
+  const m = auth.match(/^\s*Bearer\s+(.+?)\s*$/i);
+  const jwt = m?.[1];
   if (!jwt) return resp(401, { error: "Missing Authorization" });
 
   const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
