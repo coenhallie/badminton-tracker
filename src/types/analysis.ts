@@ -55,6 +55,47 @@ export interface CourtKeypoints22 {
   confidence: number
 }
 
+/**
+ * Manual 12-point court keypoints. Field names match the Convex schema
+ * (`videos.manualCourtKeypoints`) exactly so there is no remapping
+ * between persistence and UI shapes — every consumer imports this type.
+ *
+ * Each value is [x, y] in video-pixel coordinates.
+ *
+ * All 12 are required at the TypeScript layer because every UI entry
+ * point (CourtSetup.vue, VideoPlayer.vue's in-player selector) always
+ * produces the full set. Keypoints the user doesn't click still emit
+ * [0, 0] rather than undefined. The Convex schema keeps the non-corner
+ * fields optional for forward-compat with old records, but when a record
+ * is read into this type we assume all 12 are present — simpler than
+ * guarding every consumer against undefined.
+ *
+ * Anchor points:
+ *   - 4 outer corners
+ *   - 2 net intersections (used by the player-identity tracker to detect
+ *     court-side violations against the real net line, not pixel-midline)
+ *   - 4 service-line corners (near + far × left + right)
+ *   - 2 center-line endpoints (for precise homography)
+ */
+export interface ExtendedCourtKeypoints {
+  // 4 outer corners
+  top_left: number[]
+  top_right: number[]
+  bottom_right: number[]
+  bottom_left: number[]
+  // Net intersections (left/right ends of the net line)
+  net_left: number[]
+  net_right: number[]
+  // Short service line corners (near half + far half)
+  service_line_near_left: number[]
+  service_line_near_right: number[]
+  service_line_far_left: number[]
+  service_line_far_right: number[]
+  // Center-line endpoints at the service lines
+  center_near: number[]
+  center_far: number[]
+}
+
 export interface CourtDetection {
   detected: boolean
   confidence: number
@@ -73,13 +114,6 @@ export interface CourtRegion {
   bbox: number[]  // [x1, y1, x2, y2]
   center: number[]  // [x, y]
   confidence: number
-}
-
-export interface CourtDetectionStatus {
-  enabled: boolean
-  model_id: string
-  api_url: string
-  court_dimensions: CourtDimensions
 }
 
 export interface CourtPosition {
@@ -165,6 +199,10 @@ export interface BoundingBoxDetection {
   height: number
   class_id: number
   detection_id: string | null
+  // Canonical player_id (0 or 1) set by the backend when this bbox comes
+  // from the player pipeline. Absent on pre-feature analyses and on
+  // non-player detections (shuttlecocks, rackets, other).
+  player_id?: number | null
 }
 
 export interface BadmintonDetections {
@@ -189,49 +227,6 @@ export interface SkeletonFrame {
 // Shot type classification
 export type ShotType = 'smash' | 'clear' | 'drop' | 'drive' | 'net_shot' | 'lob' | 'serve' | 'unknown'
 
-// Shuttle trajectory position
-export interface ShuttleTrajectoryPosition {
-  frame: number
-  pixel: { x: number; y: number }
-  court: { x: number | null; y: number | null } | null
-  confidence: number
-}
-
-// Single shuttle trajectory (one shot)
-export interface ShuttleTrajectory {
-  id: number
-  shot_type: ShotType
-  peak_speed_kmh: number
-  avg_speed_kmh: number
-  distance_m: number
-  direction_angle: number
-  positions: ShuttleTrajectoryPosition[]
-}
-
-// Shot type counts
-export interface ShotTypeCounts {
-  smash: number
-  clear: number
-  drop: number
-  drive: number
-  net_shot: number
-}
-
-// Speed statistics
-export interface SpeedStats {
-  fastest_shot_kmh: number
-  avg_shot_speed_kmh: number
-  all_shot_speeds: number[]
-}
-
-// Enhanced shuttle analytics
-export interface ShuttleAnalytics {
-  total_shots: number
-  shot_types: ShotTypeCounts
-  speed_stats: SpeedStats
-  trajectories: ShuttleTrajectory[]
-}
-
 // Player zone coverage
 export interface ZoneCoverage {
   front: number  // percentage
@@ -255,7 +250,7 @@ export interface PlayersZoneAnalytics {
   [playerId: string]: PlayerZoneAnalytics
 }
 
-// Backend-detected rally (from TrackNet shuttle tracking + gradient analysis)
+// Backend rally detection result (shot-gap algorithm on server-side TrackNet data)
 export interface BackendRally {
   id: number
   start_frame: number
@@ -263,17 +258,6 @@ export interface BackendRally {
   start_timestamp: number
   end_timestamp: number
   duration_seconds: number
-}
-
-// Rally detection statistics from backend
-export interface RallyStats {
-  total_rallies: number
-  total_rally_time_s: number
-  total_idle_time_s: number
-  rally_percentage: number
-  avg_rally_duration_s: number
-  min_rally_duration_s: number
-  max_rally_duration_s: number
 }
 
 export interface AnalysisResult {
@@ -286,10 +270,8 @@ export interface AnalysisResult {
   shuttle: ShuttleMetrics | null
   skeleton_data: SkeletonFrame[]
   court_detection: CourtDetection | null
-  shuttle_analytics?: ShuttleAnalytics | null
   player_zone_analytics?: PlayersZoneAnalytics | null
-  rallies?: BackendRally[] | null        // Backend-detected rallies (TrackNet + gradient)
-  rally_stats?: RallyStats | null        // Summary statistics for rallies
+  rallies?: BackendRally[] | null
 }
 
 export interface UploadResponse {
@@ -297,7 +279,6 @@ export interface UploadResponse {
   filename: string
   size: number
   status: string
-  analysisMode: 'rally_only' | 'full'
 }
 
 export interface AnalyzeResponse {

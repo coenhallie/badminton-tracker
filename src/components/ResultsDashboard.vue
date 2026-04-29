@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, watch } from 'vue'
+import { computed, ref, onMounted, watch, inject } from 'vue'
 import type { AnalysisResult, PlayerMetrics, ShuttleMetrics, CourtDetection, PlayersZoneAnalytics, ZoneCoverage } from '@/types/analysis'
 import { PLAYER_COLORS } from '@/types/analysis'
 import { exportPDFWithFrontendData, getRecalculatedZoneAnalytics, clearZoneAnalyticsCache, type PlayerZoneData } from '@/services/api'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
 import CourtZoneTooltip from './CourtZoneTooltip.vue'
+import PlayerIdentityPanel from './PlayerIdentityPanel.vue'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
 
 type ZoneType = 'front' | 'mid' | 'back' | 'left' | 'center' | 'right'
 
@@ -78,7 +86,6 @@ async function handleExportPDF() {
         court_dimensions: props.result.court_detection.court_dimensions,
         court_corners: props.result.court_detection.court_corners ?? undefined
       } : null,
-      shuttle_analytics: props.result.shuttle_analytics as Record<string, unknown> | null ?? null,
       player_zone_analytics: props.result.player_zone_analytics as Record<string, unknown> | null ?? null
     })
   } catch (error) {
@@ -122,6 +129,11 @@ const filteredPlayers = computed(() => {
     avg_speed: capSpeed(p.avg_speed, false),
     max_speed: capSpeed(p.max_speed, true)
   }))
+})
+
+const sortedPlayers = computed(() => {
+  const arr = [...(filteredPlayers.value ?? [])]
+  return arr.sort((a, b) => pidDisplayFor(a.player_id) - pidDisplayFor(b.player_id))
 })
 
 const totalDistance = computed(() => {
@@ -360,21 +372,27 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
       </div>
     </section>
 
+    <!-- Player Identity (thumbnails + swap + rename) -->
+    <PlayerIdentityPanel
+      v-if="props.result.video_id"
+      :video-id="props.result.video_id"
+    />
+
     <!-- Player Stats -->
     <section class="players-section">
       <h3>Player Statistics</h3>
       <div class="players-grid">
         <div
-          v-for="(player, index) in filteredPlayers"
+          v-for="(player, index) in sortedPlayers"
           :key="player.player_id"
           class="player-card"
           :style="{ '--player-color': getPlayerColor(index) }"
         >
           <div class="player-header">
             <div class="player-avatar" :style="{ background: getPlayerColor(index) }">
-              P{{ player.player_id + 1 }}
+              P{{ pidDisplayFor(player.player_id) + 1 }}
             </div>
-            <h4>Player {{ player.player_id + 1 }}</h4>
+            <h4>{{ pidLabelFor(player.player_id) }}</h4>
           </div>
           <div class="player-stats">
             <div class="player-stat">
@@ -433,13 +451,13 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
           v-for="(playerData, playerId) in zoneAnalytics"
           :key="playerId"
           class="coverage-card"
-          :style="{ '--player-color': getPlayerColor(parseInt(playerId as string) - 1) }"
+          :style="{ '--player-color': getPlayerColor(pidDisplayFor(parseInt(playerId as string))) }"
         >
           <div class="coverage-header">
-            <div class="player-avatar" :style="{ background: getPlayerColor(parseInt(playerId as string) - 1) }">
-              P{{ playerId }}
+            <div class="player-avatar" :style="{ background: getPlayerColor(pidDisplayFor(parseInt(playerId as string))) }">
+              P{{ pidDisplayFor(parseInt(playerId as string)) + 1 }}
             </div>
-            <h4>Player {{ playerId }}</h4>
+            <h4>{{ pidLabelFor(parseInt(playerId as string)) }}</h4>
             <span class="position-count">{{ playerData.position_count }} positions</span>
           </div>
           

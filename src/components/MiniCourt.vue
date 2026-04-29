@@ -1,17 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, shallowRef } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, shallowRef, inject } from 'vue'
 import type { FramePlayer } from '@/types/analysis'
 import { PLAYER_COLORS, COURT_DIMENSIONS } from '@/types/analysis'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
 import {
-  normalizePoints,
-  invertMatrix3x3,
-  multiplyMatrix3x3,
   calculateHomography,
-  solveLeastSquares,
-  solveLinearSystem,
   applyHomography,
   COURT_KEYPOINT_POSITIONS,
 } from '@/utils/homography'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
 
 // Debug mode - set to true to see coordinate transformation logs
 const DEBUG_MODE = import.meta.env.DEV && false
@@ -84,9 +86,6 @@ const props = withDefaults(defineProps<{
   showShuttle?: boolean
   showTrails?: boolean
   showHitMarkers?: boolean
-  // Keypoint selection mode
-  isKeypointSelectionMode?: boolean
-  keypointSelectionCount?: number
   // Full skeleton data for computing trails dynamically
   // When provided, trails are computed from frame 0 to currentFrame
   skeletonData?: SkeletonFrame[]
@@ -102,8 +101,6 @@ const props = withDefaults(defineProps<{
   showShuttle: true,
   showTrails: true, // Enable trails by default
   showHitMarkers: true, // Enable hit markers by default
-  isKeypointSelectionMode: false,
-  keypointSelectionCount: 0,
   maxTrailLength: 100 // Show last 100 positions (~3.3 seconds at 30fps)
 })
 
@@ -180,11 +177,11 @@ const RIGHT_WRIST_IDX = 10
 // while normal ready-position arm sway is typically 3-12 px/frame.
 const HIT_DETECTION_CONFIG = {
   MIN_WRIST_SPEED: 30,       // Minimum pixels/frame for wrist speed peak (raised from 15)
-  PEAK_PROMINENCE: 2.0,      // Peak must be ≥ 2× the baseline (median of window) to qualify
+  PEAK_PROMINENCE: 2.5,      // Peak must be ≥ 2× the baseline (median of window) to qualify
   DECEL_RATIO: 0.6,          // Speed after peak must drop to ≤ 60% of peak (i.e., ≥40% deceleration)
   COOLDOWN_FRAMES: 25,       // Min frames between consecutive hits (~0.8s at 30fps)
   CONFIDENCE_THRESHOLD: 0.3, // Min keypoint confidence to use wrist position
-  MAX_SPEED_HISTORY: 10,     // Number of recent speeds to keep for baseline & peak detection
+  MAX_SPEED_HISTORY: 16,     // Number of recent speeds to keep for baseline & peak detection
   SHUTTLE_SEARCH_WINDOW: 10, // Frames to search around hit for shuttle position (±10 frames)
   SHUTTLE_PROXIMITY_PX: 200, // Max pixel distance between shuttle and player for a valid hit
 } as const
@@ -245,6 +242,15 @@ function recordTrailPositions() {
     // Keep trail length bounded (like YOLO26's `if len(track) > 30: track.pop(0)`)
     if (trail.length > maxLength) {
       trail.splice(0, trail.length - maxLength)
+    }
+  }
+
+  const activePlayerIds = new Set(smoothedPlayerPositions.keys())
+  if (activePlayerIds.size > 0) {
+    for (const [playerId] of playerTrails.value) {
+      if (!activePlayerIds.has(playerId)) {
+        playerTrails.value.delete(playerId)
+      }
     }
   }
 }
@@ -418,7 +424,7 @@ function detectHits(): boolean {
       }
       
       // Need at least 4 speed values for robust peak detection (previous, peak, current, + baseline)
-      if (state.speeds.length < 4) continue
+      if (state.speeds.length < 6) continue
       
       const n = state.speeds.length
       const currSpeed = state.speeds[n - 1]!    // Current frame speed (after suspected peak)
@@ -440,7 +446,7 @@ function detectHits(): boolean {
       
       // --- Layer 3: Peak prominence above baseline ---
       // Compute baseline as the median of all speeds in the window (excluding the peak itself)
-      const baselineSpeeds = [...state.speeds.slice(0, n - 2), ...state.speeds.slice(n - 1)]
+      const baselineSpeeds = state.speeds.slice(0, n - 2)
       const baselineMedian = median(baselineSpeeds)
       const prominenceOk = baselineMedian < 1 || (peakSpeed >= baselineMedian * HIT_DETECTION_CONFIG.PEAK_PROMINENCE)
       if (!prominenceOk) continue
@@ -465,12 +471,12 @@ function detectHits(): boolean {
       if (!feetPos) continue
       
       const courtPos = applyHomography(H, feetPos.x, feetPos.y)
-      if (!courtPos) continue
-      
+      if (!courtPos || isNaN(courtPos.x) || isNaN(courtPos.y)) continue
+
       // Bounds check (allow small margin for near-boundary hits)
       if (courtPos.x < -1 || courtPos.x > COURT_WIDTH + 1 ||
           courtPos.y < -1 || courtPos.y > COURT_LENGTH + 1) continue
-      
+
       // Increment sequential hit counter for this player
       let hitCount = playerHitCounters.get(player.player_id) ?? 0
       hitCount++
@@ -654,7 +660,9 @@ function transformPlayerPosition(pixelX: number, pixelY: number): { x: number; y
   const H = homographyMatrix.value
   if (!H) return null
   
-  return applyHomography(H, pixelX, pixelY)
+  const result = applyHomography(H, pixelX, pixelY)
+  if (!result || isNaN(result.x) || isNaN(result.y)) return null
+  return result
 }
 
 /**
@@ -803,7 +811,8 @@ function drawPlayerTrails(ctx: CanvasRenderingContext2D) {
     if (trail.length < 2) return
     
     // Use same color mapping as drawPlayers (player_id is 0-based)
-    const color = PLAYER_COLORS[playerId % PLAYER_COLORS.length] ?? '#FF6B6B'
+    const displayPid = pidDisplayFor(playerId)
+    const color = PLAYER_COLORS[displayPid % PLAYER_COLORS.length] ?? '#FF6B6B'
     
     // Draw trail as a gradient line that fades from old to new
     ctx.lineCap = 'round'
@@ -1016,7 +1025,8 @@ function drawPlayers(ctx: CanvasRenderingContext2D) {
     const canvasPos = courtToCanvas(smoothed.courtX, smoothed.courtY)
     
     // Use gray when not recognized, normal player color when recognized
-    const normalColor = PLAYER_COLORS[playerId % PLAYER_COLORS.length] ?? '#FF6B6B'
+    const displayPid = pidDisplayFor(playerId)
+    const normalColor = PLAYER_COLORS[displayPid % PLAYER_COLORS.length] ?? '#FF6B6B'
     const color = smoothed.isRecognized ? normalColor : UNRECOGNIZED_COLOR
     
     // Draw player circle with glow effect
@@ -1054,7 +1064,10 @@ function drawPlayers(ctx: CanvasRenderingContext2D) {
     ctx.fillStyle = smoothed.isRecognized ? '#FFFFFF' : 'rgba(255, 255, 255, 0.7)'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(`P${playerId + 1}`, canvasPos.x, canvasPos.y)
+    const labelName = pidLabelFor(playerId)
+    // Compact form for the dot overlay: "Player 1" → "P1"; custom names stay as-is.
+    const labelText = labelName.startsWith('Player ') ? `P${labelName.slice(7)}` : labelName
+    ctx.fillText(labelText, canvasPos.x, canvasPos.y)
     
     // Speed indicator below player (only when recognized and moving)
     if (smoothed.isRecognized && smoothed.speed > 0.1) {
@@ -1090,82 +1103,6 @@ function drawShuttle(ctx: CanvasRenderingContext2D) {
   ctx.strokeRect(-5, -5, 10, 10)
   
   ctx.restore()
-}
-
-/**
- * Draw keypoint selection guide overlay
- * Shows numbered positions on the court for each keypoint
- */
-function drawKeypointSelectionGuide(ctx: CanvasRenderingContext2D) {
-  if (!props.isKeypointSelectionMode) return
-  
-  const count = props.keypointSelectionCount
-  
-  // Keypoint labels (abbreviated)
-  const KEYPOINT_LABELS = ['TL', 'TR', 'BR', 'BL', 'NL', 'NR', 'SNL', 'SNR', 'SFL', 'SFR', 'CTN', 'CTF']
-  
-  // Draw each keypoint position
-  COURT_KEYPOINT_POSITIONS.forEach((pos, index) => {
-    const canvasPos = courtToCanvas(pos[0]!, pos[1]!)
-    const isCompmleted = index < count
-    const isActive = index === count
-    const isPending = index > count
-    
-    // Draw the point circle
-    ctx.beginPath()
-    ctx.arc(canvasPos.x, canvasPos.y, isActive ? 14 : 10, 0, Math.PI * 2)
-    
-    if (isActive) {
-      // Active point - bright green with pulse effect (simulated with glow)
-      ctx.fillStyle = '#22c55e'
-      ctx.shadowColor = '#22c55e'
-      ctx.shadowBlur = 12
-    } else if (isCompmleted) {
-      // Completed point - dimmed green
-      ctx.fillStyle = 'rgba(34, 197, 94, 0.4)'
-      ctx.shadowBlur = 0
-    } else {
-      // Pending point - gray
-      ctx.fillStyle = 'rgba(100, 100, 100, 0.6)'
-      ctx.shadowBlur = 0
-    }
-    
-    ctx.fill()
-    ctx.shadowBlur = 0
-    
-    // Draw border
-    ctx.strokeStyle = isActive ? '#22c55e' : isCompmleted ? 'rgba(34, 197, 94, 0.6)' : 'rgba(150, 150, 150, 0.5)'
-    ctx.lineWidth = 2
-    ctx.stroke()
-    
-    // Draw number
-    ctx.font = isActive ? 'bold 11px Inter, sans-serif' : '10px Inter, sans-serif'
-    ctx.fillStyle = isActive ? '#000' : isCompmleted ? '#22c55e' : 'rgba(255, 255, 255, 0.6)'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(`${index + 1}`, canvasPos.x, canvasPos.y)
-    
-    // Draw label below for active or completed points
-    if (isActive || isCompmleted) {
-      ctx.font = '8px Inter, sans-serif'
-      ctx.fillStyle = isActive ? '#22c55e' : 'rgba(34, 197, 94, 0.7)'
-      ctx.fillText(KEYPOINT_LABELS[index]!, canvasPos.x, canvasPos.y + 18)
-    }
-  })
-  
-  // Draw instruction at the bottom of the canvas
-  const instructionY = canvasHeight.value - 8
-  if (count < 12) {
-    ctx.font = 'bold 11px Inter, sans-serif'
-    ctx.fillStyle = '#22c55e'
-    ctx.textAlign = 'center'
-    ctx.fillText(`Click point ${count + 1}`, props.width / 2, instructionY)
-  } else {
-    ctx.font = 'bold 11px Inter, sans-serif'
-    ctx.fillStyle = '#22c55e'
-    ctx.textAlign = 'center'
-    ctx.fillText('✓ All set!', props.width / 2, instructionY)
-  }
 }
 
 /**
@@ -1245,8 +1182,8 @@ function updateTargetPositions() {
       if (!feetPos) continue
       
       const courtPos = applyHomography(H, feetPos.x, feetPos.y)
-      if (!courtPos) continue
-      
+      if (!courtPos || isNaN(courtPos.x) || isNaN(courtPos.y)) continue
+
       // Bounds check - if out of bounds, treat as unrecognized (likely bad detection)
       const margin = 2
       if (courtPos.x < -margin || courtPos.x > COURT_WIDTH + margin ||
@@ -1395,7 +1332,7 @@ function updateTargetPositions() {
   // Update shuttle target
   if (props.shuttlePosition && props.showShuttle) {
     const courtPos = applyHomography(H, props.shuttlePosition.x, props.shuttlePosition.y)
-    if (courtPos &&
+    if (courtPos && !isNaN(courtPos.x) && !isNaN(courtPos.y) &&
         courtPos.x >= -1 && courtPos.x <= COURT_WIDTH + 1 &&
         courtPos.y >= -1 && courtPos.y <= COURT_LENGTH + 1) {
       if (smoothedShuttle) {
@@ -1417,6 +1354,19 @@ function updateTargetPositions() {
   // Record smoothed positions into trails (follows YOLO26 track_history pattern)
   recordTrailPositions()
   
+  // Trim hit markers when seeking backward
+  if (props.currentFrame !== undefined && props.currentFrame < lastHitDetectionFrame) {
+    for (const [playerId, markers] of hitMarkers.value) {
+      const filtered = markers.filter(m => m.frame <= props.currentFrame!)
+      hitMarkers.value.set(playerId, filtered)
+    }
+    for (const [playerId, markers] of hitMarkers.value) {
+      playerHitCounters.set(playerId, markers.length)
+    }
+    playerWristStates.clear()
+    lastHitDetectionFrame = props.currentFrame
+  }
+
   // Run hit detection on skeleton data up to current frame
   if (props.showHitMarkers) {
     detectHits()
@@ -1536,13 +1486,7 @@ function renderFrame() {
   
   // Always draw the court first (even without court corner data)
   drawCourt(ctx)
-  
-  // In keypoint selection mode, show the keypoint guide overlay
-  if (props.isKeypointSelectionMode) {
-    drawKeypointSelectionGuide(ctx)
-    return
-  }
-  
+
   // Only draw players/trails/shuttle when we have valid court corners for tracking
   if (!effectiveCourtCorners.value) {
     return
@@ -1594,8 +1538,6 @@ watch([
   () => props.showShuttle,
   () => props.showTrails,
   () => props.showHitMarkers,
-  () => props.isKeypointSelectionMode,
-  () => props.keypointSelectionCount,
   () => props.height,
   () => props.width,
   () => props.skeletonData

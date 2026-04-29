@@ -1,5 +1,6 @@
 import { action, mutation, query, internalMutation } from "./_generated/server"
 import { v } from "convex/values"
+import type { Id } from "./_generated/dataModel"
 import { api, internal } from "./_generated/api"
 
 // =============================================================================
@@ -91,7 +92,6 @@ export const createVideo = mutation({
     storageId: v.id("_storage"),
     filename: v.string(),
     size: v.number(),
-    analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
   },
   handler: async (ctx, args) => {
     const videoId = await ctx.db.insert("videos", {
@@ -99,7 +99,6 @@ export const createVideo = mutation({
       filename: args.filename,
       size: args.size,
       status: "uploaded",
-      analysisMode: args.analysisMode ?? "full",
       createdAt: Date.now(),
     })
     
@@ -168,6 +167,7 @@ export const updateResults = mutation({
       processed_frames: v.number(),
       player_count: v.optional(v.number()),
       has_court_detection: v.optional(v.boolean()),
+      // Backwards-compat shim for v1.8-era records; see schema.ts.
       has_shuttle_analytics: v.optional(v.boolean()),
       has_rally_detection: v.optional(v.boolean()),
       rally_count: v.optional(v.number()),
@@ -234,35 +234,114 @@ export const addLog = mutation({
 })
 
 /**
- * Delete a video and its associated data
+ * Delete a BOUNDED batch of log rows for a video. Used by deleteAllVideos
+ * to avoid tripping Convex's 4096-read-per-mutation cap on videos with
+ * thousands of accumulated logs. Returns how many rows were deleted so
+ * the caller can loop until 0.
+ */
+export const deleteVideoLogsBatch = mutation({
+  args: { videoId: v.id("videos"), limit: v.number() },
+  handler: async (ctx, { videoId, limit }) => {
+    const logs = await ctx.db
+      .query("processingLogs")
+      .withIndex("by_videoId", (q) => q.eq("videoId", videoId))
+      .take(limit)
+    for (const log of logs) await ctx.db.delete(log._id)
+    return logs.length
+  },
+})
+
+/**
+ * Delete a video's storage blobs + the record itself. ASSUMES logs are
+ * already drained by deleteVideoLogsBatch (bulk path) — for the per-video
+ * UI delete, this still works when log count is small (well under 4096).
+ *
+ * Bug fix: previously missed resultsStorageId — the JSON file that holds
+ * skeleton + shuttle + rally output. Without this, deleting a video
+ * orphaned its results blob in Convex storage.
  */
 export const deleteVideo = mutation({
   args: { videoId: v.id("videos") },
   handler: async (ctx, { videoId }) => {
     const video = await ctx.db.get(videoId)
     if (!video) return
-    
-    // Delete storage files
-    if (video.storageId) {
-      await ctx.storage.delete(video.storageId)
-    }
-    if (video.processedVideoStorageId) {
-      await ctx.storage.delete(video.processedVideoStorageId)
-    }
-    if (video.skeletonDataStorageId) {
-      await ctx.storage.delete(video.skeletonDataStorageId)
-    }
-    
-    // Delete logs
+
+    // Delete every storage blob this record references. Each field is
+    // independently optional, and a blob may already be gone from a
+    // prior partial sweep — tolerate per-blob failures so a single stale
+    // id can't prevent the record itself from being deleted.
+    const blobIds = [
+      video.storageId,
+      video.resultsStorageId,
+      video.processedVideoStorageId,
+      video.skeletonDataStorageId,
+      video.playerLabels?.player_0_thumbnail,
+      video.playerLabels?.player_1_thumbnail,
+    ].filter((id): id is Id<"_storage"> => id != null)
+
+    await Promise.allSettled(blobIds.map(id => ctx.storage.delete(id)))
+
+    // Drain logs. For normal per-video deletes log count is small; when
+    // the bulk deleteAllVideos action is running it has already drained
+    // logs via deleteVideoLogsBatch, so .take(1000) here is a safety net.
     const logs = await ctx.db
       .query("processingLogs")
       .withIndex("by_videoId", (q) => q.eq("videoId", videoId))
-      .collect()
-    
+      .take(1000)
+
     await Promise.all(logs.map(log => ctx.db.delete(log._id)))
-    
+
     // Delete video record
     await ctx.db.delete(videoId)
+  },
+})
+
+/**
+ * Internal query: list every video's ID so the deleteAllVideos action can
+ * iterate without blowing past the per-mutation read cap.
+ */
+export const listAllVideoIds = query({
+  args: {},
+  handler: async (ctx) => {
+    const videos = await ctx.db.query("videos").collect()
+    return videos.map(v => v._id)
+  },
+})
+
+/**
+ * Delete EVERY video + its storage blobs + its logs.
+ *
+ * Destructive, irreversible. Runs as an action so each per-video delete
+ * executes in its own mutation transaction — Convex caps reads at 4096
+ * per function call, and a single video can have thousands of log rows,
+ * so a single-mutation sweep is not viable at scale.
+ */
+export const deleteAllVideos = action({
+  args: {},
+  handler: async (ctx): Promise<{ deleted: number; failed: number }> => {
+    const ids: Id<"videos">[] = await ctx.runQuery(api.videos.listAllVideoIds, {})
+    let deleted = 0
+    let failed = 0
+    const LOG_BATCH = 1000
+    for (const id of ids) {
+      try {
+        // Drain logs in batches first — per-video log count can exceed
+        // Convex's 4096-read mutation cap.
+        for (;;) {
+          const n: number = await ctx.runMutation(
+            api.videos.deleteVideoLogsBatch,
+            { videoId: id, limit: LOG_BATCH },
+          )
+          if (n < LOG_BATCH) break
+        }
+        await ctx.runMutation(api.videos.deleteVideo, { videoId: id })
+        deleted++
+      } catch (err) {
+        console.error(`[deleteAllVideos] failed to delete ${id}:`, err)
+        failed++
+      }
+    }
+    return { deleted, failed }
   },
 })
 
@@ -323,11 +402,73 @@ export const getManualCourtKeypoints = query({
   handler: async (ctx, { videoId }) => {
     const video = await ctx.db.get(videoId)
     if (!video) return null
-    
+
     return {
       has_manual_keypoints: !!video.manualCourtKeypoints,
       keypoints: video.manualCourtKeypoints || null,
     }
+  },
+})
+
+export const getPlayerLabels = query({
+  args: { videoId: v.id("videos") },
+  handler: async (ctx, { videoId }) => {
+    const video = await ctx.db.get(videoId)
+    if (!video) return null
+    return video.playerLabels ?? null
+  },
+})
+
+/**
+ * Resolve a Convex storage id to a signed, time-limited URL suitable
+ * for <img src>. Used by the Player Identity panel to render player
+ * thumbnail blobs stored at `playerLabels.player_{0,1}_thumbnail`.
+ */
+export const getStorageUrl = query({
+  args: { storageId: v.id("_storage") },
+  handler: async (ctx, { storageId }) => {
+    return await ctx.storage.getUrl(storageId)
+  },
+})
+
+export const updatePlayerLabels = mutation({
+  args: {
+    videoId: v.id("videos"),
+    swapped: v.optional(v.boolean()),
+    player_0_name: v.optional(v.string()),
+    player_1_name: v.optional(v.string()),
+  },
+  handler: async (ctx, { videoId, swapped, player_0_name, player_1_name }) => {
+    const video = await ctx.db.get(videoId)
+    if (!video) throw new Error("Video not found")
+
+    const next = { ...(video.playerLabels ?? {}) }
+    if (swapped !== undefined) next.swapped = swapped
+    if (player_0_name !== undefined) next.player_0_name = player_0_name
+    if (player_1_name !== undefined) next.player_1_name = player_1_name
+
+    await ctx.db.patch(videoId, { playerLabels: next })
+    return { success: true, playerLabels: next }
+  },
+})
+
+export const setPlayerThumbnails = mutation({
+  args: {
+    videoId: v.id("videos"),
+    player_0_thumbnail: v.id("_storage"),
+    player_1_thumbnail: v.id("_storage"),
+  },
+  handler: async (ctx, { videoId, player_0_thumbnail, player_1_thumbnail }) => {
+    const video = await ctx.db.get(videoId)
+    if (!video) throw new Error("Video not found")
+
+    const next = {
+      ...(video.playerLabels ?? {}),
+      player_0_thumbnail,
+      player_1_thumbnail,
+    }
+    await ctx.db.patch(videoId, { playerLabels: next })
+    return { success: true }
   },
 })
 
@@ -352,9 +493,6 @@ export const processVideo = action({
       throw new Error("Failed to get video URL")
     }
     
-    // Get analysis mode (default to "full" for backwards compatibility)
-    const analysisMode = video.analysisMode ?? "full"
-
     // Get manual court keypoints if available (for ROI filtering)
     const keypointsData = await ctx.runQuery(api.videos.getManualCourtKeypoints, { videoId })
     
@@ -426,7 +564,6 @@ export const processVideo = action({
           callbackUrl: convexSiteUrl,
           // Pass manual keypoints for court ROI filtering
           manualCourtKeypoints: hasCourtKeypoints ? keypointsData.keypoints : null,
-          analysisMode,
         }),
       })
 

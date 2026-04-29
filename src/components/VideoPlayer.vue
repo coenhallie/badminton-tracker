@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toRef, type Ref } from 'vue'
-import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, BoundingBoxDetection } from '@/types/analysis'
+import { ref, onMounted, onUnmounted, watch, computed, shallowRef, nextTick, toRef, inject, type Ref } from 'vue'
+import type { SkeletonFrame, FramePlayer, Keypoint, BadmintonDetections, BoundingBoxDetection, ExtendedCourtKeypoints } from '@/types/analysis'
 import { SKELETON_CONNECTIONS, PLAYER_COLORS } from '@/types/analysis'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
 import PoseOverlay from './PoseOverlay.vue'
+import ShotSummaryOverlay from './ShotSummaryOverlay.vue'
+import type { ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
+import SyntheticCourtView from './SyntheticCourtView.vue'
+import ViewportControls from '@/components/ViewportControls.vue'
 import { useVideoExport } from '@/composables/useVideoExport'
+import { useViewportCamera } from '@/composables/useViewportCamera'
+import { computeHomographyFromKeypoints, applyHomography } from '@/utils/homography'
+import { legStretchMeters } from '@/utils/bodyAngles'
 
 // =============================================================================
 // PERFORMANCE OPTIMIZATION: Debug mode flag
@@ -13,15 +21,16 @@ import { useVideoExport } from '@/composables/useVideoExport'
 // =============================================================================
 const DEBUG_MODE = import.meta.env.DEV && false // Disabled even in dev by default
 
+// Injected lazily from App.vue; null until a videoId is available and the
+// composable has been instantiated. Consumers must tolerate null fallback.
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
+const pidLabelFor = (canonical: number): string =>
+  playerLabelsRef?.value?.labelFor(canonical) ?? `Player ${canonical + 1}`
+
 // NOTE: CourtDetectionResult interface removed - automatic court detection disabled
 // Manual court keypoints are now the only method for court calibration
-
-// Manual court keypoint type
-interface ManualCourtKeypoint {
-  x: number
-  y: number
-  label: string
-}
 
 // Heatmap data type
 interface HeatmapData {
@@ -140,11 +149,12 @@ function computeProgressiveHeatmap(
   skeletonData: SkeletonFrame[],
   currentFrameNum: number,
   videoWidth: number,
-  videoHeight: number
+  videoHeight: number,
+  frameRange?: { start: number; end: number } | null
 ): ProgressiveHeatmapState | null {
   if (!skeletonData || skeletonData.length === 0) return null
   if (videoWidth <= 0 || videoHeight <= 0) return null
-  
+
   // Initialize or check if we need to reset (if seeking backwards)
   if (!progressiveHeatmapState ||
       progressiveHeatmapState.videoWidth !== videoWidth ||
@@ -156,18 +166,24 @@ function computeProgressiveHeatmap(
       console.log('[Progressive Heatmap] Initialized/reset state for frame', currentFrameNum)
     }
   }
-  
+
   // Process frames from last processed to current
   const startIdx = progressiveHeatmapState.lastProcessedFrame < 0 ? 0 :
     skeletonData.findIndex(f => f.frame > progressiveHeatmapState!.lastProcessedFrame)
-  
+
   if (startIdx < 0) return progressiveHeatmapState
   
   let framesProcessed = 0
   for (let i = startIdx; i < skeletonData.length; i++) {
     const frame = skeletonData[i]
     if (!frame || frame.frame > currentFrameNum) break
-    
+
+    // Skip frames outside the rally frame range (if filtering by rally)
+    if (frameRange && (frame.frame < frameRange.start || frame.frame > frameRange.end)) {
+      progressiveHeatmapState.lastProcessedFrame = frame.frame
+      continue
+    }
+
     // Add heat for each player's position
     for (const player of frame.players) {
       // Use center point if available, otherwise try to compute from keypoints
@@ -259,7 +275,6 @@ const props = defineProps<{
   skeletonData?: SkeletonFrame[]
   // NOTE: courtDetection prop removed - automatic court detection disabled
   // Manual court keypoints are now the only method for court calibration
-  heatmapData?: HeatmapData | null
   showSkeleton?: boolean
   showBoundingBoxes?: boolean
   showPlayers?: boolean
@@ -269,50 +284,212 @@ const props = defineProps<{
   poseSource?: 'skeleton' | 'trained' | 'both'
   // NOTE: showCourtOverlay prop removed - no automatic court detection to display
   showHeatmap?: boolean
+  showShuttleTracking?: boolean
+  heatmapFrameRange?: { start: number; end: number } | null
+  courtKeypoints?: number[][] | null
+  manualCourtKeypoints?: ExtendedCourtKeypoints | null
+  viewMode?: 'video' | 'court'
+  videoFps?: number
+  shotSummarySegment?: ShotMovementSegmentWithPeaks | null
+  shotSummaryCountdown?: number
 }>()
 
 // Colors for bounding boxes (matching backend colors)
 const PLAYER_BOX_COLOR = '#00FF00'      // Green for players
-const SHUTTLE_BOX_COLOR = '#FFA500'     // Orange for shuttlecock
+const PLAYER_UNASSIGNED_BOX_COLOR = '#FFD60A'  // Amber when pid is unknown
+const SHUTTLE_BOX_COLOR = '#FFA500'     // Orange for shuttlecock (YOLO)
+const SHUTTLE_TRACKNET_COLOR = '#00E5FF' // Cyan for TrackNet shuttle detection
+const SHUTTLE_YOLO_COLOR = '#FFA500'     // Orange for YOLO shuttle detection
 const RACKET_BOX_COLOR = '#FF00FF'      // Magenta for rackets
 const OTHER_BOX_COLOR = '#00FFFF'       // Cyan for other detections
 
 // NOTE: COURT_REGION_COLORS removed - automatic court detection disabled
 
-// Extended court keypoints type for 12-point system
-interface ExtendedCourtKeypoints {
-  // 4 outer corners
-  top_left: number[]
-  top_right: number[]
-  bottom_right: number[]
-  bottom_left: number[]
-  // Net intersections
-  net_left: number[]
-  net_right: number[]
-  // Service line corners (near court - top half)
-  service_near_left: number[]
-  service_near_right: number[]
-  // Service line corners (far court - bottom half)
-  service_far_left: number[]
-  service_far_right: number[]
-  // Center line endpoints
-  center_near: number[]
-  center_far: number[]
-}
+// Canonical ExtendedCourtKeypoints type lives in @/types/analysis.
 
 const emit = defineEmits<{
   timeUpdate: [time: number]
   frameUpdate: [frame: number]
-  courtKeypointsSet: [keypoints: ExtendedCourtKeypoints]
-  keypointsConfirmed: [keypoints: ExtendedCourtKeypoints]
   play: []
-  keypointSelectionChange: [isActive: boolean, currentCount: number]
 }>()
 
 const videoRef = ref<HTMLVideoElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
-const keypointCanvasRef = ref<HTMLCanvasElement | null>(null)
 const containerRef = ref<HTMLDivElement | null>(null)
+
+const camera = useViewportCamera()
+const zoomCaptureRef = ref<HTMLDivElement | null>(null)
+
+// Follow-player state. null = free camera; 0 or 1 = lock onto that player_id
+// and re-center every frame. Click a player's skeleton to lock; grab-pan the
+// canvas to release.
+const followedPlayerId = ref<number | null>(null)
+
+// Drag vs click distinction: a mousedown+mouseup within CLICK_THRESHOLD_PX
+// is treated as a click (for follow hit-test); anything beyond that becomes
+// a pan drag and exits follow mode.
+let isPanning = false
+let didPanMove = false
+let panStartX = 0
+let panStartY = 0
+let lastPanX = 0
+let lastPanY = 0
+const CLICK_THRESHOLD_PX = 5
+
+function onZoomWheel(e: WheelEvent) {
+  e.preventDefault()
+  const el = zoomCaptureRef.value
+  if (!el) return
+  // Wheel up (deltaY < 0) = zoom in. One notch ≈ 1.15×.
+  const delta = e.deltaY < 0 ? 1.15 : 1 / 1.15
+  camera.zoomAt(el, e.clientX, e.clientY, delta)
+}
+
+function onZoomMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return
+  isPanning = true
+  didPanMove = false
+  panStartX = e.clientX
+  panStartY = e.clientY
+  lastPanX = e.clientX
+  lastPanY = e.clientY
+  window.addEventListener('mousemove', onZoomMouseMove)
+  window.addEventListener('mouseup', onZoomMouseUp)
+}
+
+function onZoomMouseMove(e: MouseEvent) {
+  if (!isPanning) return
+  const el = zoomCaptureRef.value
+  if (!el) return
+
+  if (!didPanMove) {
+    const totalDx = e.clientX - panStartX
+    const totalDy = e.clientY - panStartY
+    if (Math.hypot(totalDx, totalDy) > CLICK_THRESHOLD_PX) {
+      didPanMove = true
+      // Deliberate pan movement — release follow-lock so the user's pan sticks.
+      followedPlayerId.value = null
+    }
+  }
+
+  if (didPanMove) {
+    const dx = e.clientX - lastPanX
+    const dy = e.clientY - lastPanY
+    camera.panBy(el, dx, dy)
+  }
+  lastPanX = e.clientX
+  lastPanY = e.clientY
+}
+
+function onZoomMouseUp(e: MouseEvent) {
+  const wasClick = isPanning && !didPanMove
+  isPanning = false
+  window.removeEventListener('mousemove', onZoomMouseMove)
+  window.removeEventListener('mouseup', onZoomMouseUp)
+  if (wasClick) handleZoomCaptureClick(e)
+}
+
+function onZoomDoubleClick() {
+  camera.reset()
+}
+
+// Click hit-test: find which player the click lands on and lock the
+// follow-camera onto them. Prefers the tracker's detection bbox (what the
+// user sees when showBoundingBoxes is on), then falls back to the
+// keypoint bbox (for when boxes are hidden and the user clicks a bone).
+// Clicks on empty area do nothing (to avoid stealing clicks away from
+// ongoing follow sessions).
+function handleZoomCaptureClick(e: MouseEvent) {
+  const el = zoomCaptureRef.value
+  const video = videoRef.value
+  if (!el || !video) return
+
+  const rect = el.getBoundingClientRect()
+  const screenX = e.clientX - rect.left
+  const screenY = e.clientY - rect.top
+  const world = camera.screenToWorld(screenX, screenY)
+
+  // Convert world (canvas-pixel) coords back to video-pixel coords so we can
+  // hit-test against raw detection / keypoint coordinates. The canvas-pixel
+  // grid matches the video-pixel grid after resizeCanvas(), so sx/sy are
+  // ≈ 1; we still compute them defensively in case resizeCanvas hasn't run.
+  const vw = video.videoWidth || video.clientWidth || 1
+  const vh = video.videoHeight || video.clientHeight || 1
+  const canvasW = canvasRef.value?.width || vw
+  const canvasH = canvasRef.value?.height || vh
+  const sx = canvasW / vw
+  const sy = canvasH / vh
+  const videoX = world.x / sx
+  const videoY = world.y / sy
+
+  const frame = findInterpolatedFrame(video.currentTime ?? 0)
+  if (!frame) return
+
+  // 1. Preferred: detection bbox from the backend tracker. x/y are the
+  //    bbox CENTER (see drawBoundingBoxes). A small pad handles slightly-
+  //    off clicks near the edge.
+  const BBOX_PAD = 8
+  for (const det of frame.badminton_detections?.players ?? []) {
+    if (det.player_id == null) continue
+    const minX = det.x - det.width / 2
+    const maxX = det.x + det.width / 2
+    const minY = det.y - det.height / 2
+    const maxY = det.y + det.height / 2
+    if (videoX >= minX - BBOX_PAD && videoX <= maxX + BBOX_PAD &&
+        videoY >= minY - BBOX_PAD && videoY <= maxY + BBOX_PAD) {
+      followedPlayerId.value = det.player_id
+      return
+    }
+  }
+
+  // 2. Fallback: keypoint bbox. Generous pad because users rarely click a
+  //    bone exactly, and the keypoint bbox can be much tighter than the
+  //    player's visible silhouette.
+  const KP_PAD = 40
+  for (const player of frame.players ?? []) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    let any = false
+    for (const k of player.keypoints ?? []) {
+      if (k == null || k.x == null || k.y == null) continue
+      if (k.confidence <= KEYPOINT_CONFIDENCE_THRESHOLD) continue
+      any = true
+      if (k.x < minX) minX = k.x
+      if (k.x > maxX) maxX = k.x
+      if (k.y < minY) minY = k.y
+      if (k.y > maxY) maxY = k.y
+    }
+    if (!any) continue
+    if (videoX >= minX - KP_PAD && videoX <= maxX + KP_PAD &&
+        videoY >= minY - KP_PAD && videoY <= maxY + KP_PAD) {
+      followedPlayerId.value = player.player_id
+      return
+    }
+  }
+}
+
+let zoomResizeObserver: ResizeObserver | null = null
+
+function attachZoomResizeObserver() {
+  const el = zoomCaptureRef.value
+  if (!el || zoomResizeObserver) return
+  zoomResizeObserver = new ResizeObserver(() => camera.reclamp(el))
+  zoomResizeObserver.observe(el)
+}
+
+function detachZoomResizeObserver() {
+  if (zoomResizeObserver) {
+    zoomResizeObserver.disconnect()
+    zoomResizeObserver = null
+  }
+}
+
+watch(zoomCaptureRef, (el) => {
+  if (el) {
+    attachZoomResizeObserver()
+  } else {
+    detachZoomResizeObserver()
+  }
+})
 
 const isPlaying = ref(false)
 const currentTime = ref(0)
@@ -322,42 +499,6 @@ const isMuted = ref(false)
 const playbackRate = ref(1)
 const isFullscreen = ref(false)
 const showControls = ref(true)
-
-// =============================================================================
-// MANUAL COURT KEYPOINT SELECTION - 12 POINT SYSTEM
-// =============================================================================
-// Users can click on 12 court reference points for precise homography:
-// 1-4: Outer corners (TL, TR, BR, BL)
-// 5-6: Net intersections (NL, NR)
-// 7-8: Near service line corners (SSL_NL, SSL_NR)
-// 9-10: Far service line corners (SSL_FL, SSL_FR)
-// 11-12: Center line endpoints at service lines (CT_N, CT_F)
-// =============================================================================
-const isKeypointSelectionMode = ref(false)
-const manualKeypoints = ref<ManualCourtKeypoint[]>([])
-const TOTAL_KEYPOINTS = 12
-const KEYPOINT_LABELS = [
-  'TL', 'TR', 'BR', 'BL',           // 4 outer corners
-  'NL', 'NR',                        // Net intersections with sidelines
-  'SNL', 'SNR',                      // Service line near court (top half)
-  'SFL', 'SFR',                      // Service line far court (bottom half)
-  'CTN', 'CTF'                       // Center line at service lines
-] as const
-const KEYPOINT_FULL_LABELS = [
-  'Top-Left Corner', 'Top-Right Corner', 'Bottom-Right Corner', 'Bottom-Left Corner',
-  'Net-Left', 'Net-Right',
-  'Service Near-Left', 'Service Near-Right',
-  'Service Far-Left', 'Service Far-Right',
-  'Center Near', 'Center Far'
-] as const
-// 12 distinct colors for each keypoint
-const keypointColors = [
-  '#FF4444', '#44FF44', '#4444FF', '#FFFF44',  // Corners: Red, Green, Blue, Yellow
-  '#FF00FF', '#00FFFF',                         // Net: Magenta, Cyan
-  '#FF8800', '#88FF00',                         // Service near: Orange, Lime
-  '#0088FF', '#FF0088',                         // Service far: Azure, Rose
-  '#FFFFFF', '#888888'                          // Center: White, Gray
-]
 
 // Performance optimization: Pre-built index for O(1) frame lookup
 const frameIndex = shallowRef<Map<number, number>>(new Map())
@@ -380,6 +521,7 @@ let controlsTimeout: number | null = null
 // PERFORMANCE OPTIMIZATION: Cached canvas context and pre-computed values
 let cachedCtx: CanvasRenderingContext2D | null = null
 let lastFrameNumber = -1
+let lastMediaTime = -1
 
 const formattedCurrentTime = computed(() => formatTime(currentTime.value))
 const formattedDuration = computed(() => formatTime(duration.value))
@@ -421,7 +563,13 @@ watch(() => props.skeletonData, (newData) => {
   // If the first frame's timestamp is suspiciously close to 1/fps, shift all
   // timestamps back so the first frame aligns with video currentTime = 0.
   const firstTs = newData[0]!.timestamp
-  const timeOffset = firstTs > 0.01 ? firstTs : 0
+  let timeOffset = 0
+  if (newData.length >= 2 && firstTs > 0.001) {
+    const frameDuration = newData[1]!.timestamp - newData[0]!.timestamp
+    if (frameDuration > 0 && Math.abs(firstTs - frameDuration) / frameDuration < 0.2) {
+      timeOffset = firstTs
+    }
+  }
 
   newData.forEach((frame, idx) => {
     fIndex.set(frame.frame, idx)
@@ -590,7 +738,7 @@ function findInterpolatedFrame(targetTime: number): SkeletonFrame | null {
   // If very close to floor frame, just return it (avoid unnecessary work)
   if (t < 0.01) return floorFrame
   // If very close to ceiling frame, return ceiling
-  if (t > 0.99) return ceilFrame
+  if (t > 0.99 && targetTime >= (timestamps[ceilIdx] ?? Infinity)) return ceilFrame
 
   // Interpolate player positions
   const interpolatedPlayers: FramePlayer[] = floorFrame.players.map(floorPlayer => {
@@ -633,6 +781,7 @@ function findInterpolatedFrame(targetTime: number): SkeletonFrame | null {
     shuttle_position = {
       x: floorFrame.shuttle_position.x + (ceilFrame.shuttle_position.x - floorFrame.shuttle_position.x) * t,
       y: floorFrame.shuttle_position.y + (ceilFrame.shuttle_position.y - floorFrame.shuttle_position.y) * t,
+      source: floorFrame.shuttle_position.source,
     }
   }
 
@@ -644,8 +793,14 @@ function findInterpolatedFrame(targetTime: number): SkeletonFrame | null {
       ceilDets: BoundingBoxDetection[]
     ): BoundingBoxDetection[] => {
       return floorDets.map(fd => {
-        // Match by class and closest position
-        const cd = ceilDets.find(d => d.class === fd.class)
+        // Match by player_id when both frames carry it (player bboxes).
+        // Falling back to class would cross-wire Player 1's label onto
+        // Player 2's interpolated position when one player is missing
+        // in the ceil frame. For non-player detections (shuttle/racket)
+        // player_id is absent; match by class.
+        const cd = fd.player_id != null
+          ? ceilDets.find(d => d.player_id === fd.player_id)
+          : ceilDets.find(d => d.class === fd.class)
         if (!cd) return fd
         return {
           ...fd,
@@ -721,7 +876,6 @@ function handleLoadedMetadata() {
   if (!videoRef.value) return
   duration.value = videoRef.value.duration
   resizeCanvas()
-  resizeKeypointCanvas()
 }
 
 function handleSeek(event: MouseEvent) {
@@ -774,309 +928,19 @@ function handleFullscreenChange() {
   isFullscreen.value = !!document.fullscreenElement
 }
 
-// =============================================================================
-// MANUAL KEYPOINT SELECTION FUNCTIONS
-// =============================================================================
-
-/**
- * Toggle keypoint selection mode on/off
- * When entering mode, pause the video for precise clicking
- */
-function toggleKeypointSelectionMode() {
-  isKeypointSelectionMode.value = !isKeypointSelectionMode.value
-  
-  if (isKeypointSelectionMode.value) {
-    // Pause video when entering keypoint selection mode
-    if (videoRef.value && isPlaying.value) {
-      videoRef.value.pause()
-    }
-    // Clear previous keypoints when starting new selection
-    manualKeypoints.value = []
-    // Initialize keypoint canvas
-    nextTick(() => {
-      resizeKeypointCanvas()
-      drawKeypointOverlay()
-    })
-  }
-}
-
-/**
- * Clear all manually selected keypoints and exit selection mode
- */
-function clearManualKeypoints() {
-  manualKeypoints.value = []
-  isKeypointSelectionMode.value = false
-  drawKeypointOverlay()
-}
-
-/**
- * Resize keypoint canvas to match video dimensions
- */
-function resizeKeypointCanvas() {
-  if (!keypointCanvasRef.value || !videoRef.value) return
-  keypointCanvasRef.value.width = videoRef.value.videoWidth || videoRef.value.clientWidth
-  keypointCanvasRef.value.height = videoRef.value.videoHeight || videoRef.value.clientHeight
-}
-
-/**
- * Handle click on keypoint canvas to add a new keypoint
- */
-function handleKeypointCanvasClick(event: MouseEvent) {
-  if (!isKeypointSelectionMode.value) return
-  if (manualKeypoints.value.length >= TOTAL_KEYPOINTS) return
-  
-  const canvas = keypointCanvasRef.value
-  if (!canvas) return
-  
-  // Get click position relative to canvas
-  const rect = canvas.getBoundingClientRect()
-  const clickX = event.clientX - rect.left
-  const clickY = event.clientY - rect.top
-  
-  // Scale click position to video coordinates
-  const scaleX = (videoRef.value?.videoWidth || canvas.width) / rect.width
-  const scaleY = (videoRef.value?.videoHeight || canvas.height) / rect.height
-  
-  const videoX = clickX * scaleX
-  const videoY = clickY * scaleY
-  
-  // Add keypoint
-  const label = KEYPOINT_LABELS[manualKeypoints.value.length] ?? 'Unknown'
-  manualKeypoints.value.push({
-    x: videoX,
-    y: videoY,
-    label
-  })
-  
-  if (DEBUG_MODE) {
-    console.log(`[Keypoint Selection] Added ${label} at (${videoX.toFixed(1)}, ${videoY.toFixed(1)}) [${manualKeypoints.value.length}/${TOTAL_KEYPOINTS}]`)
-  }
-  
-  // Redraw overlay
-  drawKeypointOverlay()
-  
-  // If we have all 12 keypoints, emit them
-  if (manualKeypoints.value.length === TOTAL_KEYPOINTS) {
-    const kp = manualKeypoints.value
-    const keypointsData: ExtendedCourtKeypoints = {
-      // 4 outer corners
-      top_left: [kp[0]?.x ?? 0, kp[0]?.y ?? 0],
-      top_right: [kp[1]?.x ?? 0, kp[1]?.y ?? 0],
-      bottom_right: [kp[2]?.x ?? 0, kp[2]?.y ?? 0],
-      bottom_left: [kp[3]?.x ?? 0, kp[3]?.y ?? 0],
-      // Net intersections
-      net_left: [kp[4]?.x ?? 0, kp[4]?.y ?? 0],
-      net_right: [kp[5]?.x ?? 0, kp[5]?.y ?? 0],
-      // Service line corners (near court)
-      service_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
-      service_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
-      // Service line corners (far court)
-      service_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
-      service_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
-      // Center line endpoints
-      center_near: [kp[10]?.x ?? 0, kp[10]?.y ?? 0],
-      center_far: [kp[11]?.x ?? 0, kp[11]?.y ?? 0]
-    }
-    emit('courtKeypointsSet', keypointsData)
-    if (DEBUG_MODE) {
-      console.log('[Keypoint Selection] All 12 keypoints collected:', keypointsData)
-    }
-  }
-}
-
-/**
- * Undo the last added keypoint
- */
-function undoLastKeypoint() {
-  if (manualKeypoints.value.length > 0) {
-    manualKeypoints.value.pop()
-    drawKeypointOverlay()
-  }
-}
-
-/**
- * Confirm and apply the selected keypoints
- * Called when the "Done" button is clicked
- * This triggers zone coverage recalculation with the new homography
- */
-function confirmKeypoints() {
-  if (manualKeypoints.value.length !== TOTAL_KEYPOINTS) {
-    console.warn('[Keypoint Selection] Cannot confirm - need all 12 keypoints')
-    return
-  }
-  
-  const kp = manualKeypoints.value
-  const keypointsData: ExtendedCourtKeypoints = {
-    // 4 outer corners
-    top_left: [kp[0]?.x ?? 0, kp[0]?.y ?? 0],
-    top_right: [kp[1]?.x ?? 0, kp[1]?.y ?? 0],
-    bottom_right: [kp[2]?.x ?? 0, kp[2]?.y ?? 0],
-    bottom_left: [kp[3]?.x ?? 0, kp[3]?.y ?? 0],
-    // Net intersections
-    net_left: [kp[4]?.x ?? 0, kp[4]?.y ?? 0],
-    net_right: [kp[5]?.x ?? 0, kp[5]?.y ?? 0],
-    // Service line corners (near court)
-    service_near_left: [kp[6]?.x ?? 0, kp[6]?.y ?? 0],
-    service_near_right: [kp[7]?.x ?? 0, kp[7]?.y ?? 0],
-    // Service line corners (far court)
-    service_far_left: [kp[8]?.x ?? 0, kp[8]?.y ?? 0],
-    service_far_right: [kp[9]?.x ?? 0, kp[9]?.y ?? 0],
-    // Center line endpoints
-    center_near: [kp[10]?.x ?? 0, kp[10]?.y ?? 0],
-    center_far: [kp[11]?.x ?? 0, kp[11]?.y ?? 0]
-  }
-  
-  console.log('[Keypoint Selection] Keypoints confirmed by user - triggering recalculation')
-  
-  // Emit the confirmed keypoints - this should trigger zone recalculation
-  emit('keypointsConfirmed', keypointsData)
-  
-  // Also emit courtKeypointsSet for initial setup if not already set
-  emit('courtKeypointsSet', keypointsData)
-  
-  // Exit keypoint selection mode
-  isKeypointSelectionMode.value = false
-}
-
-/**
- * Draw the keypoint selection overlay with court guide lines
- */
-function drawKeypointOverlay() {
-  const canvas = keypointCanvasRef.value
-  if (!canvas) return
-  
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-  
-  // Clear canvas
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
-  
-  // If not in selection mode, don't draw anything
-  if (!isKeypointSelectionMode.value && manualKeypoints.value.length === 0) return
-  
-  // Scale factors
-  const videoWidth = videoRef.value?.videoWidth || canvas.width
-  const videoHeight = videoRef.value?.videoHeight || canvas.height
-  const scaleX = canvas.width / videoWidth
-  const scaleY = canvas.height / videoHeight
-  
-  // Draw court structure guide lines based on collected keypoints
-  drawCourtGuideLines(ctx, scaleX, scaleY)
-  
-  // Draw keypoints
-  manualKeypoints.value.forEach((kp, idx) => {
-    const x = kp.x * scaleX
-    const y = kp.y * scaleY
-    const color = keypointColors[idx] ?? '#FFFFFF'
-    
-    // Draw outer glow
-    ctx.beginPath()
-    ctx.arc(x, y, 18, 0, Math.PI * 2)
-    ctx.fillStyle = color + '40'
-    ctx.fill()
-    
-    // Draw circle
-    ctx.beginPath()
-    ctx.arc(x, y, 12, 0, Math.PI * 2)
-    ctx.fillStyle = color
-    ctx.fill()
-    ctx.strokeStyle = '#000000'
-    ctx.lineWidth = 3
-    ctx.stroke()
-    
-    // Draw label
-    ctx.font = 'bold 11px Inter, system-ui, sans-serif'
-    ctx.fillStyle = '#000000'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(kp.label, x, y)
-  })
-}
-
-/**
- * Draw guide lines connecting keypoints to show court structure
- */
-function drawCourtGuideLines(ctx: CanvasRenderingContext2D, scaleX: number, scaleY: number) {
-  const kp = manualKeypoints.value
-  if (kp.length < 2) return
-  
-  ctx.setLineDash([8, 4])
-  ctx.lineWidth = 2
-  
-  // Outer boundary (connect corners: 0-1-2-3-0)
-  if (kp.length >= 4) {
-    ctx.strokeStyle = '#00FF7F'
-    ctx.beginPath()
-    ctx.moveTo((kp[0]?.x ?? 0) * scaleX, (kp[0]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[1]?.x ?? 0) * scaleX, (kp[1]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[2]?.x ?? 0) * scaleX, (kp[2]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[3]?.x ?? 0) * scaleX, (kp[3]?.y ?? 0) * scaleY)
-    ctx.closePath()
-    ctx.stroke()
-  }
-  
-  // Net line (connect 4-5)
-  if (kp.length >= 6) {
-    ctx.strokeStyle = '#FF00FF'
-    ctx.beginPath()
-    ctx.moveTo((kp[4]?.x ?? 0) * scaleX, (kp[4]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[5]?.x ?? 0) * scaleX, (kp[5]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  }
-  
-  // Near service line (connect 6-10-7)
-  if (kp.length >= 8 && kp.length >= 11) {
-    ctx.strokeStyle = '#FF8800'
-    ctx.beginPath()
-    ctx.moveTo((kp[6]?.x ?? 0) * scaleX, (kp[6]?.y ?? 0) * scaleY)
-    if (kp.length >= 11) {
-      ctx.lineTo((kp[10]?.x ?? 0) * scaleX, (kp[10]?.y ?? 0) * scaleY)
-    }
-    ctx.lineTo((kp[7]?.x ?? 0) * scaleX, (kp[7]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  } else if (kp.length >= 8) {
-    ctx.strokeStyle = '#FF8800'
-    ctx.beginPath()
-    ctx.moveTo((kp[6]?.x ?? 0) * scaleX, (kp[6]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[7]?.x ?? 0) * scaleX, (kp[7]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  }
-  
-  // Far service line (connect 8-11-9)
-  if (kp.length >= 10 && kp.length >= 12) {
-    ctx.strokeStyle = '#0088FF'
-    ctx.beginPath()
-    ctx.moveTo((kp[8]?.x ?? 0) * scaleX, (kp[8]?.y ?? 0) * scaleY)
-    if (kp.length >= 12) {
-      ctx.lineTo((kp[11]?.x ?? 0) * scaleX, (kp[11]?.y ?? 0) * scaleY)
-    }
-    ctx.lineTo((kp[9]?.x ?? 0) * scaleX, (kp[9]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  } else if (kp.length >= 10) {
-    ctx.strokeStyle = '#0088FF'
-    ctx.beginPath()
-    ctx.moveTo((kp[8]?.x ?? 0) * scaleX, (kp[8]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[9]?.x ?? 0) * scaleX, (kp[9]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  }
-  
-  // Center line (connect 10-11)
-  if (kp.length >= 12) {
-    ctx.strokeStyle = '#FFFFFF'
-    ctx.beginPath()
-    ctx.moveTo((kp[10]?.x ?? 0) * scaleX, (kp[10]?.y ?? 0) * scaleY)
-    ctx.lineTo((kp[11]?.x ?? 0) * scaleX, (kp[11]?.y ?? 0) * scaleY)
-    ctx.stroke()
-  }
-  
-  ctx.setLineDash([])
-}
-
-// NOTE: drawKeypointGuide function removed - point order guide now rendered in App.vue as a fixed modal
-
 function skipTime(seconds: number) {
   if (!videoRef.value || isExporting.value) return
   videoRef.value.currentTime = Math.max(0, Math.min(duration.value, videoRef.value.currentTime + seconds))
+}
+
+// Step the video by an integer number of frames. Pauses playback first so
+// the seek isn't immediately overwritten by the next playing frame.
+function stepFrames(frames: number) {
+  const v = videoRef.value
+  if (!v || isExporting.value) return
+  if (!v.paused) v.pause()
+  const fps = props.videoFps && props.videoFps > 0 ? props.videoFps : 30
+  v.currentTime = Math.max(0, Math.min(duration.value, v.currentTime + frames / fps))
 }
 
 function showControlsTemporarily() {
@@ -1089,6 +953,131 @@ function showControlsTemporarily() {
       showControls.value = false
     }, 3000)
   }
+}
+
+// =============================================================================
+// SHUTTLE TRACKING TRAIL: Draw TrackNet shuttle trajectory trail on video overlay
+// =============================================================================
+const SHUTTLE_TRAIL_LENGTH = 20
+
+function drawShuttleTrail(
+  ctx: CanvasRenderingContext2D,
+  currentFrameData: SkeletonFrame,
+  scaleX: number,
+  scaleY: number
+) {
+  if (!props.skeletonData || props.skeletonData.length === 0) return
+  if (!currentFrameData.shuttle_position) return
+
+  const currentFrameNum = currentFrameData.frame
+  const trailPositions: { x: number; y: number; source?: 'tracknet' | 'yolo' }[] = []
+
+  const currentIdx = frameIndex.value.get(currentFrameNum)
+  if (currentIdx === undefined) return
+
+  for (let i = currentIdx; i >= Math.max(0, currentIdx - SHUTTLE_TRAIL_LENGTH); i--) {
+    const frame = props.skeletonData[i]
+    if (frame?.shuttle_position) {
+      trailPositions.unshift(frame.shuttle_position)
+    }
+  }
+
+  if (trailPositions.length === 0) return
+
+  const totalPoints = trailPositions.length
+  const current = trailPositions[totalPoints - 1]!
+  const trailColor = current.source === 'tracknet' ? SHUTTLE_TRACKNET_COLOR : SHUTTLE_YOLO_COLOR
+
+  if (totalPoints >= 2) {
+    // White outline pass for contrast against any background
+    for (let i = 1; i < totalPoints; i++) {
+      const prev = trailPositions[i - 1]!
+      const curr = trailPositions[i]!
+      const progress = i / (totalPoints - 1)
+
+      const x1 = prev.x * scaleX
+      const y1 = prev.y * scaleY
+      const x2 = curr.x * scaleX
+      const y2 = curr.y * scaleY
+
+      const dist = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+      if (dist > 300) continue
+
+      const alpha = 0.1 + progress * 0.5
+      const lineWidth = 4 + progress * 5
+
+      ctx.beginPath()
+      ctx.moveTo(x1, y1)
+      ctx.lineTo(x2, y2)
+      ctx.strokeStyle = 'rgba(0,0,0,' + alpha.toFixed(2) + ')'
+      ctx.lineWidth = camera.pixelSize(lineWidth + 3)
+      ctx.lineCap = 'round'
+      ctx.stroke()
+    }
+
+    // Colored trail pass on top
+    for (let i = 1; i < totalPoints; i++) {
+      const prev = trailPositions[i - 1]!
+      const curr = trailPositions[i]!
+      const progress = i / (totalPoints - 1)
+
+      const x1 = prev.x * scaleX
+      const y1 = prev.y * scaleY
+      const x2 = curr.x * scaleX
+      const y2 = curr.y * scaleY
+
+      const dist = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+      if (dist > 300) continue
+
+      const alpha = 0.25 + progress * 0.75
+      const lineWidth = 4 + progress * 5
+
+      ctx.beginPath()
+      ctx.moveTo(x1, y1)
+      ctx.lineTo(x2, y2)
+      ctx.strokeStyle = trailColor + Math.round(alpha * 255).toString(16).padStart(2, '0')
+      ctx.lineWidth = camera.pixelSize(lineWidth)
+      ctx.lineCap = 'round'
+      ctx.stroke()
+    }
+  }
+
+  // Current position — large glowing dot
+  const cx = current.x * scaleX
+  const cy = current.y * scaleY
+  const glowRadius = camera.pixelSize(20)
+
+  // Soft outer glow
+  const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowRadius)
+  gradient.addColorStop(0, trailColor + '66')
+  gradient.addColorStop(0.5, trailColor + '22')
+  gradient.addColorStop(1, trailColor + '00')
+  ctx.beginPath()
+  ctx.arc(cx, cy, glowRadius, 0, Math.PI * 2)
+  ctx.fillStyle = gradient
+  ctx.fill()
+
+  // Dark outline ring for contrast
+  ctx.beginPath()
+  ctx.arc(cx, cy, camera.pixelSize(10), 0, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)'
+  ctx.lineWidth = camera.pixelSize(4)
+  ctx.stroke()
+
+  // Main dot
+  ctx.beginPath()
+  ctx.arc(cx, cy, camera.pixelSize(9), 0, Math.PI * 2)
+  ctx.fillStyle = trailColor
+  ctx.fill()
+  ctx.strokeStyle = '#FFFFFF'
+  ctx.lineWidth = camera.pixelSize(2.5)
+  ctx.stroke()
+
+  // Inner bright center
+  ctx.beginPath()
+  ctx.arc(cx, cy, camera.pixelSize(4), 0, Math.PI * 2)
+  ctx.fillStyle = '#FFFFFF'
+  ctx.fill()
 }
 
 // Canvas skeleton drawing
@@ -1104,7 +1093,7 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
     if (DEBUG_MODE) console.log('[Overlay Debug] No canvas ref')
     return
   }
-  if (!props.showSkeleton && !props.showBoundingBoxes && !props.showHeatmap) {
+  if (!props.showSkeleton && !props.showBoundingBoxes && !props.showHeatmap && !props.showShuttleTracking) {
     if (DEBUG_MODE) console.log('[Overlay Debug] All overlays are disabled')
     return
   }
@@ -1115,11 +1104,8 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   const frame = exactFrame !== undefined ? exactFrame : currentSkeletonFrame.value
   
   // Allow heatmap rendering even without skeleton frame
-  // Progressive heatmap uses skeleton data, static heatmap uses pre-computed data
-  const hasProgressiveHeatmap = props.showHeatmap && props.skeletonData && props.skeletonData.length > 0
-  const hasStaticHeatmap = props.showHeatmap && props.heatmapData
-  const hasHeatmapToRender = hasProgressiveHeatmap || hasStaticHeatmap
-  const hasFrameToRender = frame && (props.showSkeleton || props.showBoundingBoxes)
+  const hasHeatmapToRender = props.showHeatmap && props.skeletonData && props.skeletonData.length > 0
+  const hasFrameToRender = frame && (props.showSkeleton || props.showBoundingBoxes || props.showShuttleTracking)
   
   if (!frame && !hasHeatmapToRender) {
     if (DEBUG_MODE) console.log('[Overlay Debug] No current skeleton frame and no heatmap')
@@ -1143,8 +1129,14 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   // PERFORMANCE OPTIMIZATION: Skip rendering if nothing has changed.
   // During playback, interpolated frames have continuously changing positions
   // so we always redraw. When paused (no exactFrame), skip if same frame number.
-  if (frame && !hasHeatmapToRender && exactFrame === undefined) {
-    if (frame.frame === lastFrameNumber) return
+  if (frame && !hasHeatmapToRender) {
+    if (exactFrame === undefined) {
+        if (frame.frame === lastFrameNumber) return
+    } else {
+        const mediaTime = videoRef.value?.currentTime ?? -1
+        if (mediaTime === lastMediaTime && frame.frame === lastFrameNumber) return
+        lastMediaTime = mediaTime
+    }
   }
   if (frame) {
     lastFrameNumber = frame.frame
@@ -1156,7 +1148,7 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
       'showSkeleton:', props.showSkeleton,
       'showBoundingBoxes:', props.showBoundingBoxes,
       'showHeatmap:', props.showHeatmap,
-      'hasHeatmapData:', !!props.heatmapData,
+      'hasHeatmapData:', hasHeatmapToRender,
       'players:', frame?.players?.length ?? 0,
       'badminton_detections:', !!frame?.badminton_detections,
       'canvas:', canvasRef.value.width, 'x', canvasRef.value.height)
@@ -1175,9 +1167,6 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   const ctx = cachedCtx
   if (!ctx) return
 
-  // Clear canvas
-  ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
-
   // Scale factors for canvas (pre-compute once)
   // BUGFIX: Use video dimensions for accurate scaling, fallback to 1 to prevent NaN
   const videoWidth = videoRef.value?.videoWidth || videoRef.value?.clientWidth || 1
@@ -1185,45 +1174,43 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   const scaleX = canvasRef.value.width / videoWidth
   const scaleY = canvasRef.value.height / videoHeight
 
+  // Follow-player: update camera tx/ty so the locked player is centered
+  // BEFORE applying the transform below. Needs scaleX/Y to map the player's
+  // video-pixel center into canvas-pixel (world) space.
+  if (followedPlayerId.value !== null && frame && zoomCaptureRef.value) {
+    const target = frame.players.find(p => p.player_id === followedPlayerId.value)
+    if (target?.center) {
+      camera.centerAt(
+        zoomCaptureRef.value,
+        target.center.x * scaleX,
+        target.center.y * scaleY,
+      )
+    }
+  }
+
+  // Clear canvas under identity transform so we wipe the entire canvas
+  // regardless of the current pan/zoom state; otherwise clearRect only
+  // clears the transformed sub-region and leaves ghost frames.
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height)
+  camera.applyToContext(ctx)
+
   // NOTE: Court overlay drawing removed - automatic court detection disabled
   // Manual court keypoints are now the only method for court calibration
 
   // Draw heatmap overlay if enabled (behind skeleton and bounding boxes)
   // PROGRESSIVE HEATMAP: Compute heatmap dynamically based on skeleton data up to current frame
-  if (props.showHeatmap) {
-    let heatmapToDraw: HeatmapData | null = null
-    
-    // Prefer progressive heatmap from skeleton data (updates during playback)
-    if (props.skeletonData && props.skeletonData.length > 0 && frame) {
-      const progressiveState = computeProgressiveHeatmap(
-        props.skeletonData,
-        frame.frame,
-        videoWidth,
-        videoHeight
-      )
-      
-      if (progressiveState && progressiveState.maxValue > 0) {
-        heatmapToDraw = progressiveHeatmapToRenderFormat(progressiveState)
-        if (DEBUG_MODE) {
-          console.log('[Progressive Heatmap Debug] Drawing progressive heatmap for frame:', frame.frame,
-            'dimensions:', progressiveState.width, 'x', progressiveState.height,
-            'maxValue:', progressiveState.maxValue.toFixed(2))
-        }
-      }
-    }
-    
-    // Fall back to static pre-computed heatmap if no progressive data available
-    if (!heatmapToDraw && props.heatmapData) {
-      heatmapToDraw = props.heatmapData
-      if (DEBUG_MODE) {
-        console.log('[Heatmap Debug] Drawing static heatmap overlay, data size:',
-          props.heatmapData.combined_heatmap?.length ?? 0, 'x',
-          props.heatmapData.combined_heatmap?.[0]?.length ?? 0)
-      }
-    }
-    
-    // Draw the heatmap
-    if (heatmapToDraw) {
+  if (props.showHeatmap && props.skeletonData && props.skeletonData.length > 0 && frame) {
+    const progressiveState = computeProgressiveHeatmap(
+      props.skeletonData,
+      frame.frame,
+      videoWidth,
+      videoHeight,
+      props.heatmapFrameRange
+    )
+
+    if (progressiveState && progressiveState.maxValue > 0) {
+      const heatmapToDraw = progressiveHeatmapToRenderFormat(progressiveState)
       drawHeatmap(ctx, heatmapToDraw, canvasRef.value.width, canvasRef.value.height, 0.6)
     }
   }
@@ -1231,6 +1218,14 @@ function drawOverlay(exactFrame?: SkeletonFrame | null) {
   // Draw bounding boxes if enabled (requires frame data)
   if (props.showBoundingBoxes && frame?.badminton_detections) {
     drawBoundingBoxes(ctx, frame.badminton_detections, scaleX, scaleY)
+  }
+
+  // Draw shuttle tracking trail + current position dot.
+  // Skipped in court view — SyntheticCourtView draws its own (cleaner) trail
+  // designed for the synthetic-court background, and we don't want both
+  // trails overlapping.
+  if (props.showShuttleTracking && frame && props.viewMode !== 'court') {
+    drawShuttleTrail(ctx, frame, scaleX, scaleY)
   }
 
   // Draw skeleton if enabled (requires frame data)
@@ -1382,7 +1377,7 @@ function drawBoundingBoxes(
   ctx: CanvasRenderingContext2D,
   detections: BadmintonDetections,
   scaleX: number,
-  scaleY: number
+  scaleY: number,
 ) {
   // Helper function to draw a single bounding box
   function drawBox(det: BoundingBoxDetection, color: string, label: string) {
@@ -1394,46 +1389,43 @@ function drawBoundingBoxes(
 
     // Draw box
     ctx.strokeStyle = color
-    ctx.lineWidth = 2
+    ctx.lineWidth = camera.pixelSize(2)
     ctx.strokeRect(x, y, width, height)
 
     // Draw label background
-    ctx.font = 'bold 12px Inter, system-ui, sans-serif'
+    ctx.font = `bold ${camera.pixelSize(12)}px Inter, system-ui, sans-serif`
     const labelText = `${label}: ${(det.confidence * 100).toFixed(0)}%`
     const textMetrics = ctx.measureText(labelText)
-    const textHeight = 16
-    const padding = 4
+    const textHeight = camera.pixelSize(16)
+    const padding = camera.pixelSize(4)
 
     ctx.fillStyle = color
     ctx.fillRect(x, y - textHeight - padding, textMetrics.width + padding * 2, textHeight + padding)
 
     // Draw label text
     ctx.fillStyle = '#000000'
-    ctx.fillText(labelText, x + padding, y - padding - 2)
+    ctx.fillText(labelText, x + padding, y - padding - camera.pixelSize(2))
   }
 
-  // Draw players (green) - only if showPlayers is true
+  // Draw players - only if showPlayers is true. When player_id is
+  // missing, the tracker was not confident enough to assign an identity
+  // this frame; render the bbox in a distinct color with a generic
+  // label instead of guessing.
   if (props.showPlayers !== false) {
-    detections.players?.forEach((player, i) => {
-      drawBox(player, PLAYER_BOX_COLOR, `Player ${i + 1}`)
+    detections.players?.forEach((player) => {
+      if (player.player_id == null) {
+        drawBox(player, PLAYER_UNASSIGNED_BOX_COLOR, 'Player')
+      } else {
+        drawBox(player, PLAYER_BOX_COLOR, pidLabelFor(player.player_id))
+      }
     })
   }
 
   // Draw shuttlecocks (orange) - only if showShuttles is true
+  // Note: center dot is now drawn separately via shuttle_position in drawOverlay
   if (props.showShuttles !== false) {
     detections.shuttlecocks?.forEach(shuttle => {
       drawBox(shuttle, SHUTTLE_BOX_COLOR, 'Shuttle')
-      
-      // Draw center marker for shuttle
-      const cx = shuttle.x * scaleX
-      const cy = shuttle.y * scaleY
-      ctx.beginPath()
-      ctx.arc(cx, cy, 6, 0, Math.PI * 2)
-      ctx.fillStyle = SHUTTLE_BOX_COLOR
-      ctx.fill()
-      ctx.strokeStyle = '#FFFFFF'
-      ctx.lineWidth = 2
-      ctx.stroke()
     })
   }
 
@@ -1452,6 +1444,160 @@ function drawBoundingBoxes(
 
 // Minimum confidence for drawing keypoints (lower = draw more, higher = draw fewer)
 const KEYPOINT_CONFIDENCE_THRESHOLD = 0.3
+
+// Body angle overlay configuration
+type AngleOverlay =
+  | 'left_elbow' | 'right_elbow'
+  | 'left_shoulder' | 'right_shoulder'
+  | 'left_knee' | 'right_knee'
+  | 'left_hip' | 'right_hip'
+  | 'torso_lean'
+  | 'leg_stretch'
+
+const ANGLE_OVERLAY_LABELS: Record<AngleOverlay, string> = {
+  left_elbow: 'L Elbow',
+  right_elbow: 'R Elbow',
+  left_shoulder: 'L Shoulder',
+  right_shoulder: 'R Shoulder',
+  left_knee: 'L Knee',
+  right_knee: 'R Knee',
+  left_hip: 'L Hip',
+  right_hip: 'R Hip',
+  torso_lean: 'Torso Lean',
+  leg_stretch: 'Leg Stretch',
+}
+
+const ALL_ANGLE_OVERLAYS = Object.keys(ANGLE_OVERLAY_LABELS) as AngleOverlay[]
+const enabledOverlays = ref(new Set<AngleOverlay>())
+const showAngleMenu = ref(false)
+
+function toggleOverlay(overlay: AngleOverlay) {
+  const s = new Set(enabledOverlays.value)
+  if (s.has(overlay)) s.delete(overlay)
+  else s.add(overlay)
+  enabledOverlays.value = s
+}
+
+const homographyMatrix = computed(() => {
+  const kp = props.courtKeypoints
+  if (!kp || kp.length < 4) return null
+  return computeHomographyFromKeypoints(kp)
+})
+
+/** COCO keypoint index map for angle joint lookups */
+const KP = {
+  left_shoulder: 5, right_shoulder: 6,
+  left_elbow: 7, right_elbow: 8,
+  left_wrist: 9, right_wrist: 10,
+  left_hip: 11, right_hip: 12,
+  left_knee: 13, right_knee: 14,
+  left_ankle: 15, right_ankle: 16,
+} as const
+
+/**
+ * Map each angle overlay to the 3 keypoint indices forming the angle.
+ * Angle is measured at the MIDDLE keypoint (index 1).
+ */
+const ANGLE_JOINTS: Record<string, [number, number, number]> = {
+  left_elbow:     [KP.left_shoulder,  KP.left_elbow,     KP.left_wrist],
+  right_elbow:    [KP.right_shoulder, KP.right_elbow,    KP.right_wrist],
+  left_shoulder:  [KP.left_elbow,     KP.left_shoulder,  KP.left_hip],
+  right_shoulder: [KP.right_elbow,    KP.right_shoulder, KP.right_hip],
+  left_knee:      [KP.left_hip,       KP.left_knee,      KP.left_ankle],
+  right_knee:     [KP.right_hip,      KP.right_knee,     KP.right_ankle],
+  left_hip:       [KP.left_shoulder,  KP.left_hip,       KP.left_knee],
+  right_hip:      [KP.right_shoulder, KP.right_hip,      KP.right_knee],
+}
+
+function drawAngleArc(
+  ctx: CanvasRenderingContext2D,
+  keypoints: Keypoint[],
+  jointIndices: [number, number, number],
+  angleDegrees: number,
+  scaleX: number,
+  scaleY: number,
+  color: string,
+) {
+  const [aIdx, vIdx, bIdx] = jointIndices
+  const a = keypoints[aIdx], v = keypoints[vIdx], b = keypoints[bIdx]
+  if (!a?.x || !a?.y || !v?.x || !v?.y || !b?.x || !b?.y) return
+  if (a.confidence < KEYPOINT_CONFIDENCE_THRESHOLD ||
+      v.confidence < KEYPOINT_CONFIDENCE_THRESHOLD ||
+      b.confidence < KEYPOINT_CONFIDENCE_THRESHOLD) return
+
+  const vx = v.x * scaleX, vy = v.y * scaleY
+  const ax = a.x * scaleX, ay = a.y * scaleY
+  const bx = b.x * scaleX, by = b.y * scaleY
+
+  const angle1 = Math.atan2(ay - vy, ax - vx)
+  const angle2 = Math.atan2(by - vy, bx - vx)
+
+  // Draw arc — radius and label scale with zoom so the angle decoration
+  // grows with the joint. Only the arc stroke stays thin (pixelSize).
+  const radius = 20
+  ctx.beginPath()
+  ctx.arc(vx, vy, radius, Math.min(angle1, angle2), Math.max(angle1, angle2))
+  ctx.strokeStyle = color
+  ctx.lineWidth = camera.pixelSize(2)
+  ctx.globalAlpha = 0.8
+  ctx.stroke()
+  ctx.globalAlpha = 1.0
+
+  // Draw label — font and offsets scale with zoom so the number is
+  // readable at high magnification (key reason to zoom in).
+  const midAngle = (angle1 + angle2) / 2
+  const labelX = vx + Math.cos(midAngle) * (radius + 14)
+  const labelY = vy + Math.sin(midAngle) * (radius + 14)
+
+  ctx.font = 'bold 11px Inter, system-ui, sans-serif'
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#000000'
+  ctx.lineWidth = 2.5
+  ctx.strokeText(`${Math.round(angleDegrees)}°`, labelX - 10, labelY + 4)
+  ctx.fillText(`${Math.round(angleDegrees)}°`, labelX - 10, labelY + 4)
+}
+
+function drawLegStretch(
+  ctx: CanvasRenderingContext2D,
+  keypoints: Keypoint[],
+  scaleX: number,
+  scaleY: number,
+  color: string,
+  H: number[][] | null,
+) {
+  const distMeters = legStretchMeters(keypoints, H)
+  if (distMeters == null) return
+
+  const la = keypoints[KP.left_ankle], ra = keypoints[KP.right_ankle]
+  if (!la?.x || !la?.y || !ra?.x || !ra?.y) return
+
+  const lax = la.x * scaleX, lay = la.y * scaleY
+  const rax = ra.x * scaleX, ray = ra.y * scaleY
+
+  // Dashed line stays a uniform thin indicator (pixelSize on the stroke
+  // and dash pattern). The meter label scales with zoom.
+  ctx.beginPath()
+  ctx.setLineDash([camera.pixelSize(6), camera.pixelSize(4)])
+  ctx.moveTo(lax, lay)
+  ctx.lineTo(rax, ray)
+  ctx.strokeStyle = color
+  ctx.lineWidth = camera.pixelSize(2)
+  ctx.globalAlpha = 0.7
+  ctx.stroke()
+  ctx.setLineDash([])
+  ctx.globalAlpha = 1.0
+
+  const mx = (lax + rax) / 2
+  const my = (lay + ray) / 2
+  const label = `${distMeters.toFixed(2)}m`
+
+  ctx.font = 'bold 12px Inter, system-ui, sans-serif'
+  ctx.fillStyle = '#ffffff'
+  ctx.strokeStyle = '#000000'
+  ctx.lineWidth = 2.5
+  ctx.strokeText(label, mx - 15, my - 8)
+  ctx.fillText(label, mx - 15, my - 8)
+}
 
 function drawSkeleton(
   ctx: CanvasRenderingContext2D,
@@ -1481,7 +1627,8 @@ function drawSkeleton(
   sortedPlayers.forEach((player) => {
     // Use player_id (not array index) for color assignment
     // Player 0 (far/top) always gets color[0], Player 1 (near/bottom) always gets color[1]
-    const color = PLAYER_COLORS[player.player_id % PLAYER_COLORS.length] ?? '#FF6B6B'
+    const displayPid = pidDisplayFor(player.player_id)
+    const color = PLAYER_COLORS[displayPid % PLAYER_COLORS.length] ?? '#FF6B6B'
     const keypoints = player.keypoints
     
     // Skip if no keypoints
@@ -1492,7 +1639,7 @@ function drawSkeleton(
 
     // Draw skeleton connections
     ctx.strokeStyle = color
-    ctx.lineWidth = 5
+    ctx.lineWidth = camera.pixelSize(5)
     ctx.lineCap = 'round'
 
     let connectionsDrawn = 0
@@ -1519,11 +1666,11 @@ function drawSkeleton(
     for (const kp of keypoints) {
       if (kp && kp.x !== null && kp.y !== null && kp.confidence > KEYPOINT_CONFIDENCE_THRESHOLD) {
         ctx.beginPath()
-        ctx.arc(kp.x * scaleX, kp.y * scaleY, 6, 0, Math.PI * 2)
+        ctx.arc(kp.x * scaleX, kp.y * scaleY, camera.pixelSize(6), 0, Math.PI * 2)
         ctx.fillStyle = color
         ctx.fill()
         ctx.strokeStyle = '#ffffff'
-        ctx.lineWidth = 2.5
+        ctx.lineWidth = camera.pixelSize(2.5)
         ctx.stroke()
         keypointsDrawn++
       }
@@ -1535,7 +1682,8 @@ function drawSkeleton(
         'drew', keypointsDrawn, 'keypoints,', connectionsDrawn, 'connections')
     }
 
-    // Draw player label and speed (always draw if center exists)
+    // Draw player label and speed (always draw if center exists).
+    // Text grows with zoom so it's readable when inspecting posture close-up.
     if (player.center) {
       ctx.font = 'bold 14px Inter, system-ui, sans-serif'
       ctx.fillStyle = color
@@ -1543,12 +1691,49 @@ function drawSkeleton(
       ctx.lineWidth = 3
 
       // player_id is 0-indexed, display as 1-indexed (Player 1, Player 2)
-      const label = `P${player.player_id + 1}: ${player.current_speed?.toFixed(1) ?? 0} km/h`
+      const labelName = pidLabelFor(player.player_id)
+      // Shorten "Player 1" → "P1" for the compact on-skeleton label; keep custom
+      // names as-is if the user has set one.
+      const labelPrefix = labelName.startsWith('Player ') ? `P${labelName.slice(7)}` : labelName
+      const label = `${labelPrefix}: ${player.current_speed?.toFixed(1) ?? 0} km/h`
       const x = player.center.x * scaleX
       const y = player.center.y * scaleY - 30
 
       ctx.strokeText(label, x - 30, y)
       ctx.fillText(label, x - 30, y)
+    }
+
+    // Draw enabled angle overlays
+    const angles = player.pose?.body_angles
+    if (angles && enabledOverlays.value.size > 0) {
+      for (const [key, joints] of Object.entries(ANGLE_JOINTS)) {
+        if (!enabledOverlays.value.has(key as AngleOverlay)) continue
+        const value = angles[key as keyof typeof angles]
+        if (value != null) {
+          drawAngleArc(ctx, keypoints, joints, value, scaleX, scaleY, color)
+        }
+      }
+
+      // Torso lean — label near shoulder midpoint. Scales with zoom.
+      if (enabledOverlays.value.has('torso_lean') && angles.torso_lean != null) {
+        const ls = keypoints[KP.left_shoulder], rs = keypoints[KP.right_shoulder]
+        if (ls?.x && ls?.y && rs?.x && rs?.y) {
+          const mx = ((ls.x + rs.x) / 2) * scaleX
+          const my = ((ls.y + rs.y) / 2) * scaleY
+          ctx.font = 'bold 11px Inter, system-ui, sans-serif'
+          ctx.fillStyle = '#ffffff'
+          ctx.strokeStyle = '#000000'
+          ctx.lineWidth = 2.5
+          const lbl = `${Math.round(angles.torso_lean)}°`
+          ctx.strokeText(lbl, mx + 15, my)
+          ctx.fillText(lbl, mx + 15, my)
+        }
+      }
+
+      // Leg stretch
+      if (enabledOverlays.value.has('leg_stretch')) {
+        drawLegStretch(ctx, keypoints, scaleX, scaleY, color, homographyMatrix.value)
+      }
     }
   })
 }
@@ -1628,10 +1813,12 @@ function handleKeydown(event: KeyboardEvent) {
       togglePlay()
       break
     case 'ArrowLeft':
-      skipTime(-5)
+      event.preventDefault()
+      stepFrames(-1)
       break
     case 'ArrowRight':
-      skipTime(5)
+      event.preventDefault()
+      stepFrames(1)
       break
     case 'ArrowUp':
       event.preventDefault()
@@ -1652,17 +1839,16 @@ function handleKeydown(event: KeyboardEvent) {
   }
 }
 
-// Resize handler that resizes both canvases
+// Resize handler for the skeleton/overlay canvas
 function handleResize() {
   resizeCanvas()
-  resizeKeypointCanvas()
-  drawKeypointOverlay()
 }
 
 onMounted(() => {
   document.addEventListener('fullscreenchange', handleFullscreenChange)
   document.addEventListener('keydown', handleKeydown)
   window.addEventListener('resize', handleResize)
+  attachZoomResizeObserver()
 })
 
 onUnmounted(() => {
@@ -1671,11 +1857,54 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   stopSkeletonAnimation()
   if (controlsTimeout) clearTimeout(controlsTimeout)
+  detachZoomResizeObserver()
+  // Defensive: ensure window listeners attached during an in-flight
+  // pan drag are removed even if the component unmounts mid-drag.
+  window.removeEventListener('mousemove', onZoomMouseMove)
+  window.removeEventListener('mouseup', onZoomMouseUp)
+  isPanning = false
 })
 
 watch(() => props.showSkeleton, () => {
   if (!isPlaying.value) {
     drawOverlay()
+  }
+})
+
+// Re-draw the last frame under the new camera transform when zoom/pan
+// changes while the video is paused (the animation loop only runs while
+// playing).
+watch([() => camera.scale.value, () => camera.tx.value, () => camera.ty.value], () => {
+  if (!isPlaying.value) {
+    // Bypass drawOverlay's same-frame early-exit — the frame hasn't
+    // changed, but the transform has, so we need to re-render.
+    lastFrameNumber = -1
+    drawOverlay()
+  }
+})
+
+// Redraw immediately when the follow-target changes while paused so the
+// camera snaps onto the newly-selected player without waiting for the next
+// video frame.
+watch(followedPlayerId, () => {
+  if (!isPlaying.value) {
+    lastFrameNumber = -1
+    drawOverlay()
+  }
+})
+
+// Reset the camera (and drop any active follow-lock) when leaving court
+// view. The skeleton canvas always applies camera.applyToContext before
+// drawing, so a leftover zoom/pan would keep the bones scaled up relative
+// to the real video, creating a visible mis-registration.
+watch(() => props.viewMode, (mode) => {
+  if (mode !== 'court') {
+    followedPlayerId.value = null
+    camera.reset()
+    if (!isPlaying.value) {
+      lastFrameNumber = -1
+      drawOverlay()
+    }
   }
 })
 
@@ -1703,6 +1932,13 @@ watch(() => props.showRackets, () => {
   }
 })
 
+watch(() => props.showShuttleTracking, () => {
+  lastFrameNumber = -1 // Force redraw
+  if (!isPlaying.value) {
+    drawOverlay()
+  }
+})
+
 // NOTE: showCourtOverlay watcher removed - automatic court detection disabled
 
 watch(() => props.showHeatmap, (newValue) => {
@@ -1717,8 +1953,9 @@ watch(() => props.showHeatmap, (newValue) => {
   }
 })
 
-watch(() => props.heatmapData, () => {
-  // Reset frame cache to force redraw when heatmap data arrives
+watch(() => props.heatmapFrameRange, () => {
+  // Reset progressive heatmap when rally selection changes
+  progressiveHeatmapState = null
   lastFrameNumber = -1
   if (!isPlaying.value && props.showHeatmap) {
     drawOverlay()
@@ -1729,11 +1966,6 @@ watch(currentSkeletonFrame, () => {
   if (!isPlaying.value && (props.showSkeleton || props.showBoundingBoxes)) {
     drawOverlay()
   }
-})
-
-// Emit keypoint selection state changes to parent
-watch([isKeypointSelectionMode, () => manualKeypoints.value.length], ([isActive, count]) => {
-  emit('keypointSelectionChange', isActive as boolean, count as number)
 })
 
 // =============================================================================
@@ -1788,10 +2020,24 @@ const {
   showHeatmap: toRef(props, 'showHeatmap') as Ref<boolean>,
 })
 
+function pause() {
+  if (videoRef.value && !videoRef.value.paused) {
+    videoRef.value.pause()
+  }
+}
+
+function play() {
+  if (videoRef.value && videoRef.value.paused) {
+    videoRef.value.play()
+  }
+}
+
 defineExpose({
   seekTo,
   seekToFrame,
   setPlaybackRate,
+  pause,
+  play,
   isExporting,
   exportProgress,
   startExport,
@@ -1811,74 +2057,55 @@ defineExpose({
         ref="videoRef"
         :src="videoUrl"
         crossorigin="anonymous"
-        :class="{ 'video-dimmed': showHeatmap }"
+        :class="{ 'video-dimmed': showHeatmap, 'video-hidden': viewMode === 'court' }"
         @play="handlePlay"
         @pause="handlePause"
         @timeupdate="handleTimeUpdate"
         @loadedmetadata="handleLoadedMetadata"
-        @click="!isKeypointSelectionMode && !isExporting && togglePlay()"
+        @click="!isExporting && togglePlay()"
+      />
+      <SyntheticCourtView
+        v-if="viewMode === 'court' && manualCourtKeypoints && videoRef?.videoWidth"
+        :court-keypoints="manualCourtKeypoints"
+        :video-width="videoRef.videoWidth"
+        :video-height="videoRef.videoHeight"
+        :skeleton-data="skeletonData"
+        :current-frame="currentFrame"
+        :fps="videoFps"
+        :camera="camera"
       />
       <canvas
-        v-if="(showSkeleton || showBoundingBoxes || showHeatmap) && (skeletonData || heatmapData)"
+        v-if="(showSkeleton || showBoundingBoxes || showHeatmap) && skeletonData"
         ref="canvasRef"
         class="skeleton-canvas"
       />
-      <!-- Keypoint selection canvas - clickable when in selection mode -->
-      <canvas
-        ref="keypointCanvasRef"
-        class="keypoint-canvas"
-        :class="{ 'selection-mode': isKeypointSelectionMode }"
-        @click="handleKeypointCanvasClick"
-      />
+      <div
+        v-if="viewMode === 'court'"
+        ref="zoomCaptureRef"
+        class="zoom-capture"
+        @wheel="onZoomWheel"
+        @mousedown="onZoomMouseDown"
+        @dblclick="onZoomDoubleClick"
+      >
+        <ViewportControls
+          :camera="camera"
+          :capture-el="zoomCaptureRef"
+          v-model:followed-pid="followedPlayerId"
+        />
+      </div>
       <PoseOverlay
         :skeleton-frame="currentSkeletonFrame"
         :visible="showPoseOverlay ?? false"
         :pose-source="poseSource ?? 'both'"
       />
-      <div v-if="!isPlaying && !isKeypointSelectionMode" class="play-overlay" @click="togglePlay">
-        <div class="play-button">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3" />
-          </svg>
-        </div>
-      </div>
-      
-      <!-- Keypoint selection mode controls -->
-      <div v-if="isKeypointSelectionMode" class="keypoint-controls">
-        <div class="keypoint-info">
-          <span class="keypoint-title">🎯 12-Point Court Mapping</span>
-          <span class="keypoint-count">{{ manualKeypoints.length }} / 12 points set</span>
-        </div>
-        <div class="keypoint-buttons">
-          <button
-            class="keypoint-btn undo"
-            @click="undoLastKeypoint"
-            :disabled="manualKeypoints.length === 0"
-            title="Undo last keypoint"
-          >
-            ↩ Undo
-          </button>
-          <button
-            class="keypoint-btn cancel"
-            @click="clearManualKeypoints"
-            title="Cancel keypoint selection"
-          >
-            ✕ Cancel
-          </button>
-          <button
-            v-if="manualKeypoints.length === 12"
-            class="keypoint-btn apply"
-            @click="confirmKeypoints"
-            title="Confirm keypoints and recalculate zone coverage"
-          >
-            ✓ Done
-          </button>
-        </div>
-      </div>
-      
+      <ShotSummaryOverlay
+        v-if="shotSummarySegment && (shotSummaryCountdown ?? 0) > 0"
+        :segment="shotSummarySegment"
+        :countdown-sec="shotSummaryCountdown ?? 0"
+      />
     </div>
 
-    <div class="controls" :class="{ visible: (showControls || !isPlaying) && !isKeypointSelectionMode }">
+    <div class="controls" :class="{ visible: showControls || !isPlaying }">
       <div class="progress-bar" @click="handleSeek">
         <div class="progress-bg">
           <div class="progress-fill" :style="{ width: `${progressPercent}%` }"></div>
@@ -1957,19 +2184,33 @@ defineExpose({
             </button>
           </div>
 
-          <!-- Manual keypoint selection button -->
-          <button
-            class="control-btn keypoint-toggle"
-            :class="{ active: isKeypointSelectionMode }"
-            @click="toggleKeypointSelectionMode"
-            title="Set court corners manually"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
-              <path d="M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-            </svg>
-          </button>
+          <!-- Body angle overlay toggle -->
+          <div class="angle-menu-wrapper">
+            <button
+              class="control-btn"
+              :class="{ active: enabledOverlays.size > 0 }"
+              @click="showAngleMenu = !showAngleMenu"
+              title="Body angle overlays"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                <line x1="12" y1="22.08" x2="12" y2="12" />
+              </svg>
+            </button>
+            <div v-if="showAngleMenu" class="angle-menu">
+              <button
+                v-for="key in ALL_ANGLE_OVERLAYS"
+                :key="key"
+                class="angle-menu-item"
+                :class="{ active: enabledOverlays.has(key) }"
+                @click="toggleOverlay(key)"
+              >
+                <span class="angle-menu-check">{{ enabledOverlays.has(key) ? '\u2713' : '' }}</span>
+                {{ ANGLE_OVERLAY_LABELS[key] }}
+              </button>
+            </div>
+          </div>
 
           <button class="control-btn" @click="toggleFullscreen" :title="isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'">
             <svg v-if="!isFullscreen" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
@@ -2022,6 +2263,22 @@ video.video-dimmed {
   filter: brightness(0.4);
 }
 
+.video-hidden {
+  /* Keep video in layout + keep playback state (audio, timing) alive,
+     but render it invisible so the synthetic court canvas shows through.
+     opacity:0 is chosen over display:none so the video keeps decoding
+     frames (the timing events drive skeleton/shuttle sync). */
+  opacity: 0;
+  pointer-events: none;
+}
+
+.video-wrapper:has(.video-hidden) {
+  /* Dark backdrop behind the (invisible) video so the synthetic court
+     has a canvas-native dark background even before SyntheticCourtView
+     paints. */
+  background: #0f1419;
+}
+
 .skeleton-canvas {
   position: absolute;
   top: 0;
@@ -2030,40 +2287,19 @@ video.video-dimmed {
   height: 100%;
   pointer-events: none;
   object-fit: contain;
+  /* Must sit above the SyntheticCourtView canvas (z-index: 2) so skeletons
+     and bounding boxes remain visible in court mode. */
+  z-index: 3;
 }
 
-.play-overlay {
+.zoom-capture {
   position: absolute;
   inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.3);
-  cursor: pointer;
+  z-index: 5; /* above .skeleton-canvas (z=3) and synthetic court (z=2) */
+  cursor: grab;
+  touch-action: none; /* prevent default scroll on trackpad pinch */
 }
-
-.play-button {
-  width: 80px;
-  height: 80px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-accent);
-  border-radius: 0;
-  color: white;
-  transition: transform 0.2s ease, background 0.2s ease;
-}
-
-.play-button:hover {
-  transform: scale(1.05);
-  background: var(--color-accent-dark);
-}
-
-.play-button svg {
-  width: 32px;
-  height: 32px;
-  margin-left: 4px;
-}
+.zoom-capture:active { cursor: grabbing; }
 
 .controls {
   position: absolute;
@@ -2074,6 +2310,9 @@ video.video-dimmed {
   background: rgba(0, 0, 0, 0.85);
   opacity: 0;
   transition: opacity 0.3s ease;
+  /* Must sit above PoseOverlay (z-index: 20), which has pointer-events:auto
+     and would otherwise cover the control bar and swallow its clicks. */
+  z-index: 25;
 }
 
 .controls.visible {
@@ -2203,119 +2442,47 @@ video.video-dimmed {
   color: white;
 }
 
-/* ============================ */
-/* Keypoint Selection Styles    */
-/* ============================ */
-
-.keypoint-canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  object-fit: contain;
-  z-index: 10;
+.angle-menu-wrapper {
+  position: relative;
 }
 
-.keypoint-canvas.selection-mode {
-  pointer-events: auto;
-  cursor: crosshair;
-}
-
-.keypoint-controls {
+.angle-menu {
   position: absolute;
-  top: 10px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 24px;
-  background: var(--color-bg);
-  border: 2px solid var(--color-accent);
-  border-radius: 0;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  bottom: 100%;
+  right: 0;
+  margin-bottom: 8px;
+  background: rgba(0, 0, 0, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 140px;
   z-index: 20;
 }
 
-.keypoint-info {
+.angle-menu-item {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 4px;
-}
-
-.keypoint-title {
-  color: var(--color-accent);
-  font-weight: bold;
-  font-size: 1rem;
-}
-
-.keypoint-count {
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 0.875rem;
-}
-
-.keypoint-buttons {
-  display: flex;
-  gap: 8px;
-}
-
-.keypoint-btn {
-  padding: 8px 16px;
-  border: 1px solid var(--color-border-secondary);
-  border-radius: 0;
-  font-weight: bold;
-  font-size: 0.875rem;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 12px;
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.75rem;
   cursor: pointer;
-  transition: all 0.2s ease;
+  text-align: left;
 }
 
-.keypoint-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.angle-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
 }
 
-.keypoint-btn.undo {
-  background: var(--color-bg-tertiary);
-  border-color: var(--color-border-secondary);
-  color: var(--color-text-heading);
+.angle-menu-item.active {
+  color: #4ECDC4;
 }
 
-.keypoint-btn.undo:hover:not(:disabled) {
-  background: var(--color-bg-hover);
-  border-color: var(--color-accent);
-}
-
-.keypoint-btn.cancel {
-  background: #1a0000;
-  border-color: #ef4444;
-  color: #ef4444;
-}
-
-.keypoint-btn.cancel:hover {
-  background: #2a0000;
-}
-
-.keypoint-btn.apply {
-  background: #001a00;
-  border-color: #22c55e;
-  color: #22c55e;
-}
-
-.keypoint-btn.apply:hover {
-  background: #002a00;
-}
-
-.control-btn.keypoint-toggle.active {
-  background: #001a00;
-  border: 1px solid var(--color-accent);
-  color: var(--color-accent);
-}
-
-.control-btn.keypoint-toggle.active:hover {
-  background: #002a00;
+.angle-menu-check {
+  width: 14px;
+  font-size: 0.7rem;
 }
 </style>

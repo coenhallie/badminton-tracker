@@ -2627,6 +2627,7 @@ with_reid: False
                     rally_shuttle_positions,
                     fps=fps,
                     total_frames=total_frames,
+                    player_positions=player_wrist_data if player_wrist_data else None,
                 )
                 rally_stats = compute_rally_stats(
                     detected_rallies, rally_shuttle_positions, fps

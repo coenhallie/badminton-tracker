@@ -143,6 +143,45 @@ http.route({
 })
 
 /**
+ * HTTP endpoint for Modal to submit player identity thumbnails.
+ * POST /setPlayerThumbnails
+ *
+ * Body: { videoId, player_0_thumbnail, player_1_thumbnail }
+ * where the thumbnail fields are Convex storage IDs for the cropped JPEGs.
+ */
+http.route({
+  path: "/setPlayerThumbnails",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    try {
+      const body = await request.json()
+      const { videoId, player_0_thumbnail, player_1_thumbnail } = body
+      if (!videoId || !player_0_thumbnail || !player_1_thumbnail) {
+        return new Response(
+          JSON.stringify({ error: "Missing required fields" }),
+          { status: 400, headers: corsHeaders("application/json") },
+        )
+      }
+      await ctx.runMutation(api.videos.setPlayerThumbnails, {
+        videoId: videoId as Id<"videos">,
+        player_0_thumbnail: player_0_thumbnail as Id<"_storage">,
+        player_1_thumbnail: player_1_thumbnail as Id<"_storage">,
+      })
+      return new Response(JSON.stringify({ status: "success" }), {
+        status: 200,
+        headers: corsHeaders("application/json"),
+      })
+    } catch (err) {
+      console.error("setPlayerThumbnails error:", err)
+      return new Response(
+        JSON.stringify({ error: err instanceof Error ? err.message : "Unknown error" }),
+        { status: 500, headers: corsHeaders("application/json") },
+      )
+    }
+  }),
+})
+
+/**
  * HTTP endpoint for Modal to generate an upload URL (for processed videos)
  * POST /generateUploadUrl
  */
@@ -196,125 +235,12 @@ http.route({
   }),
 })
 
-/**
- * HTTP endpoint to set manual court keypoints
- * POST /api/court-keypoints/manual/set
- */
-http.route({
-  path: "/api/court-keypoints/manual/set",
-  method: "POST",
-  handler: httpAction(async (ctx, request) => {
-    try {
-      const body = await request.json()
-      const { videoId, keypoints } = body
-      
-      if (!videoId || !keypoints) {
-        return new Response(JSON.stringify({
-          error: "Missing videoId or keypoints"
-        }), {
-          status: 400,
-          headers: corsHeaders("application/json"),
-        })
-      }
-      
-      // Validate keypoints has required fields
-      if (!keypoints.top_left || !keypoints.top_right ||
-          !keypoints.bottom_right || !keypoints.bottom_left) {
-        return new Response(JSON.stringify({
-          error: "Missing required keypoints (top_left, top_right, bottom_right, bottom_left)"
-        }), {
-          status: 400,
-          headers: corsHeaders("application/json"),
-        })
-      }
-      
-      await ctx.runMutation(api.videos.setManualCourtKeypoints, {
-        videoId: videoId as Id<"videos">,
-        keypoints,
-      })
-      
-      return new Response(JSON.stringify({
-        status: "success",
-        message: "Manual court keypoints saved",
-        keypoints,
-      }), {
-        status: 200,
-        headers: corsHeaders("application/json"),
-      })
-    } catch (error) {
-      console.error("setManualCourtKeypoints error:", error)
-      return new Response(
-        JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-        { status: 500, headers: corsHeaders("application/json") }
-      )
-    }
-  }),
-})
-
-/**
- * HTTP endpoint to get manual court keypoints status
- * GET /api/court-keypoints/manual/status?videoId=xxx
- */
-http.route({
-  path: "/api/court-keypoints/manual/status",
-  method: "GET",
-  handler: httpAction(async (ctx, request) => {
-    try {
-      const { searchParams } = new URL(request.url)
-      const videoId = searchParams.get("videoId")
-      
-      if (!videoId) {
-        return new Response(JSON.stringify({
-          error: "Missing videoId"
-        }), {
-          status: 400,
-          headers: corsHeaders("application/json"),
-        })
-      }
-      
-      const result = await ctx.runQuery(api.videos.getManualCourtKeypoints, {
-        videoId: videoId as Id<"videos">,
-      })
-      
-      return new Response(JSON.stringify(result || {
-        has_manual_keypoints: false,
-        keypoints: null,
-      }), {
-        status: 200,
-        headers: corsHeaders("application/json"),
-      })
-    } catch (error) {
-      console.error("getManualCourtKeypoints error:", error)
-      return new Response(
-        JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-        { status: 500, headers: corsHeaders("application/json") }
-      )
-    }
-  }),
-})
-
-// Handle OPTIONS preflight for manual keypoints endpoints
-http.route({
-  path: "/api/court-keypoints/manual/set",
-  method: "OPTIONS",
-  handler: httpAction(async () => {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders("application/json"),
-    })
-  }),
-})
-
-http.route({
-  path: "/api/court-keypoints/manual/status",
-  method: "OPTIONS",
-  handler: httpAction(async () => {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders("application/json"),
-    })
-  }),
-})
+// Manual court keypoints are now set/read via the Convex mutation
+// `api.videos.setManualCourtKeypoints` and query `getManualCourtKeypoints`
+// directly from the client — the previous HTTP wrappers that just
+// validated payload shapes and forwarded to those same mutation/query
+// have been removed. Validation is handled by Convex's argument validators
+// on the mutation itself.
 
 /**
  * HTTP endpoint for heatmap generation

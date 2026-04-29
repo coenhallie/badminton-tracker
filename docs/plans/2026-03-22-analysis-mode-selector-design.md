@@ -1,5 +1,7 @@
 # Analysis Mode Selector
 
+> **Status: obsolete** — the feature described here was removed in v1.9. Kept as a historical design record; do not implement or reference.
+
 ## Summary
 
 Add a mode selector on the upload page: **Rally Separation** (fast, TrackNet + rally detection only) vs **Full Analysis** (current pipeline). The `analysisMode` parameter flows through the full stack. Rally-only mode skips YOLO model loading and the per-frame analysis loop.

@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import type { AnalysisResult, Rally } from '@/types/analysis'
 import { PLAYER_COLORS } from '@/types/analysis'
 import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
+import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
+
+const playerLabelsRef = inject(PLAYER_LABELS_KEY)
+const pidDisplayFor = (canonical: number): number =>
+  playerLabelsRef?.value?.displayId(canonical) ?? canonical
 
 const props = defineProps<{
   result: AnalysisResult
@@ -25,7 +30,7 @@ const {
 } = useAdvancedAnalytics(
   computed(() => props.result),
   computed(() => props.currentFrame),
-  computed(() => props.courtKeypoints ?? null)
+  computed(() => props.courtKeypoints ?? null),
 )
 
 type Tab = 'rallies' | 'shots' | 'movement'
@@ -45,9 +50,6 @@ const selectedRally = computed(() => {
   return rallies.value.find(r => r.id === selectedRallyId.value) ?? null
 })
 
-// Backend rally stats (from TrackNet + gradient detection)
-const backendRallyStats = computed(() => props.result.rally_stats ?? null)
-const hasBackendRallies = computed(() => (props.result.rallies?.length ?? 0) > 0)
 
 function selectRally(rally: Rally) {
   if (selectedRallyId.value === rally.id) {
@@ -161,12 +163,8 @@ function getQualityColor(quality: string): string {
               <span class="aa-stat-value">{{ rallies.length }}</span>
               <span class="aa-stat-label">Total Rallies</span>
             </div>
-            <div class="aa-stat-card" v-if="backendRallyStats">
-              <span class="aa-stat-value">{{ backendRallyStats.rally_percentage }}%</span>
-              <span class="aa-stat-label">Active Play</span>
-            </div>
             <div class="aa-stat-card">
-              <span class="aa-stat-value">{{ (backendRallyStats?.avg_rally_duration_s ?? rallyLengthDistribution.avgDuration).toFixed(1) }}s</span>
+              <span class="aa-stat-value">{{ rallyLengthDistribution.avgDuration.toFixed(1) }}s</span>
               <span class="aa-stat-label">Avg Rally Duration</span>
             </div>
             <div class="aa-stat-card">
@@ -178,9 +176,6 @@ function getQualityColor(quality: string): string {
               <span class="aa-stat-label">Longest Rally</span>
             </div>
           </div>
-          <p v-if="hasBackendRallies" class="detection-source">
-            Detected via shuttle trajectory tracking
-          </p>
         </section>
 
         <!-- Rally Timeline -->
@@ -321,7 +316,7 @@ function getQualityColor(quality: string): string {
                   :key="i"
                   class="shot-dot"
                   :style="{ background: getPlayerColor(shot.playerId) }"
-                  :title="`P${shot.playerId + 1}: ${shot.shotType}`"
+                  :title="`P${pidDisplayFor(shot.playerId) + 1}: ${shot.shotType}`"
                 />
                 <span v-if="rally.shots.length > 8" class="shot-more">+{{ rally.shots.length - 8 }}</span>
               </div>
@@ -400,7 +395,7 @@ function getQualityColor(quality: string): string {
               class="aa-stat-card wide"
             >
               <div class="player-badge" :style="{ background: getPlayerColor(stat.playerId) }">
-                P{{ stat.playerId + 1 }}
+                P{{ pidDisplayFor(stat.playerId) + 1 }}
               </div>
               <div class="stat-details">
                 <div class="stat-main">
@@ -428,7 +423,7 @@ function getQualityColor(quality: string): string {
             >
               <div class="recovery-header">
                 <div class="player-badge" :style="{ background: getPlayerColor(stat.playerId) }">
-                  P{{ stat.playerId + 1 }}
+                  P{{ pidDisplayFor(stat.playerId) + 1 }}
                 </div>
                 <span class="recovery-avg">{{ stat.avgRecoveryTime.toFixed(2) }}s avg</span>
               </div>
@@ -467,7 +462,7 @@ function getQualityColor(quality: string): string {
             >
               <div class="efficiency-header">
                 <div class="player-badge" :style="{ background: getPlayerColor(eff.playerId) }">
-                  P{{ eff.playerId + 1 }}
+                  P{{ pidDisplayFor(eff.playerId) + 1 }}
                 </div>
                 <div class="efficiency-score">
                   <svg viewBox="0 0 36 36" class="circular-progress">

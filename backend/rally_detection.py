@@ -1,15 +1,35 @@
 """
-Rally Detection from Shuttlecock Tracking Data
+Rally Detection — shot-gap approach.
 
-Uses the gradient-based approach from:
-"A Comparative Analysis of Deep Learning Models and Gradient Computation
- for Rally Detection in Badminton Videos" (Springer, 2025)
+Algorithm mirrors src/utils/shotDetection.ts (TS) exactly. Any change to
+thresholds or logic here MUST be applied to that module (and
+useAdvancedAnalytics.ts:rallies) to keep client and backend rally counts
+comparable. Sync keys:
 
-Algorithm:
-1. Compute distance gradient between consecutive shuttle positions
-2. Rally END: >=80% of N consecutive frames have zero gradient
-3. Rally START: gradient becomes consistently non-zero
-4. Post-filter: minimum rally duration, minimum gap between rallies
+  min_rally_duration_s      ↔  MIN_RALLY_DURATION_S in useAdvancedAnalytics
+  min_gap_duration_s        ↔  RALLY_GAP_SECONDS in useAdvancedAnalytics
+  min_speed_sq              ↔  DetectShuttleShotsOptions.minSpeedSq
+  dot_threshold             ↔  DetectShuttleShotsOptions.cosAngleMax
+  stride_s                  ↔  DetectShuttleShotsOptions.strideSec
+  min_shots                 ↔  MIN_SHOTS in useAdvancedAnalytics
+
+Diverges intentionally on:
+  - No wrist-proximity gate (backend has no pose keypoints at this stage).
+  - No player-movement / speed-peaks fallbacks (backend always has
+    TrackNet shuttle data; if shuttle is empty, no rallies are detected).
+
+Shot-gap algorithm:
+1. Detect shots as shuttle direction reversals (dot product of velocity
+   vectors < threshold).
+2. Group shots into rallies using a gap threshold.
+3. Enforce min shots + min duration per rally.
+
+TrackNet provides ~40-50% frame coverage vs ~10-40% from YOLO per-frame
+detection, giving more complete shot detection and tighter rally boundaries.
+
+Dense frame-by-frame positions are subsampled with a stride so that
+velocity vectors span enough displacement to reveal real direction changes
+rather than sub-pixel noise.
 """
 
 import math
@@ -20,240 +40,200 @@ def detect_rallies(
     shuttle_positions: Dict[int, Dict],
     fps: float,
     total_frames: int,
-    min_rally_duration_s: float = 2.0,
+    player_positions: Optional[Dict[int, List[Dict]]] = None,
+    pose_data: Optional[Dict[int, List[Dict]]] = None,
+    speed_data: Optional[Dict[int, List[float]]] = None,
+    min_rally_duration_s: float = 0.8,
     min_gap_duration_s: float = 3.0,
     zero_gradient_window: int = 0,
     zero_gradient_ratio: float = 0.80,
+    frame_width: int = 0,
+    frame_height: int = 0,
 ) -> List[Dict]:
     """
     Detect rally boundaries from shuttle tracking data.
 
+    Uses the shot-gap approach: detect individual shots (shuttle direction
+    reversals), then group them into rallies by time gaps.
+
     Args:
-        shuttle_positions: Dict of frame_num → {"x", "y", "visible"}.
+        shuttle_positions: Dict of frame_num -> {"x", "y", "visible"}.
         fps: Video frame rate.
         total_frames: Total number of frames in the video.
         min_rally_duration_s: Minimum rally length in seconds.
-        min_gap_duration_s: Minimum gap between rallies in seconds.
-        zero_gradient_window: Number of frames for zero-gradient detection.
-                              0 = auto (1.5 seconds worth of frames).
-        zero_gradient_ratio: Fraction of frames that must have zero gradient
-                             to declare rally end (default 0.80).
+        min_gap_duration_s: Minimum gap between shots to split rallies.
+        Other args: kept for backwards compatibility, unused.
 
     Returns:
-        List of rally dicts with:
-        - id: Rally number (1-indexed)
-        - start_frame: First frame of rally
-        - end_frame: Last frame of rally
-        - start_timestamp: Start time in seconds
-        - end_timestamp: End time in seconds
-        - duration_seconds: Rally duration
+        List of rally dicts with id, start/end frame/timestamp, duration.
     """
     if not shuttle_positions or fps <= 0:
         return []
 
-    # Auto-compute window size: ~1.5 seconds
-    if zero_gradient_window <= 0:
-        zero_gradient_window = max(15, int(fps * 1.5))
+    # Overhead-camera thresholds. The app only supports an overhead camera
+    # centered above the court, which produces stable TrackNet trajectories.
+    min_shot_gap_s = 0.6
+    min_speed_sq = 15.0 * 15.0  # 225
+    min_shots = 2
+    dot_threshold = 0.0  # any reversal (>90deg)
+    stride_s = 0.3
 
+    min_shot_gap_frames = max(3, int(fps * min_shot_gap_s))
+
+    # Step 1: Detect shots from shuttle direction reversals
+    shots = _detect_shots(
+        shuttle_positions, total_frames, fps, min_shot_gap_frames,
+        min_speed_sq=min_speed_sq, dot_threshold=dot_threshold,
+        stride_s=stride_s,
+    )
+
+    if len(shots) < min_shots:
+        return []
+
+    # Step 2: Group shots into rallies by gap threshold
+    rally_gap_frames = max(1, int(min_gap_duration_s * fps))
     min_rally_frames = max(1, int(min_rally_duration_s * fps))
-    min_gap_frames = max(1, int(min_gap_duration_s * fps))
-
-    # Step 1: Compute distance gradient for each frame
-    gradients = _compute_gradients(shuttle_positions, total_frames)
-
-    # Step 2: Classify each frame as "active" (shuttle moving) or "idle"
-    frame_active = _classify_frames(
-        gradients, total_frames, zero_gradient_window, zero_gradient_ratio
+    rallies = _group_shots_into_rallies(
+        shots, rally_gap_frames, min_rally_frames, fps,
+        min_shots=min_shots,
     )
 
-    # Step 3: Extract rally segments from active/idle classification
-    raw_rallies = _extract_segments(frame_active, total_frames)
-
-    # Step 4: Post-filter by duration and merge close rallies
-    rallies = _post_filter(
-        raw_rallies, fps, min_rally_frames, min_gap_frames
-    )
-
-    # Step 5: Assign IDs and compute timestamps
+    # Step 3: Assign IDs and compute timestamps
     result = []
     for i, rally in enumerate(rallies):
         result.append({
             "id": i + 1,
-            "start_frame": rally["start"],
-            "end_frame": rally["end"],
-            "start_timestamp": rally["start"] / fps,
-            "end_timestamp": rally["end"] / fps,
-            "duration_seconds": (rally["end"] - rally["start"]) / fps,
+            "start_frame": rally["start_frame"],
+            "end_frame": rally["end_frame"],
+            "start_timestamp": rally["start_frame"] / fps,
+            "end_timestamp": rally["end_frame"] / fps,
+            "duration_seconds": (rally["end_frame"] - rally["start_frame"]) / fps,
         })
 
     return result
 
 
-def _compute_gradients(
-    positions: Dict[int, Dict], total_frames: int
-) -> List[float]:
-    """
-    Compute frame-to-frame distance gradient.
-    Returns a list of gradient values indexed by frame number.
-    Gradient is 0 if either frame has no visible shuttle.
-    """
-    gradients = [0.0] * total_frames
-
-    for frame in range(1, total_frames):
-        curr = positions.get(frame)
-        prev = positions.get(frame - 1)
-
-        if (curr and curr.get("visible") and prev and prev.get("visible")):
-            dx = curr["x"] - prev["x"]
-            dy = curr["y"] - prev["y"]
-            gradients[frame] = math.sqrt(dx * dx + dy * dy)
-
-    return gradients
-
-
-def _classify_frames(
-    gradients: List[float],
+def _detect_shots(
+    positions: Dict[int, Dict],
     total_frames: int,
-    window_size: int,
-    zero_ratio: float,
-) -> List[bool]:
-    """
-    Classify each frame as active (True) or idle (False).
-
-    A frame is idle if, within a window centered on it, >=zero_ratio
-    of frames have zero (or near-zero) gradient.
-    """
-    # Threshold for "zero" gradient: shuttle moved less than 2 pixels
-    ZERO_THRESHOLD = 2.0
-
-    is_zero = [g < ZERO_THRESHOLD for g in gradients]
-
-    # Compute rolling count of zero-gradient frames
-    frame_active = [False] * total_frames
-    half_w = window_size // 2
-
-    # Use a sliding window for efficiency
-    zero_count = sum(is_zero[0:min(window_size, total_frames)])
-
-    for center in range(total_frames):
-        win_start = max(0, center - half_w)
-        win_end = min(total_frames, center + half_w + 1)
-        actual_window = win_end - win_start
-
-        # Maintain running count (recalculate at boundaries for correctness)
-        if center == 0 or win_start == 0:
-            zero_count = sum(is_zero[win_start:win_end])
-        else:
-            # Remove element that left the window
-            old_start = max(0, (center - 1) - half_w)
-            if old_start < win_start and old_start < total_frames:
-                if is_zero[old_start]:
-                    zero_count -= 1
-            # Add element that entered the window
-            new_end = min(total_frames, center + half_w + 1) - 1
-            old_end = min(total_frames, (center - 1) + half_w + 1) - 1
-            if new_end > old_end and new_end < total_frames:
-                if is_zero[new_end]:
-                    zero_count += 1
-
-        zero_fraction = zero_count / max(actual_window, 1)
-        frame_active[center] = zero_fraction < zero_ratio
-
-    return frame_active
-
-
-def _extract_segments(
-    frame_active: List[bool], total_frames: int
-) -> List[Dict]:
-    """Extract contiguous active segments as raw rallies."""
-    segments = []
-    in_rally = False
-    start = 0
-
-    for i in range(total_frames):
-        if frame_active[i] and not in_rally:
-            start = i
-            in_rally = True
-        elif not frame_active[i] and in_rally:
-            segments.append({"start": start, "end": i - 1})
-            in_rally = False
-
-    # Close final segment
-    if in_rally:
-        segments.append({"start": start, "end": total_frames - 1})
-
-    return segments
-
-
-def _post_filter(
-    segments: List[Dict],
     fps: float,
-    min_rally_frames: int,
     min_gap_frames: int,
+    min_speed_sq: float = 225.0,
+    dot_threshold: float = 0.0,
+    stride_s: float = 0.3,
 ) -> List[Dict]:
     """
-    Post-filter rally segments:
-    1. Merge segments that are very close together (gap < min_gap)
-    2. Remove segments shorter than min_rally_duration
+    Detect shots as shuttle direction reversals.
+
+    A shot occurs when the shuttle changes direction — negative dot product
+    between consecutive velocity vectors. This is the same algorithm as the
+    client-side detectShotsFromShuttle().
+
+    Positions are subsampled with a stride so velocity vectors span enough
+    displacement to show clear direction changes in dense tracking data.
     """
-    if not segments:
+    # Collect visible positions
+    all_pts = []
+    for f in range(total_frames):
+        p = positions.get(f)
+        if p and p.get("visible"):
+            all_pts.append((f, p["x"], p["y"]))
+
+    if len(all_pts) < 5:
         return []
 
-    # Merge close segments
-    merged = [segments[0].copy()]
-    for seg in segments[1:]:
-        prev = merged[-1]
-        gap = seg["start"] - prev["end"]
-        if gap < min_gap_frames:
-            # Merge: extend previous segment
-            prev["end"] = seg["end"]
+    # Subsample: ~10 frames apart to smooth noise in dense data.
+    # Client-side data is already sparse (~10-40% of frames) so it doesn't
+    # need this, but TrackNet gives consecutive-frame positions where
+    # velocity vectors change too gradually to detect reversals.
+    STRIDE = max(3, int(fps * stride_s))
+    pts = [all_pts[0]]
+    for pt in all_pts[1:]:
+        if pt[0] - pts[-1][0] >= STRIDE:
+            pts.append(pt)
+
+    if len(pts) < 3:
+        return []
+
+    # Minimum velocity magnitude to count as a real shot (not jitter).
+    # A real shot moves the shuttle ~50+ pixels over a stride interval.
+    # Stationary jitter is ~1-5 pixels. Threshold at 15px to be safe.
+    MIN_SPEED_SQ = min_speed_sq
+
+    # Detect direction reversals (dot product < 0)
+    shots = []
+    last_shot_frame = -10000
+
+    for i in range(2, len(pts)):
+        f0, x0, y0 = pts[i - 2]
+        f1, x1, y1 = pts[i - 1]
+        f2, x2, y2 = pts[i]
+
+        vx1, vy1 = x1 - x0, y1 - y0
+        vx2, vy2 = x2 - x1, y2 - y1
+
+        # Skip if both velocity vectors are too small (jitter, not a shot)
+        speed1_sq = vx1 * vx1 + vy1 * vy1
+        speed2_sq = vx2 * vx2 + vy2 * vy2
+        if speed1_sq < MIN_SPEED_SQ and speed2_sq < MIN_SPEED_SQ:
+            continue
+
+        dot = vx1 * vx2 + vy1 * vy2
+
+        # For overhead: dot < 0 (any reversal >90deg)
+        # For corner: dot < -0.25*|v1|*|v2| (reversal >~105deg, rejects jitter wobbles)
+        if dot_threshold < 0:
+            threshold = dot_threshold * math.sqrt(speed1_sq * speed2_sq)
         else:
-            merged.append(seg.copy())
+            threshold = 0
+        if dot < threshold and (f1 - last_shot_frame) >= min_gap_frames:
+            shots.append({"frame": f1, "x": x1, "y": y1})
+            last_shot_frame = f1
 
-    # Filter by minimum duration
-    filtered = [s for s in merged if (s["end"] - s["start"]) >= min_rally_frames]
-
-    return filtered
+    return shots
 
 
-def compute_rally_stats(
-    rallies: List[Dict],
-    shuttle_positions: Dict[int, Dict],
+def _group_shots_into_rallies(
+    shots: List[Dict],
+    rally_gap_frames: int,
+    min_rally_frames: int,
     fps: float,
-) -> Dict:
+    min_shots: int = 2,
+) -> List[Dict]:
     """
-    Compute summary statistics from detected rallies.
+    Group shots into rallies using gap threshold.
 
-    Returns:
-        Dict with rally statistics for logging/display.
+    Same logic as client-side: if gap between consecutive shots > threshold,
+    start a new rally. Require minimum shots and minimum duration.
     """
-    if not rallies:
-        return {
-            "total_rallies": 0,
-            "total_rally_time_s": 0,
-            "total_idle_time_s": 0,
-            "rally_percentage": 0,
-            "avg_rally_duration_s": 0,
-            "min_rally_duration_s": 0,
-            "max_rally_duration_s": 0,
-        }
+    if len(shots) < min_shots:
+        return []
 
-    durations = [r["duration_seconds"] for r in rallies]
-    total_rally_time = sum(durations)
+    rallies = []
+    rally_start_idx = 0
 
-    # Total video time from first rally start to last rally end
-    first_start = rallies[0]["start_timestamp"]
-    last_end = rallies[-1]["end_timestamp"]
-    total_time = last_end - first_start if last_end > first_start else 0
+    for i in range(1, len(shots)):
+        gap = shots[i]["frame"] - shots[i - 1]["frame"]
+        is_last = (i == len(shots) - 1)
 
-    return {
-        "total_rallies": len(rallies),
-        "total_rally_time_s": round(total_rally_time, 1),
-        "total_idle_time_s": round(max(0, total_time - total_rally_time), 1),
-        "rally_percentage": round(
-            100 * total_rally_time / total_time if total_time > 0 else 0, 1
-        ),
-        "avg_rally_duration_s": round(total_rally_time / len(rallies), 1),
-        "min_rally_duration_s": round(min(durations), 1),
-        "max_rally_duration_s": round(max(durations), 1),
-    }
+        if gap > rally_gap_frames or is_last:
+            # End of current rally group
+            end_idx = i if (is_last and gap <= rally_gap_frames) else i - 1
+            rally_shots = shots[rally_start_idx:end_idx + 1]
+
+            if len(rally_shots) >= min_shots:
+                start_frame = rally_shots[0]["frame"]
+                end_frame = rally_shots[-1]["frame"]
+                # Add small buffer after last shot for shuttle to land
+                end_frame = end_frame + max(1, int(0.5 * fps))
+
+                if (end_frame - start_frame) >= min_rally_frames:
+                    rallies.append({
+                        "start_frame": start_frame,
+                        "end_frame": end_frame,
+                        "shot_count": len(rally_shots),
+                    })
+
+            rally_start_idx = i
+
+    return rallies

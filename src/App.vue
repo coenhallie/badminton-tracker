@@ -10,11 +10,14 @@ import ResultsDashboard from '@/components/ResultsDashboard.vue'
 import AnalysisProgress from '@/components/AnalysisProgress.vue'
 import CourtSetup from '@/components/CourtSetup.vue'
 import MiniCourt from '@/components/MiniCourt.vue'
+import PlayerLabelsProvider from '@/components/PlayerLabelsProvider.vue'
 import SpeedGraph from '@/components/SpeedGraph.vue'
 import ShotSpeedList from '@/components/ShotSpeedList.vue'
 import AdvancedAnalytics from '@/components/AdvancedAnalytics.vue'
 import RallyTimeline from '@/components/RallyTimeline.vue'
 import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
+import { useShotSegments, type ShotMovementSegmentWithPeaks } from '@/composables/useShotSegments'
+import { computeHomographyFromKeypoints } from '@/utils/homography'
 import { supabase } from '@/lib/supabase'
 import {
   checkApiHealth, getApiHealthDetails, setManualCourtKeypoints, getManualKeypointsStatus,
@@ -32,7 +35,7 @@ async function getVideoSignedUrl(videoId: string): Promise<string> {
   return signed.signedUrl
 }
 import type { HealthCheckResponse } from '@/services/api'
-import type { UploadResponse, AnalysisResult, SkeletonFrame } from '@/types/analysis'
+import type { UploadResponse, AnalysisResult, SkeletonFrame, ExtendedCourtKeypoints } from '@/types/analysis'
 import type { SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
 
 const { isDark, toggleTheme } = useTheme()
@@ -40,35 +43,13 @@ const { isDark, toggleTheme } = useTheme()
 // App states: upload -> court-setup (new!) -> analyzing -> results
 type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
 
-// Restore session state if the page was reloaded (e.g., Mac sleep/tab discard)
-function loadSessionState(): { state: AppState; video: UploadResponse | null } {
-  try {
-    const saved = sessionStorage.getItem('badminton-session')
-    if (saved) {
-      const parsed = JSON.parse(saved)
-      if (parsed.state && parsed.video?.video_id) {
-        return { state: parsed.state as AppState, video: parsed.video }
-      }
-    }
-  } catch { /* ignore corrupt storage */ }
-  return { state: 'upload', video: null }
-}
-
-function saveSessionState(state: AppState, video: UploadResponse | null) {
-  try {
-    if (state === 'upload' || !video) {
-      sessionStorage.removeItem('badminton-session')
-    } else {
-      sessionStorage.setItem('badminton-session', JSON.stringify({ state, video }))
-    }
-  } catch { /* storage full or unavailable */ }
-}
-
-const restored = loadSessionState()
-const currentState = ref<AppState>(restored.state)
-const uploadedVideo = ref<UploadResponse | null>(restored.video)
-const analysisMode = ref<'rally_only' | 'full'>(restored.video?.analysisMode ?? 'full')
+// Each browser session starts fresh: no persistence of prior video / state.
+// This guarantees the UI always reflects the video the user just uploaded
+// and the court keypoints they just confirmed — never a stale session.
+const currentState = ref<AppState>('upload')
+const uploadedVideo = ref<UploadResponse | null>(null)
 const analysisResult = ref<AnalysisResult | null>(null)
+
 const errorMessage = ref('')
 const isApiConnected = ref(false)
 const healthDetails = ref<HealthCheckResponse | null>(null)
@@ -121,10 +102,6 @@ let resizeObserver: ResizeObserver | null = null
 // VideoPlayer template ref for seeking
 const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 
-// Keypoint selection state (from VideoPlayer)
-const isKeypointSelectionActive = ref(false)
-const keypointSelectionCount = ref(0)
-
 // Court model selection removed - using manual keypoints only
 // Note: The CourtModelType is kept for backwards compatibility but not used in UI
 
@@ -140,8 +117,16 @@ const nextRallyStart = ref(0)
 let rallyPauseTimer: ReturnType<typeof setInterval> | null = null
 const lastTriggeredRallyEnd = ref(-1)
 
+// Shot auto-pause state
+const pauseBetweenShots = ref(false)
+const shotPauseDurationSec = ref<1 | 1.5 | 2 | 3>(1.5)
+const shotPauseCountdown = ref(0)
+const currentShotSegment = ref<ShotMovementSegmentWithPeaks | null>(null)
+const lastTriggeredShotTime = ref(-1)
+let shotPauseTimer: ReturnType<typeof setInterval> | null = null
+
 // Client-side rally detection (same source as AdvancedAnalytics)
-const { rallies: detectedRallies, rallySource, rallySpeedStats } = useAdvancedAnalytics(
+const { rallies: detectedRallies, backendRallies, rallySource, rallySpeedStats } = useAdvancedAnalytics(
   computed(() => analysisResult.value),
   currentFrame,
 )
@@ -159,29 +144,82 @@ function handleRallySelect(rallyId: number | null) {
   selectedRallyId.value = rallyId
 }
 
-// Extended court keypoints type for 12-point system
-interface ExtendedCourtKeypoints {
-  // 4 outer corners
-  top_left: number[]
-  top_right: number[]
-  bottom_right: number[]
-  bottom_left: number[]
-  // Net intersections
-  net_left: number[]
-  net_right: number[]
-  // Service line corners (near court - top half)
-  service_near_left: number[]
-  service_near_right: number[]
-  // Service line corners (far court - bottom half)
-  service_far_left: number[]
-  service_far_right: number[]
-  // Center line endpoints
-  center_near: number[]
-  center_far: number[]
-}
-
-// Manual court keypoints storage (for mini court when manually set)
+// Manual court keypoints storage (for mini court when manually set).
+// The canonical ExtendedCourtKeypoints type lives in @/types/analysis and
+// matches the Convex schema field names — so there's no remapping layer
+// between persistence and UI. Every consumer (VideoPlayer, CourtSetup,
+// SyntheticCourtView, App) imports the same shape.
 const manualCourtKeypoints = ref<ExtendedCourtKeypoints | null>(null)
+
+// Reactive skeletonData for the composable.
+const skeletonDataRef = computed(() => analysisResult.value?.skeleton_data)
+
+// Homography for leg-stretch meters (null when no manual keypoints).
+const shotHomography = computed((): number[][] | null => {
+  const kp = manualCourtKeypoints.value
+  if (!kp) return null
+  const videoPts = [
+    kp.top_left, kp.top_right, kp.bottom_right, kp.bottom_left,
+    kp.net_left, kp.net_right,
+    kp.service_line_near_left, kp.service_line_near_right,
+    kp.service_line_far_left, kp.service_line_far_right,
+    kp.center_near, kp.center_far,
+  ]
+  return computeHomographyFromKeypoints(videoPts)
+})
+
+const { segments: shotSegments } = useShotSegments(skeletonDataRef, shotHomography)
+
+// Layer A of shot-detection quality gates: drop segments that don't fall
+// cleanly inside a single detected rally. Eliminates between-rally false
+// positives (player walking back, picking up shuttle, pre-serve jitter)
+// from triggering the auto-pause. Falls through as a no-op when no rallies
+// have been detected so the feature still works on videos without rally
+// detection output.
+// Padding applied to each rally's boundaries before the in-rally check.
+// Rally detection draws boundaries at the first/last detected shot inside
+// each rally — but real play often extends past those bounds (the shuttle
+// is still live after the final winner's hit, the receiver moves into
+// position before the first return, etc.). A generous ±5 s pad makes
+// the rally gate a "rough sanity check" rather than a tight filter:
+// shots within a few seconds of any rally are kept; only shots in long
+// dead-zones (>5 s from any rally) are treated as between-rally noise.
+const RALLY_BOUNDARY_PADDING_SECONDS = 5.0
+
+// Layer A: keep only shot segments whose end-shot falls inside a detected rally
+// (±RALLY_BOUNDARY_PADDING_SECONDS). Falls through unchanged when no rallies.
+const inRallyShotSegments = computed(() => {
+  const segs = shotSegments.value
+  const rallies = detectedRallies.value
+  if (!rallies.length) {
+    console.log(`[ShotDetection/LayerA] no rallies; keeping all ${segs.length} segments`)
+    return segs
+  }
+  const pad = RALLY_BOUNDARY_PADDING_SECONDS
+  const kept = segs.filter(seg =>
+    rallies.some(
+      r => seg.endShot.timestamp >= r.startTimestamp - pad &&
+           seg.endShot.timestamp <= r.endTimestamp + pad,
+    ),
+  )
+  console.log(
+    `[ShotDetection/LayerA] ${kept.length}/${segs.length} segments kept ` +
+    `(pad=±${pad}s, rallies=${rallies.length})`
+  )
+  return kept
+})
+
+// Playback view mode: 'video' = real video + overlays (default),
+// 'court' = synthetic court redrawn from keypoints + overlays.
+// Only available when manual keypoints are set.
+const viewMode = ref<'video' | 'court'>('video')
+
+// Guard: if keypoints get cleared while viewing court mode, snap back to video.
+watch(manualCourtKeypoints, (kp) => {
+  if (kp === null && viewMode.value === 'court') {
+    viewMode.value = 'video'
+  }
+})
 
 // Zone analytics recalculation trigger counter
 // Incremented each time keypoints are confirmed to trigger ResultsDashboard refresh
@@ -266,10 +304,10 @@ const courtCornersForMiniCourt = computed(() => {
       kp.bottom_left,        // 3: BL corner
       kp.net_left,           // 4: Net left
       kp.net_right,          // 5: Net right
-      kp.service_near_left,  // 6: Service near left
-      kp.service_near_right, // 7: Service near right
-      kp.service_far_left,   // 8: Service far left
-      kp.service_far_right,  // 9: Service far right
+      kp.service_line_near_left,  // 6: Service near left
+      kp.service_line_near_right, // 7: Service near right
+      kp.service_line_far_left,   // 8: Service far left
+      kp.service_line_far_right,  // 9: Service far right
       kp.center_near,        // 10: Center line near
       kp.center_far          // 11: Center line far
     ]
@@ -321,12 +359,6 @@ function handleRallySeek(time: number) {
   }
 }
 
-// Handle keypoint selection mode changes from VideoPlayer
-function handleKeypointSelectionChange(isActive: boolean, count: number) {
-  isKeypointSelectionActive.value = isActive
-  keypointSelectionCount.value = count
-}
-
 // ── Rally auto-pause logic ──────────────────────────────────────────────────
 
 // Watch video time for rally end boundaries (uses client-side detectedRallies)
@@ -342,7 +374,7 @@ watch(currentVideoTime, (time) => {
   for (let i = 0; i < detectedRallies.value.length; i++) {
     const rally = detectedRallies.value[i]
     const next = detectedRallies.value[i + 1]
-    if (!next) continue // don't pause after the last rally
+    if (!rally || !next) continue // guard against sparse arrays; skip last rally
 
     const endTime = rally.endTimestamp
     if (time >= endTime && time < endTime + 1.0 && endTime > lastTriggeredRallyEnd.value) {
@@ -389,9 +421,85 @@ function clearRallyPause() {
   pausedAfterRallyId.value = null
 }
 
+// ── Shot auto-pause logic ────────────────────────────────────────────────
+// Mirrors the rally-pause watcher's shape exactly.
+
+watch(currentVideoTime, (time) => {
+  // Reset tracking on seek-backward (same 1s slack as rally-pause).
+  if (time < lastTriggeredShotTime.value - 1) {
+    lastTriggeredShotTime.value = -1
+  }
+
+  if (!pauseBetweenShots.value) return
+  if (shotPauseCountdown.value > 0) return          // already in a pause
+  if (rallyPauseCountdown.value > 0) return         // rally-pause has priority
+  if (!inRallyShotSegments.value.length) return
+
+  for (let i = 0; i < inRallyShotSegments.value.length; i++) {
+    const seg = inRallyShotSegments.value[i]!
+    const t = seg.endTimestamp // the "just-happened" shot is endShot of segment i
+    if (t <= lastTriggeredShotTime.value) continue
+    if (time < t || time >= t + 0.5) continue       // only within 0.5s window
+
+    // Suppress if this is the last shot of its rally AND rally-pause is on.
+    if (pauseBetweenRallies.value && isLastShotOfRally(seg.endShot.timestamp)) {
+      lastTriggeredShotTime.value = t
+      continue
+    }
+
+    lastTriggeredShotTime.value = t
+    currentShotSegment.value = seg
+    startShotPause()
+    break
+  }
+})
+
+function isLastShotOfRally(shotTimestamp: number): boolean {
+  // Walk the in-rally list so "next shot" is the next in-rally shot, not a
+  // between-rally false positive that would confuse the end-of-rally check.
+  const segs = inRallyShotSegments.value
+  const idx = segs.findIndex(s => s.endShot.timestamp === shotTimestamp)
+  if (idx === -1) return false
+  const nextShot = segs[idx + 1]?.endShot
+  const rally = detectedRallies.value.find(
+    r => shotTimestamp >= r.startTimestamp && shotTimestamp <= r.endTimestamp,
+  )
+  if (!rally) return false
+  if (!nextShot) return true
+  return nextShot.timestamp > rally.endTimestamp
+}
+
+function startShotPause() {
+  videoPlayerRef.value?.pause()
+  shotPauseCountdown.value = shotPauseDurationSec.value
+
+  // Tick every 100ms so the countdown displays fractional seconds smoothly.
+  shotPauseTimer = setInterval(() => {
+    shotPauseCountdown.value = Math.max(0, shotPauseCountdown.value - 0.1)
+    if (shotPauseCountdown.value <= 0) {
+      endShotPause()
+    }
+  }, 100)
+}
+
+function endShotPause() {
+  clearShotPause()
+  videoPlayerRef.value?.play()
+}
+
+function clearShotPause() {
+  if (shotPauseTimer) {
+    clearInterval(shotPauseTimer)
+    shotPauseTimer = null
+  }
+  shotPauseCountdown.value = 0
+  currentShotSegment.value = null
+}
+
 // Clean up timer on unmount
 onUnmounted(() => {
   clearRallyPause()
+  clearShotPause()
 })
 
 // Trigger speed recalculation when both conditions are met
@@ -577,9 +685,7 @@ async function loadVideoUrl(videoId: string) {
 
 function handleUploadComplete(response: UploadResponse) {
   uploadedVideo.value = response
-  analysisMode.value = response.analysisMode
-  // Skip court setup for rally-only mode (no player analysis needs it)
-  currentState.value = response.analysisMode === 'rally_only' ? 'analyzing' : 'court-setup'
+  currentState.value = 'court-setup'
   errorMessage.value = ''
 }
 
@@ -587,27 +693,11 @@ function handleUploadError(message: string) {
   errorMessage.value = message
 }
 
-// Court setup handlers - receives 12-point keypoints from CourtSetup
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function handleCourtSetupComplete(keypoints: any) {
+// Court setup handlers - receives 12-point keypoints from CourtSetup.
+// Field names match the Convex schema 1:1 (no remapping needed).
+function handleCourtSetupComplete(keypoints: ExtendedCourtKeypoints) {
   console.log('[App] 12-point court keypoints saved:', keypoints)
-  // Store the keypoints mapped to the format used by mini court
-  // The CourtSetup uses Convex field names, map to our internal format
-  manualCourtKeypoints.value = {
-    top_left: keypoints.top_left || [0, 0],
-    top_right: keypoints.top_right || [0, 0],
-    bottom_right: keypoints.bottom_right || [0, 0],
-    bottom_left: keypoints.bottom_left || [0, 0],
-    net_left: keypoints.net_left || [0, 0],
-    net_right: keypoints.net_right || [0, 0],
-    service_near_left: keypoints.service_line_near_left || [0, 0],
-    service_near_right: keypoints.service_line_near_right || [0, 0],
-    service_far_left: keypoints.service_line_far_left || [0, 0],
-    service_far_right: keypoints.service_line_far_right || [0, 0],
-    center_near: keypoints.center_near || [0, 0],
-    center_far: keypoints.center_far || [0, 0]
-  }
-  // Now proceed to analysis
+  manualCourtKeypoints.value = keypoints
   currentState.value = 'analyzing'
 }
 
@@ -704,10 +794,10 @@ async function handleCourtKeypointsSet(keypoints: ExtendedCourtKeypoints) {
 async function handleKeypointsConfirmed(keypoints: ExtendedCourtKeypoints) {
   try {
     console.log('[App] Keypoints confirmed by user - triggering zone recalculation')
-    
+
     // Store locally for MiniCourt component
     manualCourtKeypoints.value = keypoints
-    
+
     // Backend API still uses 4-corner format for basic court detection
     // Send the 4 corners to backend for homography calculation
     const fourCornerFormat = {
@@ -726,17 +816,17 @@ async function handleKeypointsConfirmed(keypoints: ExtendedCourtKeypoints) {
     // Set keypoints on backend
     await setManualCourtKeypoints(fourCornerFormat, videoId)
     console.log('[App] Manual keypoints sent to backend')
-    
+
     // Clear zone analytics cache to force fresh recalculation
     if (analysisResult.value) {
       console.log('[App] Clearing zone analytics cache for video:', analysisResult.value.video_id)
       clearZoneAnalyticsCache(analysisResult.value.video_id)
-      
+
       // Increment trigger to force ResultsDashboard to reload zone analytics
       zoneRecalculationTrigger.value++
       console.log('[App] Zone recalculation trigger incremented to:', zoneRecalculationTrigger.value)
     }
-    
+
     errorMessage.value = '' // Clear any previous error
   } catch (e) {
     console.error('Failed to process keypoints confirmation:', e)
@@ -791,11 +881,6 @@ async function refreshHealthStatus() {
   await performHealthCheck()
 }
 
-// Persist session state on changes
-watch([currentState, uploadedVideo], ([state, video]) => {
-  saveSessionState(state, video)
-}, { deep: true })
-
 onMounted(async () => {
   // Initial health check
   await performHealthCheck()
@@ -806,21 +891,9 @@ onMounted(async () => {
   // Setup resize observer after mount
   setupResizeObserver()
 
-  // Handle restored session state after sleep/reload
-  if (currentState.value !== 'upload' && uploadedVideo.value) {
-    if (currentState.value === 'court-setup') {
-      // Court setup state is ephemeral — go to analyzing
-      currentState.value = 'analyzing'
-    }
-    if (currentState.value === 'results') {
-      // Results aren't persisted — the AnalysisProgress component
-      // needs to re-fetch them, so restart from analyzing
-      currentState.value = 'analyzing'
-    }
-  } else if (currentState.value !== 'upload') {
-    // No video data to resume — reset
-    currentState.value = 'upload'
-  }
+  // Remove any leftover session key from previous app versions that used
+  // sessionStorage to resume state. Harmless if the key isn't there.
+  try { sessionStorage.removeItem('badminton-session') } catch {}
 })
 
 onUnmounted(() => {
@@ -852,7 +925,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.6
+            alpha v1.9
           </button>
         </div>
 
@@ -914,6 +987,61 @@ watch(videoSectionRef, () => {
           <div class="changelog-content">
             <div class="changelog-entry">
               <div class="changelog-version">
+                <span class="version-tag">v1.9-alpha</span>
+                <span class="version-date">April 23, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - New pan &amp; zoom viewport for the synthetic court: scroll to zoom, drag to pan, double-click or ⟲ to reset. HUD shows the zoom % with Free / P1 / P2 buttons to switch tracking targets instantly</li>
+                <li> - Click-to-follow: clicking a player's bounding box or skeleton locks the camera onto them — it re-centers every frame as they move. Pan anywhere to release the lock</li>
+                <li> - Skeleton overlay, bounding boxes, angle labels and the synthetic court now share one camera transform so everything stays pixel-aligned at any zoom level</li>
+                <li> - Camera zoom / pan now clears automatically when you toggle back to the real-video view, so the skeleton overlay always re-aligns 1:1 with the footage</li>
+                <li> - Arrow keys (← / →) now step one frame at a time (auto-pausing) for frame-accurate review. The ±10s skip buttons are still there for coarse navigation</li>
+                <li> - Consolidated player tracking to a single BoT-SORT tracker tuned for badminton: our A/B showed ~19× fewer ID swaps vs the alternative on a 20-minute match. Removed the user-facing tracker toggle</li>
+                <li> - Removed the Corner / Side camera option from the upload flow — the app now always assumes an overhead camera centered above the court, which matches every supported video and trims a lot of unused code paths</li>
+                <li> - Fixed: click-to-follow no longer gets swallowed by the paused-video overlay; hit-testing also uses the full detection bounding box (not just keypoints) so clicks anywhere on the visible player register reliably</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.8-alpha</span>
+                <span class="version-date">April 21, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - New Player Identity panel in the results view: see both players as cropped thumbnails, swap their labels with one click, and optionally give them real names</li>
+                <li> - Bounding box labels now come straight from the tracker's canonical player ID — no more mismatches between the box label and the stats underneath the video</li>
+                <li> - When the far player briefly disappears from frame, the tracker no longer guesses and mis-labels the near player as Player 1; uncertain boxes render in amber with a neutral label instead</li>
+                <li> - Court side is now the primary signal for single-skeleton frames: once calibrated, a player stays on their side of the net regardless of detection gaps or YOLO track-id recycling</li>
+                <li> - Interpolated frames no longer ghost one player's label onto the other when only one is detected in the next keyframe</li>
+                <li> - Player swaps and names apply everywhere simultaneously: skeleton overlay, stats cards, shot list, speed graph, mini court, rally timeline, and advanced analytics</li>
+                <li> - Zone Analytics cards now show the same "Player 1 / Player 2" labels as the stats above instead of "Player 0 / Player 1"</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
+            <div class="changelog-entry">
+              <div class="changelog-version">
+                <span class="version-tag">v1.7-alpha</span>
+                <span class="version-date">March 26, 2026</span>
+              </div>
+              <ul class="changelog-list">
+                <li> - Replaced gradient-based rally detection with shot-gap approach using shuttle direction reversals</li>
+                <li> - Rally detection now runs client-side with auto-pause between rallies and hover tooltips</li>
+                <li> - Improved shot detection: removed unreliable deceleration method, tightened pose confidence thresholds</li>
+                <li> - Upgraded pose model from YOLOv26n to YOLOv26m for better far-player accuracy</li>
+                <li> - Shuttle court ROI now extends to top of frame for clears and lobs</li>
+                <li> - TrackNet streaming frame extraction to avoid OOM on large videos</li>
+                <li> - NaN guards on homography transforms and hit marker cleanup on backward seek</li>
+              </ul>
+              <p class="changelog-note">
+                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+              </p>
+            </div>
+            <div class="changelog-entry">
+              <div class="changelog-version">
                 <span class="version-tag">v1.6-alpha</span>
                 <span class="version-date">March 10, 2026</span>
               </div>
@@ -922,7 +1050,7 @@ watch(videoSectionRef, () => {
                 <li> - Rally timeline visualization showing detected rallies with click-to-seek navigation</li>
                 <li> - Gradient-based rally segmentation from shuttle trajectory data</li>
                 <li> - Toggle to show/hide player skeleton overlay and pose estimation</li>
-                <li> - Backend-detected rallies preferred over client-side heuristic for improved accuracy</li>
+                <li> - Rally detection from shuttle direction changes (shot-gap heuristic)</li>
               </ul>
               <p class="changelog-note">
                 <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
@@ -1286,7 +1414,6 @@ watch(videoSectionRef, () => {
           <AnalysisProgress
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
-            :analysis-mode="analysisMode"
             @complete="handleAnalysisComplete"
             @error="handleAnalysisError"
             @cancel="handleAnalysisCancel"
@@ -1295,6 +1422,7 @@ watch(videoSectionRef, () => {
 
         <!-- Results State -->
         <div v-else-if="currentState === 'results' && analysisResult" key="results" class="content-section results-view">
+          <PlayerLabelsProvider :video-id="analysisResult.video_id">
           <div class="results-header">
             <button class="back-btn" @click="startNewAnalysis">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1304,7 +1432,7 @@ watch(videoSectionRef, () => {
               New Analysis
             </button>
 
-            <div v-if="analysisMode !== 'rally_only'" class="results-header-right">
+            <div class="results-header-right">
               <!-- Export Video Button -->
               <button
                 class="export-btn"
@@ -1515,35 +1643,63 @@ watch(videoSectionRef, () => {
           </Transition>
 
           <div class="results-content" :class="{ 'with-minicourt': showMiniCourt }">
+            <div class="mode-selector view-mode-selector">
+              <span class="mode-label">Playback View</span>
+              <div class="mode-options">
+                <button
+                  type="button"
+                  class="mode-option"
+                  :class="{ active: viewMode === 'video' }"
+                  @click="viewMode = 'video'"
+                >
+                  <span class="mode-title">Video</span>
+                  <span class="mode-desc">Real footage with skeleton overlay</span>
+                </button>
+                <button
+                  type="button"
+                  class="mode-option"
+                  :class="{ active: viewMode === 'court' }"
+                  :disabled="manualCourtKeypoints === null"
+                  :title="manualCourtKeypoints === null ? 'Set manual court keypoints to enable' : ''"
+                  @click="viewMode = 'court'"
+                >
+                  <span class="mode-title">Court</span>
+                  <span class="mode-desc">Synthetic court with skeleton + shuttle trail</span>
+                </button>
+              </div>
+            </div>
             <div class="video-with-minicourt">
               <div ref="videoSectionRef" class="video-section">
                 <VideoPlayer
                   ref="videoPlayerRef"
                   :video-url="videoUrl"
-                  :skeleton-data="analysisMode !== 'rally_only' ? analysisResult.skeleton_data : []"
+                  :skeleton-data="analysisResult.skeleton_data"
 
-                  :show-skeleton="analysisMode !== 'rally_only' && showSkeleton"
-                  :show-bounding-boxes="analysisMode !== 'rally_only' && showBoundingBoxes"
-                  :show-players="analysisMode !== 'rally_only' && showPlayers"
-                  :show-shuttles="analysisMode !== 'rally_only' && showShuttleTracking"
-                  :show-rackets="analysisMode !== 'rally_only' && showRackets"
-                  :show-pose-overlay="analysisMode !== 'rally_only' && showPoseOverlay"
+                  :show-skeleton="showSkeleton"
+                  :show-bounding-boxes="showBoundingBoxes"
+                  :show-players="showPlayers"
+                  :show-shuttles="showShuttleTracking"
+                  :show-rackets="showRackets"
+                  :show-pose-overlay="showPoseOverlay"
                   :pose-source="poseSource"
-                  :show-heatmap="analysisMode !== 'rally_only' && showHeatmap"
+                  :show-heatmap="showHeatmap"
                   :heatmap-frame-range="heatmapFrameRange"
-                  :show-shuttle-tracking="analysisMode !== 'rally_only' && showShuttleTracking"
-                  @court-keypoints-set="handleCourtKeypointsSet"
-                  @keypoints-confirmed="handleKeypointsConfirmed"
+                  :show-shuttle-tracking="showShuttleTracking"
+                  :court-keypoints="courtCornersForMiniCourt"
+                  :view-mode="viewMode"
+                  :manual-court-keypoints="manualCourtKeypoints"
+                  :video-fps="analysisResult?.fps ?? 30"
+                  :shot-summary-segment="currentShotSegment"
+                  :shot-summary-countdown="shotPauseCountdown"
                   @time-update="handleTimeUpdate"
                   @frame-update="handleFrameUpdate"
                   @play="handleVideoPlay"
-                  @keypoint-selection-change="handleKeypointSelectionChange"
                 />
               </div>
 
               <!-- Mini Court Panel (hidden in rally-only mode) -->
               <Transition name="slide-fade">
-                <div v-if="analysisMode !== 'rally_only' && (showMiniCourt || isKeypointSelectionActive)" class="minicourt-section">
+                <div v-if="showMiniCourt" class="minicourt-section">
                   <MiniCourt
                     :court-corners="courtCornersForMiniCourt"
                     :players="videoPlaybackStarted ? currentPlayers : []"
@@ -1558,24 +1714,37 @@ watch(videoSectionRef, () => {
                     :skeleton-data="analysisResult?.skeleton_data"
                     :current-frame="currentFrame"
                     :max-trail-length="150"
-                    :is-keypoint-selection-mode="isKeypointSelectionActive"
-                    :keypoint-selection-count="keypointSelectionCount"
                   />
                 </div>
               </Transition>
 
               <!-- Rally Timeline — directly below video -->
               <RallyTimeline
-                v-if="detectedRallies.length > 0 && analysisResult"
-                :result="analysisResult"
+                v-if="(detectedRallies.length > 0 || backendRallies.length > 0) && analysisResult"
+                :rallies="detectedRallies"
+                :backend-rallies="backendRallies"
+                :duration="analysisResult.duration"
+                :rally-source="rallySource"
                 :current-time="currentVideoTime"
+                :pause-between-rallies="pauseBetweenRallies"
+                :rally-pause-countdown="rallyPauseCountdown"
+                :paused-after-rally-id="pausedAfterRallyId"
+                :rally-speed-stats="rallySpeedStats"
+                :pause-between-shots="pauseBetweenShots"
+                :shot-pause-duration-sec="shotPauseDurationSec"
                 @seek-to-time="handleRallySeek"
+                @update:pause-between-rallies="pauseBetweenRallies = $event"
+                @update:pause-between-shots="pauseBetweenShots = $event"
+                @update:shot-pause-duration-sec="shotPauseDurationSec = $event"
+                @skip-to-next-rally="skipToNextRally"
+                @resume-from-pause="resumeFromRallyPause"
+                @select-rally="handleRallySelect"
               />
             </div>
 
             <!-- Speed Graph Panel (hidden in rally-only mode) -->
             <Transition name="slide-fade">
-              <div v-if="analysisMode !== 'rally_only' && showSpeedGraph && analysisResult" class="speedgraph-section">
+              <div v-if="showSpeedGraph && analysisResult" class="speedgraph-section">
                 <SpeedGraph
                   :skeleton-data="analysisResult.skeleton_data"
                   :fps="analysisResult.fps"
@@ -1592,7 +1761,7 @@ watch(videoSectionRef, () => {
 
             <!-- Shot Speed Analysis Panel (hidden in rally-only mode) -->
             <Transition name="slide-fade">
-              <div v-if="analysisMode !== 'rally_only' && showShotSpeedList && analysisResult" class="shotspeed-section">
+              <div v-if="showShotSpeedList && analysisResult" class="shotspeed-section">
                 <ShotSpeedList
                   :skeleton-data="analysisResult.skeleton_data"
                   :fps="analysisResult.fps"
@@ -1605,7 +1774,7 @@ watch(videoSectionRef, () => {
               </div>
             </Transition>
 
-            <div v-if="analysisMode !== 'rally_only'" class="dashboard-section">
+            <div class="dashboard-section">
               <ResultsDashboard
                 :result="analysisResult"
                 :manual-keypoints-set="manualCourtKeypoints !== null"
@@ -1613,7 +1782,7 @@ watch(videoSectionRef, () => {
               />
             </div>
 
-            <div v-if="analysisMode !== 'rally_only'" class="dashboard-section">
+            <div class="dashboard-section">
               <AdvancedAnalytics
                 :result="analysisResult"
                 :current-frame="currentFrame"
@@ -1622,6 +1791,7 @@ watch(videoSectionRef, () => {
               />
             </div>
           </div>
+          </PlayerLabelsProvider>
         </div>
       </Transition>
     </main>
@@ -3024,6 +3194,58 @@ a:hover {
   margin: 8px 0 0 0;
   padding-top: 16px;
   border-top: 1px solid var(--color-border-secondary);
+}
+
+/* Playback view-mode selector (copied from VideoUpload.vue:615-680 scoped styles) */
+.mode-selector {
+  margin-bottom: 20px;
+}
+
+.mode-label {
+  display: block;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mode-options {
+  display: flex;
+  gap: 8px;
+}
+
+.mode-option {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  background: var(--color-bg-tertiary);
+  border: 2px solid var(--color-border-secondary);
+  border-radius: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s ease;
+}
+
+.mode-option:hover {
+  border-color: var(--color-text-tertiary);
+}
+
+.mode-option.active {
+  border-color: var(--color-accent);
+  background: var(--color-bg-secondary);
+}
+
+.mode-option.active .mode-title {
+  color: var(--color-accent);
+}
+
+.mode-option:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 </style>

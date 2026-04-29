@@ -7,9 +7,6 @@ export default defineSchema({
     storageId: v.id("_storage"),
     filename: v.string(),
     size: v.number(),
-    
-    // Analysis mode
-    analysisMode: v.optional(v.union(v.literal("rally_only"), v.literal("full"))),
 
     // Processing status
     status: v.union(
@@ -31,6 +28,8 @@ export default defineSchema({
       processed_frames: v.number(),
       player_count: v.optional(v.number()),
       has_court_detection: v.optional(v.boolean()),
+      // Backwards-compat shim: v1.8 and earlier wrote this field. Kept as
+      // optional so existing records validate; never written by new runs.
       has_shuttle_analytics: v.optional(v.boolean()),
       has_rally_detection: v.optional(v.boolean()),
       rally_count: v.optional(v.number()),
@@ -63,7 +62,18 @@ export default defineSchema({
       doubles_left_near: v.optional(v.array(v.number())),
       doubles_right_near: v.optional(v.array(v.number())),
     })),
-    
+
+    playerLabels: v.optional(v.object({
+      // Storage IDs of cropped thumbnails written by the Modal worker.
+      player_0_thumbnail: v.optional(v.id("_storage")),
+      player_1_thumbnail: v.optional(v.id("_storage")),
+      // User-controlled display state. Defaults to identity mapping
+      // (no swap, no custom names) when absent.
+      swapped: v.optional(v.boolean()),
+      player_0_name: v.optional(v.string()),
+      player_1_name: v.optional(v.string()),
+    })),
+
     // Metadata
     createdAt: v.number(),
     completedAt: v.optional(v.number()),
