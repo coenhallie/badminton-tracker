@@ -15,6 +15,8 @@ import type {
   SkeletonFrame,
 } from '@/types/analysis'
 import { supabase } from '@/lib/supabase'
+import { computeHeatmap } from '@/composables/useHeatmap'
+import { computeZoneAnalytics } from '@/composables/useZoneAnalytics'
 
 // =============================================================================
 // PERFORMANCE OPTIMIZATION: Utility functions
@@ -279,14 +281,36 @@ export interface HeatmapResponse {
 const heatmapCache = new SimpleCache<HeatmapData>(300000) // 5 minute TTL
 
 export async function getHeatmap(
-  _videoId: string,
-  _playerId?: number
+  videoId: string,
+  playerId?: number
 ): Promise<HeatmapResponse> {
-  throw new Error('not yet migrated')
+  const cacheKey = `heatmap:${videoId}:${playerId ?? 'all'}`
+  const cached = heatmapCache.get(cacheKey) as HeatmapData | undefined
+  if (cached) {
+    return {
+      video_id: videoId,
+      player_id: playerId ?? null,
+      heatmap: cached,
+      status: 'success',
+    }
+  }
+  const heatmap = await computeHeatmap(videoId, playerId)
+  heatmapCache.set(cacheKey, heatmap)
+  return {
+    video_id: videoId,
+    player_id: playerId ?? null,
+    heatmap,
+    status: 'success',
+  }
 }
 
-export async function preloadHeatmap(_videoId: string): Promise<void> {
-  throw new Error('not yet migrated')
+export async function preloadHeatmap(videoId: string): Promise<void> {
+  try {
+    await getHeatmap(videoId)
+    console.log(`[Heatmap] Preloaded heatmap for video ${videoId}`)
+  } catch (e) {
+    console.warn('[Heatmap] preload failed', e)
+  }
 }
 
 // =============================================================================
@@ -602,10 +626,17 @@ export interface RecalculatedZoneAnalyticsResponse {
 const zoneAnalyticsCache = new SimpleCache<RecalculatedZoneAnalyticsResponse>(120000) // 2 minute TTL
 
 export async function getRecalculatedZoneAnalytics(
-  _videoId: string,
-  _forceRefresh: boolean = false
+  videoId: string,
+  forceRefresh: boolean = false
 ): Promise<RecalculatedZoneAnalyticsResponse> {
-  throw new Error('not yet migrated')
+  const cacheKey = `zone-analytics:${videoId}`
+  if (!forceRefresh) {
+    const cached = zoneAnalyticsCache.get(cacheKey)
+    if (cached) return cached
+  }
+  const data = await computeZoneAnalytics(videoId)
+  zoneAnalyticsCache.set(cacheKey, data)
+  return data
 }
 
 /**
