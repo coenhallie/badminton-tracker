@@ -1,9 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue'
-import { useConvexClient } from 'convex-vue'
-import { api } from '../../convex/_generated/api'
-import type { Id } from '../../convex/_generated/dataModel'
-import { fetchVideoUrl } from '@/services/api'
+import { supabase } from '@/lib/supabase'
 import MiniCourt from './MiniCourt.vue'
 
 const props = defineProps<{
@@ -17,7 +14,15 @@ const emit = defineEmits<{
   error: [message: string]
 }>()
 
-const client = useConvexClient()
+async function getVideoSignedUrl(videoId: string): Promise<string> {
+  const { data: row, error } = await supabase
+    .from('videos').select('storage_path').eq('id', videoId).single()
+  if (error || !row) throw error ?? new Error('Video not found')
+  const { data: signed, error: e2 } = await supabase
+    .storage.from('videos').createSignedUrl(row.storage_path, 3600)
+  if (e2 || !signed) throw e2 ?? new Error('Could not sign URL')
+  return signed.signedUrl
+}
 
 // =============================================================================
 // MANUAL COURT KEYPOINT SELECTION - 12 POINT SYSTEM
@@ -30,7 +35,7 @@ const client = useConvexClient()
 // 11-12: Center line endpoints at service lines (CT_N, CT_F)
 // =============================================================================
 
-// Must match the Convex validator in videos.ts (12-point system)
+// Must match the Supabase videos.manual_court_keypoints schema (12-point system)
 interface ExtendedCourtKeypoints {
   top_left: number[]
   top_right: number[]
@@ -100,7 +105,7 @@ const isComplete = computed(() => manualKeypoints.value.length === TOTAL_KEYPOIN
 // Load video URL and set up first frame
 onMounted(async () => {
   try {
-    videoUrl.value = await fetchVideoUrl(props.videoId)
+    videoUrl.value = await getVideoSignedUrl(props.videoId)
     await loadVideo()
   } catch (error) {
     console.error('Failed to load video:', error)
@@ -331,7 +336,7 @@ async function saveAndProceed() {
   
   try {
     const kp = manualKeypoints.value
-    // Use field names that match Convex validator (12-point system)
+    // Use field names that match Supabase schema (12-point system)
     const keypoints: ExtendedCourtKeypoints = {
       // 4 outer corners
       top_left: [kp[0]?.x ?? 0, kp[0]?.y ?? 0],
@@ -351,12 +356,13 @@ async function saveAndProceed() {
       center_far: [kp[11]?.x ?? 0, kp[11]?.y ?? 0],
     }
     
-    // Save to Convex database
-    await client.mutation(api.videos.setManualCourtKeypoints, {
-      videoId: props.videoId as Id<'videos'>,
-      keypoints
-    })
-    
+    // Save to Supabase database
+    const { error: updateError } = await supabase
+      .from('videos')
+      .update({ manual_court_keypoints: keypoints })
+      .eq('id', props.videoId)
+    if (updateError) throw updateError
+
     console.log('[CourtSetup] 12-point keypoints saved:', keypoints)
     emit('complete', keypoints)
   } catch (error) {
