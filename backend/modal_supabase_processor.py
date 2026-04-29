@@ -7,6 +7,7 @@ This module provides GPU-accelerated video processing that:
 3. Writes progress updates directly to Supabase Postgres
 4. Uploads results back to Supabase Storage
 """
+from __future__ import annotations
 
 import os
 import sys
