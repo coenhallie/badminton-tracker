@@ -646,23 +646,75 @@ export interface PDFExportPreview {
   status: string
 }
 
+function triggerPdfDownload(pdfBase64: string, filename: string): void {
+  const binary = atob(pdfBase64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  const blob = new Blob([bytes], { type: 'application/pdf' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
 export async function downloadPDFExport(
-  _videoId: string,
-  _options?: {
+  videoId: string,
+  options?: {
     frame_number?: number
     include_heatmap?: boolean
     heatmap_colormap?: string
     heatmap_alpha?: number
   }
 ): Promise<void> {
-  throw new Error('not yet migrated')
+  const { data, error } = await supabase.functions.invoke('export-pdf', {
+    body: {
+      video_id: videoId,
+      config: {
+        frame_number: options?.frame_number,
+        include_heatmap: options?.include_heatmap ?? true,
+        heatmap_colormap: options?.heatmap_colormap ?? 'turbo',
+        heatmap_alpha: options?.heatmap_alpha ?? 0.6,
+      },
+    },
+  })
+  if (error) throw error
+  const result = data as {
+    success: boolean
+    pdfBase64?: string
+    filename?: string
+    error?: string
+  }
+  if (!result.success || !result.pdfBase64) {
+    throw new Error(result.error || 'PDF generation failed')
+  }
+  triggerPdfDownload(result.pdfBase64, result.filename || `badminton_analysis_${videoId.slice(0, 8)}.pdf`)
 }
 
 export async function exportPDFWithFrontendData(
-  _videoId: string,
-  _data: PDFExportWithDataConfig
+  videoId: string,
+  data: PDFExportWithDataConfig
 ): Promise<void> {
-  throw new Error('not yet migrated')
+  const { data: result, error } = await supabase.functions.invoke('export-pdf', {
+    body: {
+      video_id: videoId,
+      config: data,
+    },
+  })
+  if (error) throw error
+  const r = result as {
+    success: boolean
+    pdfBase64?: string
+    filename?: string
+    error?: string
+  }
+  if (!r.success || !r.pdfBase64) {
+    throw new Error(r.error || 'PDF generation failed')
+  }
+  triggerPdfDownload(r.pdfBase64, r.filename || `badminton_analysis_${videoId.slice(0, 8)}.pdf`)
 }
 
 // =============================================================================
