@@ -1,11 +1,11 @@
 """
-Modal Video Processor for Convex Integration
+Modal Video Processor for Supabase Integration
 
 This module provides GPU-accelerated video processing that:
-1. Downloads videos from Convex storage
+1. Downloads videos from Supabase Storage (signed URL in payload)
 2. Processes with YOLO models (including pose estimation)
-3. Sends progress updates to Convex HTTP endpoints
-4. Uploads results back to Convex
+3. Writes progress updates directly to Supabase Postgres
+4. Uploads results back to Supabase Storage
 """
 
 import os
@@ -1082,9 +1082,6 @@ async def process_video(request: Request) -> Dict[str, Any]:
     video_id = payload.get("video_id")
     owner_id = payload.get("owner_id")
     video_url = payload.get("video_url")
-    # callback_url is intentionally dropped — the Supabase migration has the
-    # Modal worker speak Supabase directly via supabase_client() instead of
-    # POSTing back to a callback. Callback rewrite lands in chunk B.
     manual_court_keypoints = payload.get("manual_court_keypoints")
     analysis_mode = payload.get("analysis_mode", "full")
 
@@ -1095,12 +1092,12 @@ async def process_video(request: Request) -> Dict[str, Any]:
         )
 
     # Spawn the GPU worker in the background — returns immediately.
-    # callback_url is passed as None for now; chunk B replaces the callback
-    # path with direct Supabase writes inside the worker.
+    # The worker writes progress/logs/results directly to Supabase via
+    # supabase_client(); no callback URL is needed.
     _process_video_worker.spawn(
         video_id=video_id,
+        owner_id=owner_id,
         video_url=video_url,
-        callback_url=None,
         manual_court_keypoints=manual_court_keypoints,
         analysis_mode=analysis_mode,
     )
@@ -1118,14 +1115,16 @@ async def process_video(request: Request) -> Dict[str, Any]:
 )
 async def _process_video_worker(
     video_id: str,
+    owner_id: str,
     video_url: str,
-    callback_url: str,
     manual_court_keypoints: Optional[Dict] = None,
     analysis_mode: str = "full",
 ) -> Dict[str, Any]:
     """
     GPU worker that does the actual video processing.
     Spawned in the background by process_video endpoint.
+
+    Writes progress/logs/results directly to Supabase Postgres + Storage.
     """
     import httpx
     import cv2
@@ -1135,16 +1134,13 @@ async def _process_video_worker(
     import resource
 
     print(f"[MODAL] Starting processing for video: {video_id}")
+    print(f"[MODAL] Owner: {owner_id}")
     print(f"[MODAL] Video URL: {video_url[:100]}...")
-    print(f"[MODAL] Callback URL: {callback_url}")
 
     def get_memory_mb() -> float:
         """Get current RSS memory usage in MB."""
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
 
-    # Shared httpx client — reused for all HTTP calls to avoid per-request
-    # TCP/SSL overhead (status updates fire every 2 seconds)
-    http_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0))
     status_update_failures = 0
 
     async def send_status_update(
@@ -1154,19 +1150,28 @@ async def _process_video_worker(
         total_frames: int = 0,
         error: Optional[str] = None
     ):
+        """Update the videos row with the current processing progress.
+
+        Runs the synchronous supabase-py call in a worker thread so the async
+        event loop is not blocked while Postgres responds.
+        """
         nonlocal status_update_failures
+        update_payload: Dict[str, Any] = {
+            "status": status,
+            "progress": progress,
+            "current_frame": current_frame,
+            "total_frames": total_frames,
+        }
+        if error is not None:
+            update_payload["error"] = error
         for attempt in range(3):
             try:
-                await http_client.post(
-                    f"{callback_url}/updateStatus",
-                    json={
-                        "videoId": video_id,
-                        "status": status,
-                        "progress": progress,
-                        "currentFrame": current_frame,
-                        "totalFrames": total_frames,
-                        "error": error,
-                    },
+                await asyncio.to_thread(
+                    lambda: supabase_client()
+                    .table("videos")
+                    .update(update_payload)
+                    .eq("id", video_id)
+                    .execute()
                 )
                 status_update_failures = 0
                 return
@@ -1183,16 +1188,21 @@ async def _process_video_worker(
         level: str = "info",
         category: str = "processing"
     ):
+        """Insert a row into processing_logs for this video."""
+        log_row = {
+            "video_id": video_id,
+            "owner_id": owner_id,
+            "message": message,
+            "level": level,
+            "category": category,
+        }
         for attempt in range(2):
             try:
-                await http_client.post(
-                    f"{callback_url}/addLog",
-                    json={
-                        "videoId": video_id,
-                        "message": message,
-                        "level": level,
-                        "category": category,
-                    },
+                await asyncio.to_thread(
+                    lambda: supabase_client()
+                    .table("processing_logs")
+                    .insert(log_row)
+                    .execute()
                 )
                 return
             except Exception as e:
@@ -2483,7 +2493,7 @@ with_reid: False
             "rally_stats": rally_stats,
         }
         
-        # Upload full results as JSON file to Convex storage (avoids 1MB document limit)
+        # Upload full results as JSON file to Supabase Storage (results bucket)
         await send_log("Serializing results to JSON...", "info", "processing")
         serialize_start = time.time()
         results_json = json.dumps(results_data).encode("utf-8")
@@ -2505,54 +2515,53 @@ with_reid: False
         del skeleton_frames
         del results_data
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0)) as client:
-            # Step 1: Get upload URL from Convex
-            upload_url_response = await client.post(
-                f"{callback_url}/generateUploadUrl",
-                json={},
-            )
-            upload_url_response.raise_for_status()
-            upload_data = upload_url_response.json()
-            upload_url = upload_data.get("uploadUrl")
-            
-            if not upload_url:
-                raise Exception("Failed to get upload URL from Convex")
-            
-            # Step 2: Upload the results JSON to Convex storage
-            storage_response = await client.post(
-                upload_url,
-                content=results_json,
-                headers={"Content-Type": "application/json"},
-            )
-            storage_response.raise_for_status()
-            storage_result = storage_response.json()
-            results_storage_id = storage_result.get("storageId")
-            
-            if not results_storage_id:
-                raise Exception("Failed to get storageId from upload response")
-            
-            print(f"[MODAL] Results uploaded to storage: {results_storage_id}")
-            
-            # Step 3: Send metadata + storage reference to updateResults
-            await client.post(
-                f"{callback_url}/updateResults",
-                json={
-                    "videoId": video_id,
-                    "resultsMeta": {
-                        "duration": duration,
-                        "fps": fps,
-                        "total_frames": total_frames,
-                        "processed_frames": processed_count,
-                        "player_count": 2,
-                        "has_court_detection": False,
-                        "has_shuttle_analytics": False,
-                        "has_rally_detection": len(detected_rallies) > 0,
-                        "rally_count": len(detected_rallies),
-                        "tracknet_used": tracknet_available,
-                    },
-                    "resultsStorageId": results_storage_id,
+        results_storage_path = f"{owner_id}/{video_id}/results.json"
+
+        # Step 1: Upload the results JSON to Supabase Storage. The supabase-py
+        # client is synchronous, so we run it in a thread to avoid blocking
+        # the event loop while the upload streams.
+        await asyncio.to_thread(
+            lambda: supabase_client()
+            .storage
+            .from_("results")
+            .upload(
+                path=results_storage_path,
+                file=results_json,
+                file_options={
+                    "content-type": "application/json",
+                    "upsert": "true",
                 },
             )
+        )
+
+        print(f"[MODAL] Results uploaded to storage: {results_storage_path}")
+
+        # Step 2: Write metadata + storage path back into the videos row.
+        # Status flip to 'completed' is deferred to chunk C (after rally clip
+        # generation); leave the existing 'processing' status untouched here.
+        results_meta = {
+            "duration": duration,
+            "fps": fps,
+            "total_frames": total_frames,
+            "processed_frames": processed_count,
+            "player_count": 2,
+            "has_court_detection": False,
+            "has_shuttle_analytics": False,
+            "has_rally_detection": len(detected_rallies) > 0,
+            "rally_count": len(detected_rallies),
+            "tracknet_used": tracknet_available,
+        }
+
+        await asyncio.to_thread(
+            lambda: supabase_client()
+            .table("videos")
+            .update({
+                "results_meta": results_meta,
+                "results_storage_path": results_storage_path,
+            })
+            .eq("id", video_id)
+            .execute()
+        )
         
         upload_time = time.time() - phase_start
         total_time = time.time() - pipeline_start
@@ -2607,8 +2616,6 @@ with_reid: False
             "videoId": video_id,
             "error": error_msg,
         }
-    finally:
-        await http_client.aclose()
 
 
 @app.function(image=image)
