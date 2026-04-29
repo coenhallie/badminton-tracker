@@ -1567,19 +1567,9 @@ watch(videoSectionRef, () => {
               <!-- Rally Timeline — directly below video -->
               <RallyTimeline
                 v-if="detectedRallies.length > 0 && analysisResult"
-                :rallies="detectedRallies"
-                :duration="analysisResult.duration"
-                :rally-source="rallySource"
+                :result="analysisResult"
                 :current-time="currentVideoTime"
-                :pause-between-rallies="pauseBetweenRallies"
-                :rally-pause-countdown="rallyPauseCountdown"
-                :paused-after-rally-id="pausedAfterRallyId"
-                :rally-speed-stats="rallySpeedStats"
                 @seek-to-time="handleRallySeek"
-                @update:pause-between-rallies="pauseBetweenRallies = $event"
-                @skip-to-next-rally="skipToNextRally"
-                @resume-from-pause="resumeFromRallyPause"
-                @select-rally="handleRallySelect"
               />
             </div>
 
