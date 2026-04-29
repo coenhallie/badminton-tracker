@@ -15,11 +15,22 @@ import ShotSpeedList from '@/components/ShotSpeedList.vue'
 import AdvancedAnalytics from '@/components/AdvancedAnalytics.vue'
 import RallyTimeline from '@/components/RallyTimeline.vue'
 import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
+import { supabase } from '@/lib/supabase'
 import {
-  checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, fetchVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
+  checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
   triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
   clearZoneAnalyticsCache, getRecalculatedZoneAnalytics, setCurrentVideoId
 } from '@/services/api'
+
+async function getVideoSignedUrl(videoId: string): Promise<string> {
+  const { data: row, error } = await supabase
+    .from('videos').select('storage_path').eq('id', videoId).single()
+  if (error || !row) throw error ?? new Error('Video not found')
+  const { data: signed, error: e2 } = await supabase
+    .storage.from('videos').createSignedUrl(row.storage_path, 3600)
+  if (e2 || !signed) throw e2 ?? new Error('Could not sign URL')
+  return signed.signedUrl
+}
 import type { HealthCheckResponse } from '@/services/api'
 import type { UploadResponse, AnalysisResult, SkeletonFrame } from '@/types/analysis'
 import type { SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
@@ -554,10 +565,10 @@ async function triggerDelayedSpeedCalculation() {
 // Skeleton overlay is rendered client-side via canvas
 const videoUrl = ref('')
 
-// Fetch video URL asynchronously (for Convex storage support)
+// Fetch video URL asynchronously (Supabase signed URL)
 async function loadVideoUrl(videoId: string) {
   try {
-    videoUrl.value = await fetchVideoUrl(videoId)
+    videoUrl.value = await getVideoSignedUrl(videoId)
   } catch (error) {
     console.error('Failed to fetch video URL:', error)
     // Fallback to local URL format
