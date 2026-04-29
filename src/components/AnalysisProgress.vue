@@ -1,9 +1,41 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, nextTick, watch } from 'vue'
-import { useConvexQuery, useConvexClient } from 'convex-vue'
-import { api } from '../../convex/_generated/api'
+import { ref, onMounted, computed, nextTick, watch, toRef } from 'vue'
+import { supabase } from '@/lib/supabase'
+import { useReactiveRow } from '@/composables/useReactiveRow'
+import { useReactiveList } from '@/composables/useReactiveList'
 import type { AnalysisResult, ProcessingLog, LogLevel, LogCategory } from '@/types/analysis'
-import type { Id } from '../../convex/_generated/dataModel'
+
+interface Video {
+  id: string
+  owner_id: string
+  filename: string
+  size: number
+  storage_path: string
+  status: 'uploaded' | 'processing' | 'completed' | 'failed'
+  progress: number | null
+  current_frame: number | null
+  total_frames: number | null
+  error: string | null
+  results_meta: Record<string, any> | null
+  results_storage_path: string | null
+  processed_video_path: string | null
+  skeleton_data_path: string | null
+  manual_court_keypoints: Record<string, any> | null
+  player_labels: Record<string, any> | null
+  created_at: string
+  processing_started_at: string | null
+  completed_at: string | null
+}
+
+interface ProcessingLogRow {
+  id: number
+  video_id: string
+  owner_id: string
+  message: string
+  level: LogLevel
+  category: LogCategory
+  timestamp: string
+}
 
 const props = defineProps<{
   videoId: string
@@ -17,21 +49,19 @@ const emit = defineEmits<{
   cancel: []
 }>()
 
-const client = useConvexClient()
-
-// Convert string videoId to Convex Id type
-const convexVideoId = computed(() => props.videoId as Id<'videos'>)
+const videoIdRef = toRef(props, 'videoId')
 
 // Real-time video query - automatically updates when database changes
-const { data: videoData } = useConvexQuery(
-  api.videos.getVideo,
-  computed(() => ({ videoId: convexVideoId.value }))
-)
+const { row: video } = useReactiveRow<Video>('videos', videoIdRef)
 
 // Real-time logs query
-const { data: logsData } = useConvexQuery(
-  api.videos.getProcessingLogs,
-  computed(() => ({ videoId: convexVideoId.value }))
+const logsFilter = computed(() =>
+  videoIdRef.value ? { column: 'video_id', value: videoIdRef.value } : null
+)
+const { items: logs } = useReactiveList<ProcessingLogRow>(
+  'processing_logs',
+  logsFilter,
+  { orderBy: 'timestamp', ascending: true }
 )
 
 // Local state
@@ -41,14 +71,14 @@ const logsContainerRef = ref<HTMLElement | null>(null)
 const showLogs = ref(true)
 const analysisStarted = ref(false)
 
-// Computed values from Convex data
-const progress = computed(() => videoData.value?.progress ?? 0)
-const currentFrame = computed(() => videoData.value?.currentFrame ?? 0)
-const totalFrames = computed(() => videoData.value?.totalFrames ?? 0)
-const videoStatus = computed(() => videoData.value?.status ?? 'uploaded')
-const errorMessage = computed(() => videoData.value?.error ?? '')
+// Computed values from Supabase data
+const progress = computed(() => video.value?.progress ?? 0)
+const current_frame = computed(() => video.value?.current_frame ?? 0)
+const total_frames = computed(() => video.value?.total_frames ?? 0)
+const videoStatus = computed(() => video.value?.status ?? 'uploaded')
+const errorMessage = computed(() => video.value?.error ?? '')
 
-// Map Convex status to component status
+// Map db status to component status
 const status = computed(() => {
   switch (videoStatus.value) {
     case 'uploaded':
@@ -83,47 +113,54 @@ const statusMessage = computed(() => {
   }
 })
 
-// Convert Convex logs to ProcessingLog format
+// Convert raw log rows to ProcessingLog format expected by template
 const processingLogs = computed<ProcessingLog[]>(() => {
-  if (!logsData.value) return []
-  return logsData.value.map((log, index) => ({
+  if (!logs.value) return []
+  return logs.value.map((log, index) => ({
     id: index,
     message: log.message,
     level: log.level as LogLevel,
     category: log.category as LogCategory,
-    timestamp: log.timestamp / 1000, // Convert to seconds
+    // Postgres timestamptz returned as ISO string -> seconds since epoch
+    timestamp: new Date(log.timestamp).getTime() / 1000,
   }))
 })
 
+async function fetchResultsJson(): Promise<any | null> {
+  if (!video.value?.results_storage_path) return null
+  const { data: signed, error } = await supabase
+    .storage.from('results')
+    .createSignedUrl(video.value.results_storage_path, 3600)
+  if (error || !signed) throw error ?? new Error('Could not sign results URL')
+  const res = await fetch(signed.signedUrl)
+  if (!res.ok) throw new Error(`Results fetch failed: ${res.status}`)
+  return res.json()
+}
+
 // Watch for completion or error
 watch(videoStatus, async (newStatus) => {
-  if (newStatus === 'completed' && videoData.value) {
-    // Fetch results from storage URL
-    const resultsUrl = videoData.value.resultsUrl
-    if (resultsUrl) {
+  if (newStatus === 'completed' && video.value) {
+    if (video.value.results_storage_path) {
       try {
-        let response: Response | null = null
+        let results: Record<string, unknown> | null = null
+        let lastErr: unknown = null
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
-            response = await fetch(resultsUrl)
-            if (response.ok) break
-          } catch {
+            results = await fetchResultsJson()
+            if (results) break
+          } catch (err) {
+            lastErr = err
             if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
           }
         }
 
-        if (!response || !response.ok) {
-          throw new Error(`Failed to fetch results after 3 attempts (status: ${response?.status ?? 'no response'})`)
+        if (!results) {
+          throw lastErr instanceof Error
+            ? lastErr
+            : new Error('Failed to fetch results after 3 attempts')
         }
 
-        let results: Record<string, unknown>
-        try {
-          results = await response.json()
-        } catch {
-          throw new Error('Results data is corrupted or not valid JSON')
-        }
-
-        if (!results || typeof results !== 'object') {
+        if (typeof results !== 'object') {
           throw new Error('Results data has unexpected format')
         }
 
@@ -148,15 +185,15 @@ watch(videoStatus, async (newStatus) => {
         emit('error', err instanceof Error ? err.message : 'Failed to load analysis results')
       }
     } else {
-      // Fallback: use metadata if no results URL (shouldn't happen normally)
-      const meta = videoData.value.resultsMeta
+      // Fallback: use metadata if no results path (shouldn't happen normally)
+      const meta = video.value.results_meta
       if (meta) {
         const analysisResult: AnalysisResult = {
           video_id: props.videoId,
-          duration: meta.duration ?? 0,
-          fps: meta.fps ?? 0,
-          total_frames: meta.total_frames ?? 0,
-          processed_frames: meta.processed_frames ?? 0,
+          duration: (meta.duration as number) ?? 0,
+          fps: (meta.fps as number) ?? 0,
+          total_frames: (meta.total_frames as number) ?? 0,
+          processed_frames: (meta.processed_frames as number) ?? 0,
           players: [],
           shuttle: null,
           skeleton_data: [],
@@ -239,10 +276,11 @@ async function startAnalysis() {
   startTime.value = Date.now()
 
   try {
-    // Trigger Modal processing via Convex action
-    await client.action(api.videos.processVideo, {
-      videoId: convexVideoId.value,
+    // Trigger backend processing via Supabase Edge Function
+    const { error } = await supabase.functions.invoke('process-video', {
+      body: { video_id: videoIdRef.value },
     })
+    if (error) throw error
   } catch (error) {
     // Error handling is done via the real-time status updates
     console.error('Failed to start analysis:', error)
@@ -323,7 +361,7 @@ onMounted(() => {
         <div v-if="status === 'analyzing'" class="progress-stats">
           <div class="stat">
             <span class="stat-label">Current Frame</span>
-            <span class="stat-value">{{ currentFrame }} / {{ totalFrames }}</span>
+            <span class="stat-value">{{ current_frame }} / {{ total_frames }}</span>
           </div>
           <div class="stat">
             <span class="stat-label">ETA</span>
@@ -387,7 +425,7 @@ onMounted(() => {
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </div>
-      
+
       <div v-show="showLogs" ref="logsContainerRef" class="logs-container">
         <div v-if="processingLogs.length === 0" class="logs-empty">
           Waiting for processing logs...
