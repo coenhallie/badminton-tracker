@@ -68,3 +68,9 @@ runs/
 # Misc
 *.tsbuildinfo
 .cache
+
+# Supabase CLI local cache
+supabase/.temp/
+
+# Local secrets (never commit)
+.secrets/
