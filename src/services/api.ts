@@ -14,6 +14,7 @@ import type {
   ProgressUpdate,
   SkeletonFrame,
 } from '@/types/analysis'
+import { supabase } from '@/lib/supabase'
 
 // =============================================================================
 // PERFORMANCE OPTIMIZATION: Utility functions
@@ -120,8 +121,18 @@ export type { UploadResponse, AnalyzeResponse, AnalysisResult, AnalysisConfig, P
 /**
  * Fetch a signed URL for the original uploaded video.
  */
-export async function fetchVideoUrl(_videoId: string): Promise<string> {
-  throw new Error('not yet migrated')
+export async function fetchVideoUrl(videoId: string): Promise<string> {
+  const { data: row, error } = await supabase
+    .from('videos')
+    .select('storage_path')
+    .eq('id', videoId)
+    .single()
+  if (error || !row) throw error ?? new Error('Video not found')
+  const { data: signed, error: e2 } = await supabase
+    .storage.from('videos')
+    .createSignedUrl(row.storage_path, 3600)
+  if (e2 || !signed) throw e2 ?? new Error('Could not sign URL')
+  return signed.signedUrl
 }
 
 // =============================================================================
@@ -159,11 +170,26 @@ export interface HealthCheckResponse {
 }
 
 export async function checkApiHealth(): Promise<boolean> {
-  throw new Error('not yet migrated')
+  try {
+    const { error } = await supabase.from('videos').select('id').limit(1)
+    return !error
+  } catch {
+    return false
+  }
 }
 
 export async function getApiHealthDetails(): Promise<HealthCheckResponse | null> {
-  throw new Error('not yet migrated')
+  // Trimmed down — UI only needs the boolean from checkApiHealth.
+  const ok = await checkApiHealth()
+  return ok
+    ? {
+        status: 'healthy',
+        timestamp: Date.now(),
+        version: 'supabase',
+        backend: 'supabase',
+        components: {},
+      }
+    : null
 }
 
 // =============================================================================
@@ -196,15 +222,29 @@ export interface ManualKeypointsResponse {
   keypoints: ManualKeypointsRequest
 }
 
-export async function getManualKeypointsStatus(_videoId: string): Promise<ManualKeypointsStatus> {
-  throw new Error('not yet migrated')
+export async function getManualKeypointsStatus(videoId: string): Promise<ManualKeypointsStatus> {
+  const { data, error } = await supabase
+    .from('videos')
+    .select('manual_court_keypoints')
+    .eq('id', videoId)
+    .single()
+  if (error || !data) return { has_manual_keypoints: false, keypoints: null }
+  return {
+    has_manual_keypoints: !!data.manual_court_keypoints,
+    keypoints: data.manual_court_keypoints,
+  }
 }
 
 export async function setManualCourtKeypoints(
-  _keypoints: ManualKeypointsRequest,
-  _videoId: string
+  keypoints: ManualKeypointsRequest,
+  videoId: string
 ): Promise<ManualKeypointsResponse> {
-  throw new Error('not yet migrated')
+  const { error } = await supabase
+    .from('videos')
+    .update({ manual_court_keypoints: keypoints })
+    .eq('id', videoId)
+  if (error) throw error
+  return { status: 'success', message: 'ok', keypoints }
 }
 
 // =============================================================================

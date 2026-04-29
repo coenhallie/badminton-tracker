@@ -17,9 +17,9 @@ import RallyTimeline from '@/components/RallyTimeline.vue'
 import { useAdvancedAnalytics } from '@/composables/useAdvancedAnalytics'
 import { supabase } from '@/lib/supabase'
 import {
-  checkApiHealth, getApiHealthDetails, getApiBaseUrl, isUsingConvex, getOriginalVideoUrl, setManualCourtKeypoints, getManualKeypointsStatus,
+  checkApiHealth, getApiHealthDetails, setManualCourtKeypoints, getManualKeypointsStatus,
   triggerSpeedRecalculation, clearSpeedCache, getSpeedTimeline,
-  clearZoneAnalyticsCache, getRecalculatedZoneAnalytics, setCurrentVideoId
+  clearZoneAnalyticsCache, getRecalculatedZoneAnalytics
 } from '@/services/api'
 
 async function getVideoSignedUrl(videoId: string): Promise<string> {
@@ -571,8 +571,7 @@ async function loadVideoUrl(videoId: string) {
     videoUrl.value = await getVideoSignedUrl(videoId)
   } catch (error) {
     console.error('Failed to fetch video URL:', error)
-    // Fallback to local URL format
-    videoUrl.value = getOriginalVideoUrl(videoId)
+    videoUrl.value = ''
   }
 }
 
@@ -627,11 +626,8 @@ function handleCourtSetupError(message: string) {
 async function handleAnalysisComplete(result: AnalysisResult) {
   analysisResult.value = result
   currentState.value = 'results'
-  
-  // Set the current video ID for keypoints operations
-  setCurrentVideoId(result.video_id)
-  
-  // Fetch the video URL asynchronously (supports Convex storage)
+
+  // Fetch the video URL asynchronously (Supabase signed URL)
   await loadVideoUrl(result.video_id)
 }
 
@@ -660,10 +656,7 @@ function startNewAnalysis() {
   speedCalculationTriggered.value = false
   isSpeedCalculating.value = false
   calculatedSpeedData.value = null
-  
-  // Clear video context for keypoints operations
-  setCurrentVideoId(null)
-  
+
   // Clear speed cache for clean start
   if (previousVideoId) {
     clearSpeedCache(previousVideoId)
@@ -678,10 +671,16 @@ function dismissError() {
 async function handleCourtKeypointsSet(keypoints: ExtendedCourtKeypoints) {
   try {
     console.log('[App] Received 12 court keypoints:', keypoints)
-    
+
     // Store locally for MiniCourt component
     manualCourtKeypoints.value = keypoints
-    
+
+    const videoId = analysisResult.value?.video_id
+    if (!videoId) {
+      console.warn('[App] No video context for setting keypoints')
+      return
+    }
+
     // Backend API still uses 4-corner format for basic court detection
     // Send the 4 corners for backward compatibility
     const fourCornerFormat = {
@@ -690,7 +689,7 @@ async function handleCourtKeypointsSet(keypoints: ExtendedCourtKeypoints) {
       bottom_right: keypoints.bottom_right,
       bottom_left: keypoints.bottom_left
     }
-    const response = await setManualCourtKeypoints(fourCornerFormat)
+    const response = await setManualCourtKeypoints(fourCornerFormat, videoId)
     console.log('[App] Manual keypoints set successfully:', response)
     // Show success feedback (optional)
     errorMessage.value = '' // Clear any previous error
@@ -717,9 +716,15 @@ async function handleKeypointsConfirmed(keypoints: ExtendedCourtKeypoints) {
       bottom_right: keypoints.bottom_right,
       bottom_left: keypoints.bottom_left
     }
-    
+
+    const videoId = analysisResult.value?.video_id
+    if (!videoId) {
+      console.warn('[App] No video context for setting keypoints')
+      return
+    }
+
     // Set keypoints on backend
-    await setManualCourtKeypoints(fourCornerFormat)
+    await setManualCourtKeypoints(fourCornerFormat, videoId)
     console.log('[App] Manual keypoints sent to backend')
     
     // Clear zone analytics cache to force fresh recalculation
@@ -1038,7 +1043,7 @@ watch(videoSectionRef, () => {
               <h3>📡 Connection</h3>
               <div class="health-info-row">
                 <span class="label">API URL:</span>
-                <code class="value">{{ getApiBaseUrl() }}</code>
+                <code class="value">Supabase</code>
               </div>
               <div class="health-info-row">
                 <span class="label">Last Check:</span>
@@ -1154,30 +1159,12 @@ watch(videoSectionRef, () => {
               <div class="health-section">
                 <h3>🔧 Troubleshooting</h3>
                 <div class="troubleshoot-tips">
-                  <template v-if="isUsingConvex()">
-                    <p>The Convex backend is not responding. Try these steps:</p>
-                    <ol>
-                      <li>Check your internet connection</li>
-                      <li>Verify <code>VITE_CONVEX_URL</code> is set correctly in <code>.env</code></li>
-                      <li>Make sure Convex is deployed:
-                        <code>npx convex deploy</code>
-                      </li>
-                      <li>Check the Convex dashboard for any errors</li>
-                    </ol>
-                  </template>
-                  <template v-else>
-                    <p>The backend server is not responding. Try these steps:</p>
-                    <ol>
-                      <li>Make sure the backend is running:
-                        <code>cd backend && python main.py</code>
-                      </li>
-                      <li>Check if the API URL is correct in your <code>.env</code> file:
-                        <code>VITE_API_URL=http://localhost:8000</code>
-                      </li>
-                      <li>Verify no firewall is blocking the connection</li>
-                      <li>Check the backend terminal for any error messages</li>
-                    </ol>
-                  </template>
+                  <p>The Supabase backend is not responding. Try these steps:</p>
+                  <ol>
+                    <li>Check your internet connection</li>
+                    <li>Verify <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> are set correctly in <code>.env</code></li>
+                    <li>Check the Supabase dashboard for any errors</li>
+                  </ol>
                 </div>
               </div>
             </template>
