@@ -62,6 +62,104 @@ def verify_hmac(body: bytes, signature: str | None, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+# --- Rally clip generation ----------------------------------------------------
+# Cut the source video into per-rally MP4 clips using ffmpeg stream copy
+# (no re-encode), upload each to the 'clips' bucket, and insert a rally_clips
+# row. Idempotent via UNIQUE (video_id, rally_index).
+
+def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, owner_id: str):
+    """
+    For each detected rally, cut the source video using ffmpeg `-c copy`
+    (stream copy — fast, no quality loss, cuts on nearest keyframe so clips
+    may start up to ~2s before the requested timestamp), upload to the
+    'clips' Supabase Storage bucket, and upsert a rally_clips DB row.
+
+    A single bad rally (e.g., end_timestamp past actual video duration) logs
+    a warning and continues — partial success is acceptable.
+    """
+    import os
+    import subprocess
+    import json
+
+    sb = supabase_client()
+
+    for rally in rallies:
+        rally_id = rally.get("id")
+        if rally_id is None:
+            continue
+        clip_local = f"/cache/{video_id}_rally_{rally_id}.mp4"
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-ss", str(rally["start_timestamp"]),
+                    "-to", str(rally["end_timestamp"]),
+                    "-i", video_path,
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    "-movflags", "+faststart",
+                    clip_local,
+                ],
+                check=True,
+                capture_output=True,
+                timeout=120,  # generous: stream copy of a 30s clip should be <1s
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            stderr = e.stderr.decode(errors="replace") if hasattr(e, "stderr") and e.stderr else str(e)
+            try:
+                sb.table("processing_logs").insert({
+                    "video_id": video_id,
+                    "owner_id": owner_id,
+                    "message": f"clip generation failed for rally {rally_id}: {stderr[:200]}",
+                    "level": "warning",
+                    "category": "processing",
+                }).execute()
+            except Exception:
+                pass  # don't let logging failure crash the pipeline
+            # remove any partial clip file
+            try:
+                if os.path.exists(clip_local):
+                    os.remove(clip_local)
+            except OSError:
+                pass
+            continue
+
+        storage_path = f"{owner_id}/{video_id}/rally_{rally_id}.mp4"
+        try:
+            with open(clip_local, "rb") as f:
+                sb.storage.from_("clips").upload(
+                    path=storage_path,
+                    file=f.read(),
+                    file_options={"content-type": "video/mp4", "upsert": "true"},
+                )
+            sb.table("rally_clips").upsert({
+                "video_id":          video_id,
+                "owner_id":          owner_id,
+                "rally_index":       rally_id,
+                "start_timestamp":   rally["start_timestamp"],
+                "end_timestamp":     rally["end_timestamp"],
+                "duration_seconds":  rally["duration_seconds"],
+                "clip_storage_path": storage_path,
+            }, on_conflict="video_id,rally_index").execute()
+        except Exception as e:
+            try:
+                sb.table("processing_logs").insert({
+                    "video_id": video_id,
+                    "owner_id": owner_id,
+                    "message": f"clip upload/insert failed for rally {rally_id}: {str(e)[:200]}",
+                    "level": "warning",
+                    "category": "processing",
+                }).execute()
+            except Exception:
+                pass
+        finally:
+            try:
+                if os.path.exists(clip_local):
+                    os.remove(clip_local)
+            except OSError:
+                pass
+
+
 def compute_homography_matrix(corners, court_width=6.1, court_length=13.4):
     try:
         import cv2
