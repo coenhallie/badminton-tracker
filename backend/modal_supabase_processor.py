@@ -21,6 +21,27 @@ import time
 import modal
 
 
+# --- Supabase client helper ---------------------------------------------------
+# Used by Modal functions to write back to Postgres + Storage with the
+# service-role key (set in the 'supabase-secrets' Modal Secret).
+_supabase_client = None
+
+def supabase_client():
+    """Return a singleton Supabase client authenticated with the service-role key.
+
+    Reads SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from environment
+    (loaded from the 'supabase-secrets' Modal Secret on each function).
+    """
+    global _supabase_client
+    if _supabase_client is None:
+        import os
+        from supabase import create_client
+        url = os.environ["SUPABASE_URL"]
+        key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+        _supabase_client = create_client(url, key)
+    return _supabase_client
+
+
 def compute_homography_matrix(corners, court_width=6.1, court_length=13.4):
     try:
         import cv2
@@ -1007,6 +1028,7 @@ image = (
         "python-dotenv",
         "torch>=2.0.0",
         "torchvision>=0.15.0",
+        "supabase>=2.5.0",
     )
     .add_local_dir(str(_backend_dir / "tracknet"), remote_path="/root/tracknet")
     .add_local_file(str(_backend_dir / "rally_detection.py"), remote_path="/root/rally_detection.py")
@@ -1015,7 +1037,7 @@ image = (
 
 @app.function(
     image=image,
-    secrets=[modal.Secret.from_name("convex-secrets")],
+    secrets=[modal.Secret.from_name("supabase-secrets")],
 )
 @modal.fastapi_endpoint(method="POST")
 async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -1050,7 +1072,7 @@ async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
     memory=8192,   # 8 GB RAM (skeleton data + JSON serialization for long videos)
     image=image,
     volumes={"/cache": vol, MODELS_PATH: models_vol},
-    secrets=[modal.Secret.from_name("convex-secrets")],
+    secrets=[modal.Secret.from_name("supabase-secrets")],
 )
 async def _process_video_worker(
     video_id: str,
