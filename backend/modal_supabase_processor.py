@@ -20,6 +20,13 @@ import time
 
 import modal
 
+try:
+    # fastapi is installed in the Modal image; guarded so the module is still
+    # importable for tooling/tests that don't need the Modal HTTP entry point.
+    from fastapi import Request
+except ImportError:  # pragma: no cover - only happens outside the Modal image
+    Request = Any  # type: ignore[assignment,misc]
+
 
 # --- Supabase client helper ---------------------------------------------------
 # Used by Modal functions to write back to Postgres + Storage with the
@@ -40,6 +47,19 @@ def supabase_client():
         key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
         _supabase_client = create_client(url, key)
     return _supabase_client
+
+
+# --- HMAC verification --------------------------------------------------------
+# Edge Functions sign the request body with MODAL_SHARED_SECRET (HMAC-SHA256,
+# hex-encoded) and send the result as the X-Signature header. Modal verifies.
+
+def verify_hmac(body: bytes, signature: str | None, secret: str) -> bool:
+    import hmac
+    import hashlib
+    if not signature or not secret:
+        return False
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
 
 
 def compute_homography_matrix(corners, court_width=6.1, court_length=13.4):
@@ -1040,30 +1060,52 @@ image = (
     secrets=[modal.Secret.from_name("supabase-secrets")],
 )
 @modal.fastapi_endpoint(method="POST")
-async def process_video(request: Dict[str, Any]) -> Dict[str, Any]:
+async def process_video(request: Request) -> Dict[str, Any]:
     """
     Lightweight endpoint that validates the request and spawns GPU processing
-    in the background. Returns immediately so Convex action doesn't time out.
+    in the background. Returns immediately so the Edge Function caller doesn't
+    time out.
+
+    Authenticates the caller via HMAC-SHA256 over the raw request body using
+    MODAL_SHARED_SECRET (loaded from the 'supabase-secrets' Modal Secret) and
+    expects the hex digest in the X-Signature header.
     """
-    video_id = request.get("videoId")
-    video_url = request.get("videoUrl")
-    callback_url = request.get("callbackUrl")
-    manual_court_keypoints = request.get("manualCourtKeypoints")
-    analysis_mode = request.get("analysisMode", "full")
+    from fastapi.responses import JSONResponse
 
-    if not all([video_id, video_url, callback_url]):
-        return {"error": "Missing required fields: videoId, videoUrl, callbackUrl"}
+    raw_body = await request.body()
+    signature = request.headers.get("X-Signature")
+    secret = os.environ.get("MODAL_SHARED_SECRET", "")
+    if not verify_hmac(raw_body, signature, secret):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    # Spawn the GPU worker in the background — returns immediately
+    payload = json.loads(raw_body)
+    video_id = payload.get("video_id")
+    owner_id = payload.get("owner_id")
+    video_url = payload.get("video_url")
+    # callback_url is intentionally dropped — the Supabase migration has the
+    # Modal worker speak Supabase directly via supabase_client() instead of
+    # POSTing back to a callback. Callback rewrite lands in chunk B.
+    manual_court_keypoints = payload.get("manual_court_keypoints")
+    analysis_mode = payload.get("analysis_mode", "full")
+
+    if not all([video_id, owner_id, video_url]):
+        return JSONResponse(
+            {"error": "Missing required fields: video_id, owner_id, video_url"},
+            status_code=400,
+        )
+
+    # Spawn the GPU worker in the background — returns immediately.
+    # callback_url is passed as None for now; chunk B replaces the callback
+    # path with direct Supabase writes inside the worker.
     _process_video_worker.spawn(
         video_id=video_id,
         video_url=video_url,
-        callback_url=callback_url,
+        callback_url=None,
         manual_court_keypoints=manual_court_keypoints,
         analysis_mode=analysis_mode,
     )
 
-    return {"status": "accepted", "videoId": video_id}
+    return {"status": "accepted", "video_id": video_id, "owner_id": owner_id}
 
 
 @app.function(
