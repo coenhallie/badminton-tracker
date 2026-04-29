@@ -2867,19 +2867,6 @@ with_reid: False
         }
 
 
-@app.function(image=image)
-@modal.fastapi_endpoint(method="GET")
-def health() -> Dict[str, Any]:
-    """Health check endpoint"""
-    import torch
-    
-    return {
-        "status": "healthy",
-        "gpu_available": torch.cuda.is_available(),
-        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-    }
-
-
 if __name__ == "__main__":
     # Local testing
     print("Modal app ready for deployment")
