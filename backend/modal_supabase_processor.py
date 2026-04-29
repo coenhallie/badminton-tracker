@@ -1281,8 +1281,8 @@ async def recalculate_speeds(request: Request) -> Any:
 
 
 @app.function(
-    gpu="T4",
-    timeout=3600,  # 60 minutes max (large videos need headroom)
+    gpu="A10G",
+    timeout=7200,  # 2 hours (long videos can exceed 60 min on T4; A10G should fit comfortably under 2 h)
     memory=8192,   # 8 GB RAM (skeleton data + JSON serialization for long videos)
     image=image,
     volumes={"/cache": vol, MODELS_PATH: models_vol},
