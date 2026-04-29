@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useConvexClient } from 'convex-vue'
-import { api } from '../../convex/_generated/api'
+import { supabase } from '@/lib/supabase'
+import { useSession } from '@/composables/useSession'
 import type { UploadResponse } from '@/types/analysis'
 
-const client = useConvexClient()
+const { user } = useSession()
 
 const emit = defineEmits<{
   uploaded: [response: UploadResponse]
@@ -13,14 +13,8 @@ const emit = defineEmits<{
 
 const isDragging = ref(false)
 const isUploading = ref(false)
-const uploadProgress = ref(0)
-const uploadSpeed = ref('')
 const selectedFile = ref<File | null>(null)
 const analysisMode = ref<'rally_only' | 'full'>('full')
-const activeXhr = ref<XMLHttpRequest | null>(null)
-const retryCount = ref(0)
-const MAX_RETRIES = 2
-const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes
 
 const allowedTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/webm']
 
@@ -67,7 +61,7 @@ function validateAndSetFile(file: File) {
     return
   }
 
-  // Max file size: 1GB (Convex limit)
+  // Max file size: 1GB
   const maxSize = 1024 * 1024 * 1024
   if (file.size > maxSize) {
     emit('error', 'File is too large. Maximum size is 1GB.')
@@ -85,147 +79,59 @@ function validateAndSetFile(file: File) {
 
 function removeFile() {
   selectedFile.value = null
-  uploadProgress.value = 0
-  uploadSpeed.value = ''
 }
 
-function cancelUpload() {
-  if (activeXhr.value) {
-    activeXhr.value.abort()
-    activeXhr.value = null
-  }
-  isUploading.value = false
-  uploadProgress.value = 0
-  uploadSpeed.value = ''
-  retryCount.value = 0
-}
+async function uploadAndCreate(file: File): Promise<string> {
+  if (!user.value) throw new Error('Not signed in')
 
-function uploadFileWithProgress(url: string, file: File): Promise<{ storageId: string }> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest()
-    activeXhr.value = xhr
-    let lastLoaded = 0
-    let lastTime = Date.now()
+  const videoId = crypto.randomUUID()
+  const path = `${user.value.id}/${videoId}.mp4`
 
-    xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable) {
-        uploadProgress.value = (e.loaded / e.total) * 100
+  // 1. Upload bytes to Storage
+  const { error: upErr } = await supabase.storage
+    .from('videos')
+    .upload(path, file, { contentType: file.type, upsert: false })
+  if (upErr) throw upErr
 
-        const now = Date.now()
-        const elapsed = (now - lastTime) / 1000
-        if (elapsed >= 0.5) {
-          const bytesPerSec = (e.loaded - lastLoaded) / elapsed
-          lastLoaded = e.loaded
-          lastTime = now
-          if (bytesPerSec > 0) {
-            if (bytesPerSec >= 1024 * 1024) {
-              uploadSpeed.value = `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`
-            } else {
-              uploadSpeed.value = `${(bytesPerSec / 1024).toFixed(0)} KB/s`
-            }
-          }
-        }
-      }
+  // 2. Insert row (RLS allows because owner_id = auth.uid())
+  const { data: row, error: insErr } = await supabase
+    .from('videos')
+    .insert({
+      id: videoId,
+      owner_id: user.value.id,
+      filename: file.name,
+      size: file.size,
+      storage_path: path,
+      status: 'uploaded',
     })
+    .select()
+    .single()
+  if (insErr) throw insErr
 
-    xhr.addEventListener('load', () => {
-      activeXhr.value = null
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          resolve(JSON.parse(xhr.responseText))
-        } catch {
-          reject(new Error('Invalid response from storage'))
-        }
-      } else {
-        reject(new Error(`Upload failed (HTTP ${xhr.status})`))
-      }
-    })
-
-    xhr.addEventListener('error', () => {
-      activeXhr.value = null
-      reject(new Error('Network error during upload'))
-    })
-
-    xhr.addEventListener('abort', () => {
-      activeXhr.value = null
-      reject(new Error('Upload cancelled'))
-    })
-
-    xhr.addEventListener('timeout', () => {
-      activeXhr.value = null
-      reject(new Error('Upload timed out'))
-    })
-
-    xhr.timeout = UPLOAD_TIMEOUT_MS
-    xhr.open('POST', url)
-    xhr.setRequestHeader('Content-Type', file.type)
-    xhr.send(file)
-  })
+  return row.id as string
 }
 
 async function startUpload() {
   if (!selectedFile.value) return
 
   isUploading.value = true
-  uploadProgress.value = 0
-  uploadSpeed.value = ''
-  retryCount.value = 0
-
-  await attemptUpload()
-}
-
-async function attemptUpload() {
-  if (!selectedFile.value) return
 
   try {
-    // Step 1: Generate upload URL from Convex
-    const uploadUrl = await client.mutation(api.videos.generateUploadUrl, {})
-
-    // Step 2: Upload file with real progress tracking
-    const { storageId } = await uploadFileWithProgress(uploadUrl, selectedFile.value)
-
-    // Step 3: Create video record in Convex database
-    const videoId = await client.mutation(api.videos.createVideo, {
-      storageId,
-      filename: selectedFile.value.name,
-      size: selectedFile.value.size,
-      analysisMode: analysisMode.value,
-    })
-
-    uploadProgress.value = 100
-    uploadSpeed.value = ''
+    const file = selectedFile.value
+    const videoId = await uploadAndCreate(file)
 
     emit('uploaded', {
       video_id: videoId,
-      filename: selectedFile.value.name,
-      size: selectedFile.value.size,
+      filename: file.name,
+      size: file.size,
       status: 'uploaded',
       analysisMode: analysisMode.value,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Upload failed'
-
-    // Don't retry if user cancelled
-    if (message === 'Upload cancelled') {
-      return
-    }
-
-    // Auto-retry on network errors / timeouts
-    if (retryCount.value < MAX_RETRIES && (message.includes('Network') || message.includes('timed out'))) {
-      retryCount.value++
-      uploadProgress.value = 0
-      uploadSpeed.value = `Retrying (${retryCount.value}/${MAX_RETRIES})...`
-      await new Promise(r => setTimeout(r, 1000 * retryCount.value))
-      await attemptUpload()
-      return
-    }
-
     emit('error', message)
   } finally {
-    if (uploadProgress.value === 100 || !activeXhr.value) {
-      isUploading.value = false
-      uploadSpeed.value = ''
-    }
+    isUploading.value = false
   }
 }
 </script>
@@ -283,10 +189,6 @@ async function attemptUpload() {
         </button>
       </div>
 
-      <div v-if="isUploading" class="progress-bar">
-        <div class="progress-fill" :style="{ width: `${uploadProgress}%` }"></div>
-      </div>
-
       <!-- Analysis Mode Selector -->
       <div v-if="!isUploading" class="mode-selector">
         <span class="mode-label">Analysis Mode</span>
@@ -327,10 +229,8 @@ async function attemptUpload() {
       <div v-else class="uploading-status">
         <div class="upload-status-row">
           <div class="spinner"></div>
-          <span>Uploading... {{ Math.round(uploadProgress) }}%</span>
-          <span v-if="uploadSpeed" class="upload-speed">{{ uploadSpeed }}</span>
+          <span>Uploading...</span>
         </div>
-        <button class="cancel-btn" @click="cancelUpload">Cancel</button>
       </div>
     </div>
   </div>
@@ -466,21 +366,6 @@ async function attemptUpload() {
   border-color: var(--color-error);
 }
 
-.progress-bar {
-  height: 8px;
-  background: var(--color-bg-tertiary);
-  border-radius: 0;
-  overflow: hidden;
-  margin-bottom: 16px;
-}
-
-.progress-fill {
-  height: 100%;
-  background: var(--color-accent);
-  border-radius: 0;
-  transition: width 0.3s ease;
-}
-
 .upload-btn {
   width: 100%;
   display: flex;
@@ -519,27 +404,6 @@ async function attemptUpload() {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-
-.upload-speed {
-  font-size: 0.8rem;
-  color: var(--color-text-tertiary);
-}
-
-.cancel-btn {
-  padding: 6px 16px;
-  background: transparent;
-  border: 1px solid var(--color-border-secondary);
-  border-radius: 0;
-  color: var(--color-text-secondary);
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.cancel-btn:hover {
-  border-color: var(--color-error);
-  color: var(--color-error);
 }
 
 .spinner {
