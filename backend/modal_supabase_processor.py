@@ -1215,7 +1215,9 @@ async def _process_video_worker(
         pipeline_start = time.time()
         phase_start = time.time()
 
-        # Download video from Convex (streamed to disk to handle large files)
+        # Download video from Supabase Storage signed URL (streamed to disk
+        # to handle large files). The signed URL is supplied by the caller
+        # in the request payload and is good for ~1 hour.
         await send_log("Downloading video from storage...", "info", "processing")
 
         video_path = Path(f"/cache/{video_id}.mp4")
@@ -2634,4 +2636,4 @@ def health() -> Dict[str, Any]:
 if __name__ == "__main__":
     # Local testing
     print("Modal app ready for deployment")
-    print("Deploy with: modal deploy backend/modal_convex_processor.py")
+    print("Deploy with: modal deploy backend/modal_supabase_processor.py")
