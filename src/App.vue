@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useTheme } from '@/composables/useTheme'
+import { useSession } from '@/composables/useSession'
+import LoginView from '@/views/LoginView.vue'
+const { isAuthenticated, ready } = useSession()
 import VideoUpload from '@/components/VideoUpload.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import ResultsDashboard from '@/components/ResultsDashboard.vue'
@@ -825,7 +828,8 @@ watch(videoSectionRef, () => {
 </script>
 
 <template>
-  <div class="app">
+  <LoginView v-if="ready && !isAuthenticated" />
+  <div v-else-if="ready && isAuthenticated" class="app">
     <!-- Header -->
     <header class="header">
       <div class="header-content">
