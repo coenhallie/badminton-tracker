@@ -371,11 +371,31 @@ export interface SpeedDataResponse {
 const speedCache = new SimpleCache<SpeedDataResponse['speed_data']>(60000)
 
 export async function getSpeedData(
-  _videoId: string,
-  _windowSeconds: number = 60.0,
-  _forceRefresh: boolean = false
+  videoId: string,
+  windowSeconds: number = 60.0,
+  forceRefresh: boolean = false
 ): Promise<SpeedDataResponse> {
-  throw new Error('not yet migrated')
+  const cacheKey = `speed:${videoId}:${windowSeconds}`
+  if (!forceRefresh) {
+    const cached = speedCache.get(cacheKey)
+    if (cached) {
+      return {
+        video_id: videoId,
+        fps: 30,
+        speed_data: cached,
+        status: 'success',
+        manual_keypoints_used: cached.manual_keypoints_used ?? false,
+        detection_source: cached.detection_source ?? 'modal',
+      }
+    }
+  }
+  const { data, error } = await supabase.functions.invoke('recalculate-speeds', {
+    body: { video_id: videoId },
+  })
+  if (error) throw error
+  const resp = data as SpeedDataResponse
+  if (resp.speed_data) speedCache.set(cacheKey, resp.speed_data)
+  return resp
 }
 
 export function clearSpeedCache(videoId?: string): void {
@@ -476,10 +496,66 @@ export interface SpeedTimelineResponse {
 }
 
 export async function getSpeedTimeline(
-  _videoId: string,
-  _sampleRate: number = 1
+  videoId: string,
+  sampleRate: number = 1
 ): Promise<SpeedTimelineResponse> {
-  throw new Error('not yet migrated')
+  const { data, error } = await supabase.functions.invoke('recalculate-speeds', {
+    body: { video_id: videoId },
+  })
+  if (error) throw error
+
+  // The Edge Function returns the same shape the Convex /api/speed endpoint did:
+  //   { video_id, speed_data: { frame_data, statistics, ... }, manual_keypoints_used, detection_source }
+  // Reshape into SpeedTimelineResponse.
+  const payload = data as {
+    video_id?: string
+    speed_data?: {
+      frame_data?: Array<{ frame: number; players: Array<{ player_id: number; speed_kmh: number }> }>
+      manual_keypoints_used?: boolean
+    }
+    manual_keypoints_used?: boolean
+    detection_source?: string
+  }
+
+  const speedData = payload.speed_data
+  const players: Record<
+    string,
+    { frames: number[]; timestamps: number[]; speeds_mps: number[]; speeds_kmh: number[]; zones: string[] }
+  > = {}
+
+  if (speedData?.frame_data) {
+    for (const frame of speedData.frame_data) {
+      for (const player of frame.players) {
+        const pid = player.player_id.toString()
+        if (!players[pid]) {
+          players[pid] = { frames: [], timestamps: [], speeds_mps: [], speeds_kmh: [], zones: [] }
+        }
+        players[pid].frames.push(frame.frame)
+        players[pid].timestamps.push(frame.frame / 30)
+        players[pid].speeds_kmh.push(player.speed_kmh)
+        players[pid].speeds_mps.push(player.speed_kmh / 3.6)
+        players[pid].zones.push(
+          player.speed_kmh > 15 ? 'sprint' : player.speed_kmh > 8 ? 'run' : 'walk'
+        )
+      }
+    }
+  }
+
+  const manualKeypointsUsed =
+    payload.manual_keypoints_used ?? speedData?.manual_keypoints_used ?? false
+  const detectionSource = payload.detection_source ?? 'supabase'
+
+  return {
+    video_id: videoId,
+    frame_range: { start: 0, end: null, total_frames: speedData?.frame_data?.length ?? 0 },
+    sample_rate: sampleRate,
+    fps: 30,
+    players,
+    zone_colors: { walk: '#4CAF50', run: '#FFC107', sprint: '#F44336' },
+    manual_keypoints_used: manualKeypointsUsed,
+    detection_source: detectionSource,
+    status: 'success',
+  }
 }
 
 // =============================================================================
