@@ -29,38 +29,10 @@ except ImportError:  # pragma: no cover - only happens outside the Modal image
     Request = Any  # type: ignore[assignment,misc]
 
 
-# --- Supabase client helper ---------------------------------------------------
-# Used by Modal functions to write back to Postgres + Storage with the
-# service-role key (set in the 'supabase-secrets' Modal Secret).
-_supabase_client = None
-
-def supabase_client():
-    """Return a singleton Supabase client authenticated with the service-role key.
-
-    Reads SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from environment
-    (loaded from the 'supabase-secrets' Modal Secret on each function).
-    """
-    global _supabase_client
-    if _supabase_client is None:
-        import os
-        from supabase import create_client
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-        _supabase_client = create_client(url, key)
-    return _supabase_client
-
-
-# --- HMAC verification --------------------------------------------------------
-# Edge Functions sign the request body with MODAL_SHARED_SECRET (HMAC-SHA256,
-# hex-encoded) and send the result as the X-Signature header. Modal verifies.
-
-def verify_hmac(body: bytes, signature: str | None, secret: str) -> bool:
-    import hmac
-    import hashlib
-    if not signature or not secret:
-        return False
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, signature)
+# --- Supabase + HMAC helpers --------------------------------------------------
+# Shared with backend/modal_pdf_export.py via backend/supabase_helpers.py.
+# Mounted into the Modal image below as /root/supabase_helpers.py.
+from supabase_helpers import supabase_client, verify_hmac  # noqa: F401  (used in HMAC-protected endpoints)
 
 
 # --- Rally clip generation ----------------------------------------------------
@@ -1152,6 +1124,7 @@ image = (
     .add_local_dir(str(_backend_dir / "tracknet"), remote_path="/root/tracknet")
     .add_local_file(str(_backend_dir / "rally_detection.py"), remote_path="/root/rally_detection.py")
     .add_local_file(str(_backend_dir / "speed_calc.py"), remote_path="/root/speed_calc.py")
+    .add_local_file(str(_backend_dir / "supabase_helpers.py"), remote_path="/root/supabase_helpers.py")
 )
 
 
