@@ -60,20 +60,29 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
             continue
         clip_local = f"/cache/{video_id}_rally_{rally_id}.mp4"
         try:
+            # Frame-accurate re-encode (libx264 ultrafast). The -ss BEFORE -i
+            # form lets the demuxer fast-seek to the preceding keyframe; the
+            # encoder then emits frames starting at the exact requested
+            # timestamp. Roughly 10-15s per clip on A10G; ~50x slower than
+            # `-c copy` but produces clips with exact rally boundaries
+            # instead of keyframe-aligned ones.
             subprocess.run(
                 [
                     "ffmpeg", "-y",
                     "-ss", str(rally["start_timestamp"]),
                     "-to", str(rally["end_timestamp"]),
                     "-i", video_path,
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
+                    "-c:v", "libx264",
+                    "-preset", "ultrafast",
+                    "-crf", "23",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
                     "-movflags", "+faststart",
                     clip_local,
                 ],
                 check=True,
                 capture_output=True,
-                timeout=120,  # generous: stream copy of a 30s clip should be <1s
+                timeout=300,  # re-encoding a 30s clip ~10-15s on A10G; 5min cap is generous
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             stderr = e.stderr.decode(errors="replace") if hasattr(e, "stderr") and e.stderr else str(e)
