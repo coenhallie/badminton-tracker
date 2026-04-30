@@ -69,6 +69,7 @@ runs/
 *.tsbuildinfo
 .cache
 .cache.claude/
+.claude/
 
 # Supabase CLI local cache
 supabase/.temp/
