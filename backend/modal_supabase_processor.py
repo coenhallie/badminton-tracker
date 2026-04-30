@@ -1693,6 +1693,8 @@ image = (
     )
     .add_local_dir(str(_backend_dir / "tracknet"), remote_path="/root/tracknet")
     .add_local_file(str(_backend_dir / "rally_detection.py"), remote_path="/root/rally_detection.py")
+    .add_local_file(str(_backend_dir / "shot_detection.py"), remote_path="/root/shot_detection.py")
+    .add_local_file(str(_backend_dir / "rally_detection_shot_gap.py"), remote_path="/root/rally_detection_shot_gap.py")
     .add_local_file(str(_backend_dir / "speed_calc.py"), remote_path="/root/speed_calc.py")
     .add_local_file(str(_backend_dir / "supabase_helpers.py"), remote_path="/root/supabase_helpers.py")
 )
@@ -3264,6 +3266,31 @@ with_reid: False
             except Exception as e:
                 await send_log(f"Rally detection error: {e}", "warning", "processing")
                 print(f"[MODAL] Rally detection error: {e}")
+
+        # Run shot-gap detector on the same skeleton data, then union with the
+        # gradient-based detector for richer coverage. The shot-gap detector
+        # mirrors the in-browser timeline (useAdvancedAnalytics.ts) so users
+        # see the same rally set both in the timeline and as cut clips.
+        try:
+            sys.path.insert(0, "/root")
+            from rally_detection_shot_gap import detect_rallies_from_shots, union_rallies
+            shot_gap_rallies = detect_rallies_from_shots(skeleton_frames, fps)
+            if shot_gap_rallies:
+                await send_log(
+                    f"Shot-gap detector found {len(shot_gap_rallies)} additional candidate rallies",
+                    "info", "processing"
+                )
+            union = union_rallies(detected_rallies, shot_gap_rallies, fps=fps)
+            if len(union) > len(detected_rallies):
+                await send_log(
+                    f"Combined detection: {len(detected_rallies)} (gradient) + {len(shot_gap_rallies)} (shot-gap) "
+                    f"-> {len(union)} (union, dedup overlap >50%)",
+                    "success", "processing"
+                )
+            detected_rallies = union  # use the union for the rest of the pipeline
+        except Exception as e:
+            await send_log(f"Shot-gap detector failed (continuing with gradient only): {e}", "warning", "processing")
+            print(f"[MODAL] Shot-gap detector failed: {e}")
 
         rally_time = time.time() - phase_start
         mem_mb = get_memory_mb()
