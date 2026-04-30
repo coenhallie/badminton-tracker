@@ -1194,8 +1194,8 @@ watch(videoSectionRef, () => {
             <!-- If connected, show detailed info -->
             <template v-if="isApiConnected && healthDetails">
               <!-- Backend Type Badge -->
-              <div class="backend-badge" :class="healthDetails.backend || 'local'">
-                {{ healthDetails.backend === 'convex' ? '☁️ Convex Cloud' : '💻 Local Backend' }}
+              <div class="backend-badge supabase">
+                ☁️ Supabase + Modal
               </div>
 
               <!-- Components Status -->

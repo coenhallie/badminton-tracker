@@ -71,7 +71,7 @@ def main():
             print(f"  Uploaded InpaintNet_best.pt ({len(inpaintnet_data) / 1024 / 1024:.1f} MB)")
 
     print("\nUpload complete! TrackNet is now available for the next video processing run.")
-    print("Redeploy the processor: modal deploy backend/modal_convex_processor.py")
+    print("Redeploy the processor: modal deploy backend/modal_supabase_processor.py")
 
 
 if __name__ == "__main__":
