@@ -917,7 +917,7 @@ watch(videoSectionRef, () => {
 </script>
 
 <template>
-  <LoginView v-if="ready && !isAuthenticated" />
+  <LoginView v-if="ready && !isAuthenticated" @show-changelog="showChangelogModal = true" />
   <div v-else-if="ready && isAuthenticated" class="app">
     <!-- Header -->
     <header class="header">
@@ -970,193 +970,6 @@ watch(videoSectionRef, () => {
         </nav>
       </div>
     </header>
-
-    <!-- Changelog Modal -->
-    <Transition name="fade">
-      <div v-if="showChangelogModal" class="modal-overlay" @click.self="showChangelogModal = false">
-        <div class="changelog-modal">
-          <div class="changelog-header">
-            <h2>📋 Changelog</h2>
-            <button class="modal-close-btn" @click="showChangelogModal = false">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-            </button>
-          </div>
-          <div class="changelog-content">
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.9-alpha</span>
-                <span class="version-date">April 23, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - New pan &amp; zoom viewport for the synthetic court: scroll to zoom, drag to pan, double-click or ⟲ to reset. HUD shows the zoom % with Free / P1 / P2 buttons to switch tracking targets instantly</li>
-                <li> - Click-to-follow: clicking a player's bounding box or skeleton locks the camera onto them — it re-centers every frame as they move. Pan anywhere to release the lock</li>
-                <li> - Skeleton overlay, bounding boxes, angle labels and the synthetic court now share one camera transform so everything stays pixel-aligned at any zoom level</li>
-                <li> - Camera zoom / pan now clears automatically when you toggle back to the real-video view, so the skeleton overlay always re-aligns 1:1 with the footage</li>
-                <li> - Arrow keys (← / →) now step one frame at a time (auto-pausing) for frame-accurate review. The ±10s skip buttons are still there for coarse navigation</li>
-                <li> - Consolidated player tracking to a single BoT-SORT tracker tuned for badminton: our A/B showed ~19× fewer ID swaps vs the alternative on a 20-minute match. Removed the user-facing tracker toggle</li>
-                <li> - Removed the Corner / Side camera option from the upload flow — the app now always assumes an overhead camera centered above the court, which matches every supported video and trims a lot of unused code paths</li>
-                <li> - Fixed: click-to-follow no longer gets swallowed by the paused-video overlay; hit-testing also uses the full detection bounding box (not just keypoints) so clicks anywhere on the visible player register reliably</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.8-alpha</span>
-                <span class="version-date">April 21, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - New Player Identity panel in the results view: see both players as cropped thumbnails, swap their labels with one click, and optionally give them real names</li>
-                <li> - Bounding box labels now come straight from the tracker's canonical player ID — no more mismatches between the box label and the stats underneath the video</li>
-                <li> - When the far player briefly disappears from frame, the tracker no longer guesses and mis-labels the near player as Player 1; uncertain boxes render in amber with a neutral label instead</li>
-                <li> - Court side is now the primary signal for single-skeleton frames: once calibrated, a player stays on their side of the net regardless of detection gaps or YOLO track-id recycling</li>
-                <li> - Interpolated frames no longer ghost one player's label onto the other when only one is detected in the next keyframe</li>
-                <li> - Player swaps and names apply everywhere simultaneously: skeleton overlay, stats cards, shot list, speed graph, mini court, rally timeline, and advanced analytics</li>
-                <li> - Zone Analytics cards now show the same "Player 1 / Player 2" labels as the stats above instead of "Player 0 / Player 1"</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.7-alpha</span>
-                <span class="version-date">March 26, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - Replaced gradient-based rally detection with shot-gap approach using shuttle direction reversals</li>
-                <li> - Rally detection now runs client-side with auto-pause between rallies and hover tooltips</li>
-                <li> - Improved shot detection: removed unreliable deceleration method, tightened pose confidence thresholds</li>
-                <li> - Upgraded pose model from YOLOv26n to YOLOv26m for better far-player accuracy</li>
-                <li> - Shuttle court ROI now extends to top of frame for clears and lobs</li>
-                <li> - TrackNet streaming frame extraction to avoid OOM on large videos</li>
-                <li> - NaN guards on homography transforms and hit marker cleanup on backward seek</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.6-alpha</span>
-                <span class="version-date">March 10, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - TrackNetV3 shuttle tracking for accurate shuttlecock trajectory detection across the full video</li>
-                <li> - Rally timeline visualization showing detected rallies with click-to-seek navigation</li>
-                <li> - Gradient-based rally segmentation from shuttle trajectory data</li>
-                <li> - Toggle to show/hide player skeleton overlay and pose estimation</li>
-                <li> - Rally detection from shuttle direction changes (shot-gap heuristic)</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.5-alpha</span>
-                <span class="version-date">March 3, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - Shot placement heatmap now uses homography to map to real court coordinates instead of raw video pixels</li>
-                <li> - Heatmap uses fixed court grid (6x8) aligned to actual court dimensions (6.1m x 13.4m)</li>
-                <li> - Shots without shuttle data now included using player position as fallback</li>
-                <li> - Recovery analysis measures distance from court center in meters instead of pixel averages</li>
-                <li> - Recovery quality now factors in both time (60%) and position accuracy (40%)</li>
-                <li> - Reaction time filters out anticipatory movement for more accurate measurements</li>
-                <li> - Removed Pressure Index and Fatigue Detection due to insufficient data accuracy</li>
-                <li> - Extracted shared homography utilities for consistent coordinate transforms</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.4-alpha</span>
-                <span class="version-date">March 3, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - Accurate speed measurement using 12-point court calibration with perspective-corrected homography</li>
-                <li> - Fixed skeleton-video synchronization using actual video timestamps</li>
-                <li> - Improved speed filtering to capture fast movements like lunges and recoveries</li>
-                <li> - Thicker skeleton overlay lines for better visibility</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.3-alpha</span>
-                <span class="version-date">March 2, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - Add video overlay export functionality</li>
-                <li> - Removal of inaccurate metrics</li>
-                <li> - Add light mode</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.2-alpha</span>
-                <span class="version-date">February 7, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - Skeleton overlay movement smoothening</li>
-                <li> - Minicourt circle movement smoothening</li>
-                <li> - Added indicator when no player assignement made</li>
-                <li> - Added previous coordinates path in minicourt</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.1-alpha</span>
-                <span class="version-date">February 1, 2026</span>
-              </div>
-              <ul class="changelog-list">
-                <li> - Added Convex backend for video storage</li>
-                <li> - Removed all local backend processing files</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-            <div class="changelog-entry">
-              <div class="changelog-version">
-                <span class="version-tag">v1.0-alpha</span>
-                <span class="version-date">January 31, 2026</span>
-              </div>
-              <h3>🎉 Initial Alpha Launch</h3>
-              <p class="changelog-description">
-                Welcome to SHUTTL. — your AI-powered badminton analysis companion!
-              </p>
-              <ul class="changelog-list">
-                <li>🏸 <strong>Player Detection:</strong> AI-powered player tracking with skeleton overlay</li>
-                <li>🎯 <strong>Pose Estimation:</strong> Real-time body position analysis</li>
-                <li>⚡ <strong>Speed Tracking:</strong> Player movement and shuttlecock speed metrics</li>
-                <li>📊 <strong>Court Mapping:</strong> Interactive mini-court visualization with 12-point calibration</li>
-                <li>🔥 <strong>Position Heatmaps:</strong> Visual representation of player court coverage</li>
-                <li>📈 <strong>Performance Dashboard:</strong> Comprehensive match statistics and insights</li>
-              </ul>
-              <p class="changelog-note">
-                <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Transition>
 
     <!-- Health Status Modal -->
     <Transition name="fade">
@@ -1800,6 +1613,193 @@ watch(videoSectionRef, () => {
     <footer class="footer">
     </footer>
   </div>
+
+  <!-- Changelog Modal -->
+  <Transition name="fade">
+    <div v-if="showChangelogModal" class="modal-overlay" @click.self="showChangelogModal = false">
+      <div class="changelog-modal">
+        <div class="changelog-header">
+          <h2>📋 Changelog</h2>
+          <button class="modal-close-btn" @click="showChangelogModal = false">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="changelog-content">
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.9-alpha</span>
+              <span class="version-date">April 23, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - New pan &amp; zoom viewport for the synthetic court: scroll to zoom, drag to pan, double-click or ⟲ to reset. HUD shows the zoom % with Free / P1 / P2 buttons to switch tracking targets instantly</li>
+              <li> - Click-to-follow: clicking a player's bounding box or skeleton locks the camera onto them — it re-centers every frame as they move. Pan anywhere to release the lock</li>
+              <li> - Skeleton overlay, bounding boxes, angle labels and the synthetic court now share one camera transform so everything stays pixel-aligned at any zoom level</li>
+              <li> - Camera zoom / pan now clears automatically when you toggle back to the real-video view, so the skeleton overlay always re-aligns 1:1 with the footage</li>
+              <li> - Arrow keys (← / →) now step one frame at a time (auto-pausing) for frame-accurate review. The ±10s skip buttons are still there for coarse navigation</li>
+              <li> - Consolidated player tracking to a single BoT-SORT tracker tuned for badminton: our A/B showed ~19× fewer ID swaps vs the alternative on a 20-minute match. Removed the user-facing tracker toggle</li>
+              <li> - Removed the Corner / Side camera option from the upload flow — the app now always assumes an overhead camera centered above the court, which matches every supported video and trims a lot of unused code paths</li>
+              <li> - Fixed: click-to-follow no longer gets swallowed by the paused-video overlay; hit-testing also uses the full detection bounding box (not just keypoints) so clicks anywhere on the visible player register reliably</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.8-alpha</span>
+              <span class="version-date">April 21, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - New Player Identity panel in the results view: see both players as cropped thumbnails, swap their labels with one click, and optionally give them real names</li>
+              <li> - Bounding box labels now come straight from the tracker's canonical player ID — no more mismatches between the box label and the stats underneath the video</li>
+              <li> - When the far player briefly disappears from frame, the tracker no longer guesses and mis-labels the near player as Player 1; uncertain boxes render in amber with a neutral label instead</li>
+              <li> - Court side is now the primary signal for single-skeleton frames: once calibrated, a player stays on their side of the net regardless of detection gaps or YOLO track-id recycling</li>
+              <li> - Interpolated frames no longer ghost one player's label onto the other when only one is detected in the next keyframe</li>
+              <li> - Player swaps and names apply everywhere simultaneously: skeleton overlay, stats cards, shot list, speed graph, mini court, rally timeline, and advanced analytics</li>
+              <li> - Zone Analytics cards now show the same "Player 1 / Player 2" labels as the stats above instead of "Player 0 / Player 1"</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.7-alpha</span>
+              <span class="version-date">March 26, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - Replaced gradient-based rally detection with shot-gap approach using shuttle direction reversals</li>
+              <li> - Rally detection now runs client-side with auto-pause between rallies and hover tooltips</li>
+              <li> - Improved shot detection: removed unreliable deceleration method, tightened pose confidence thresholds</li>
+              <li> - Upgraded pose model from YOLOv26n to YOLOv26m for better far-player accuracy</li>
+              <li> - Shuttle court ROI now extends to top of frame for clears and lobs</li>
+              <li> - TrackNet streaming frame extraction to avoid OOM on large videos</li>
+              <li> - NaN guards on homography transforms and hit marker cleanup on backward seek</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.6-alpha</span>
+              <span class="version-date">March 10, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - TrackNetV3 shuttle tracking for accurate shuttlecock trajectory detection across the full video</li>
+              <li> - Rally timeline visualization showing detected rallies with click-to-seek navigation</li>
+              <li> - Gradient-based rally segmentation from shuttle trajectory data</li>
+              <li> - Toggle to show/hide player skeleton overlay and pose estimation</li>
+              <li> - Rally detection from shuttle direction changes (shot-gap heuristic)</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.5-alpha</span>
+              <span class="version-date">March 3, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - Shot placement heatmap now uses homography to map to real court coordinates instead of raw video pixels</li>
+              <li> - Heatmap uses fixed court grid (6x8) aligned to actual court dimensions (6.1m x 13.4m)</li>
+              <li> - Shots without shuttle data now included using player position as fallback</li>
+              <li> - Recovery analysis measures distance from court center in meters instead of pixel averages</li>
+              <li> - Recovery quality now factors in both time (60%) and position accuracy (40%)</li>
+              <li> - Reaction time filters out anticipatory movement for more accurate measurements</li>
+              <li> - Removed Pressure Index and Fatigue Detection due to insufficient data accuracy</li>
+              <li> - Extracted shared homography utilities for consistent coordinate transforms</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.4-alpha</span>
+              <span class="version-date">March 3, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - Accurate speed measurement using 12-point court calibration with perspective-corrected homography</li>
+              <li> - Fixed skeleton-video synchronization using actual video timestamps</li>
+              <li> - Improved speed filtering to capture fast movements like lunges and recoveries</li>
+              <li> - Thicker skeleton overlay lines for better visibility</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.3-alpha</span>
+              <span class="version-date">March 2, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - Add video overlay export functionality</li>
+              <li> - Removal of inaccurate metrics</li>
+              <li> - Add light mode</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.2-alpha</span>
+              <span class="version-date">February 7, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - Skeleton overlay movement smoothening</li>
+              <li> - Minicourt circle movement smoothening</li>
+              <li> - Added indicator when no player assignement made</li>
+              <li> - Added previous coordinates path in minicourt</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.1-alpha</span>
+              <span class="version-date">February 1, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - Added Convex backend for video storage</li>
+              <li> - Removed all local backend processing files</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v1.0-alpha</span>
+              <span class="version-date">January 31, 2026</span>
+            </div>
+            <h3>🎉 Initial Alpha Launch</h3>
+            <p class="changelog-description">
+              Welcome to SHUTTL. — your AI-powered badminton analysis companion!
+            </p>
+            <ul class="changelog-list">
+              <li>🏸 <strong>Player Detection:</strong> AI-powered player tracking with skeleton overlay</li>
+              <li>🎯 <strong>Pose Estimation:</strong> Real-time body position analysis</li>
+              <li>⚡ <strong>Speed Tracking:</strong> Player movement and shuttlecock speed metrics</li>
+              <li>📊 <strong>Court Mapping:</strong> Interactive mini-court visualization with 12-point calibration</li>
+              <li>🔥 <strong>Position Heatmaps:</strong> Visual representation of player court coverage</li>
+              <li>📈 <strong>Performance Dashboard:</strong> Comprehensive match statistics and insights</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is an early alpha release. We'd love your feedback as we continue to improve!</em>
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </Transition>
 </template>
 
 <style>
