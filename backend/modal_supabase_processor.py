@@ -105,6 +105,7 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
             continue
 
         storage_path = f"{owner_id}/{video_id}/rally_{rally_id}.mp4"
+        thumb_storage_path = None
         try:
             with open(clip_local, "rb") as f:
                 sb.storage.from_("clips").upload(
@@ -112,14 +113,64 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
                     file=f.read(),
                     file_options={"content-type": "video/mp4", "upsert": "true"},
                 )
+
+            # Best-effort thumbnail. A failure here must not block the clip insert.
+            thumb_local = f"/cache/{video_id}_rally_{rally_id}.jpg"
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-ss", "0.5",
+                        "-i", clip_local,
+                        "-vframes", "1",
+                        "-vf", "scale=480:-1",
+                        "-q:v", "3",
+                        thumb_local,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=30,
+                )
+                candidate = f"{owner_id}/{video_id}/rally_{rally_id}.jpg"
+                with open(thumb_local, "rb") as f:
+                    sb.storage.from_("thumbnails").upload(
+                        path=candidate,
+                        file=f.read(),
+                        file_options={"content-type": "image/jpeg", "upsert": "true"},
+                    )
+                thumb_storage_path = candidate
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+                stderr = (
+                    e.stderr.decode(errors="replace")
+                    if hasattr(e, "stderr") and e.stderr
+                    else str(e)
+                )
+                try:
+                    sb.table("processing_logs").insert({
+                        "video_id": video_id,
+                        "owner_id": owner_id,
+                        "message": f"thumbnail generation failed for rally {rally_id}: {stderr[:200]}",
+                        "level": "warning",
+                        "category": "processing",
+                    }).execute()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    if os.path.exists(thumb_local):
+                        os.remove(thumb_local)
+                except OSError:
+                    pass
+
             sb.table("rally_clips").upsert({
-                "video_id":          video_id,
-                "owner_id":          owner_id,
-                "rally_index":       rally_id,
-                "start_timestamp":   rally["start_timestamp"],
-                "end_timestamp":     rally["end_timestamp"],
-                "duration_seconds":  rally["duration_seconds"],
-                "clip_storage_path": storage_path,
+                "video_id":               video_id,
+                "owner_id":               owner_id,
+                "rally_index":            rally_id,
+                "start_timestamp":        rally["start_timestamp"],
+                "end_timestamp":          rally["end_timestamp"],
+                "duration_seconds":       rally["duration_seconds"],
+                "clip_storage_path":      storage_path,
+                "thumbnail_storage_path": thumb_storage_path,
             }, on_conflict="video_id,rally_index").execute()
         except Exception as e:
             try:
