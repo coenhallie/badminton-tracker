@@ -44,3 +44,23 @@ create policy "annotations_owner_delete" on public.rally_annotations
 -- Allow authenticated users to update only the user-editable rally_clips column.
 -- thumbnail_storage_path and annotation_count remain service-role-only.
 grant update (title) on public.rally_clips to authenticated;
+
+-- Maintain rally_clips.annotation_count via trigger.
+-- security definer is required because annotation_count is not granted to
+-- the authenticated role.
+create or replace function public.bump_annotation_count() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if (tg_op = 'INSERT') then
+    update public.rally_clips set annotation_count = annotation_count + 1
+      where id = new.clip_id;
+  elsif (tg_op = 'DELETE') then
+    update public.rally_clips set annotation_count = greatest(annotation_count - 1, 0)
+      where id = old.clip_id;
+  end if;
+  return null;
+end $$;
+
+create trigger rally_annotations_count_trg
+  after insert or delete on public.rally_annotations
+  for each row execute function public.bump_annotation_count();
