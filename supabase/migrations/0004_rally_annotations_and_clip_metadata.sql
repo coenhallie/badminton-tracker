@@ -17,8 +17,7 @@ create table public.rally_annotations (
   owner_id           uuid not null references auth.users(id) on delete cascade,
   timestamp_seconds  real not null check (timestamp_seconds >= 0),
   body               text not null check (length(body) between 1 and 2000),
-  created_at         timestamptz not null default now(),
-  updated_at         timestamptz not null default now()
+  created_at         timestamptz not null default now()
 );
 create index rally_annotations_clip_idx
   on public.rally_annotations (clip_id, timestamp_seconds);
@@ -43,6 +42,8 @@ create policy "annotations_owner_delete" on public.rally_annotations
 
 -- Allow authenticated users to update only the user-editable rally_clips column.
 -- thumbnail_storage_path and annotation_count remain service-role-only.
+-- Revoke first, then grant on specific columns — mirrors the pattern in 0002.
+revoke update on public.rally_clips from authenticated;
 grant update (title) on public.rally_clips to authenticated;
 
 -- Maintain rally_clips.annotation_count via trigger.

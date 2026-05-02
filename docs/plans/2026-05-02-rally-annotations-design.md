@@ -53,8 +53,7 @@ create table public.rally_annotations (
   owner_id           uuid not null references auth.users(id) on delete cascade,
   timestamp_seconds  real not null check (timestamp_seconds >= 0),
   body               text not null check (length(body) between 1 and 2000),
-  created_at         timestamptz not null default now(),
-  updated_at         timestamptz not null default now()
+  created_at         timestamptz not null default now()
 );
 create index rally_annotations_clip_idx
   on public.rally_annotations (clip_id, timestamp_seconds);
@@ -84,6 +83,7 @@ create policy "annotations_owner_delete" on public.rally_annotations
   for delete using (owner_id = auth.uid());
 
 -- Allow authenticated users to update only the user-editable rally_clips columns.
+revoke update on public.rally_clips from authenticated;
 grant update (title) on public.rally_clips to authenticated;
 ```
 
