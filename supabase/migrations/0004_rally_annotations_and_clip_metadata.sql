@@ -24,3 +24,23 @@ create index rally_annotations_clip_idx
   on public.rally_annotations (clip_id, timestamp_seconds);
 create index rally_annotations_owner_idx
   on public.rally_annotations (owner_id, created_at desc);
+
+-- RLS: single-owner, mirrors patterns in 0002_rls_policies.sql.
+alter table public.rally_annotations enable row level security;
+
+create policy "annotations_owner_select" on public.rally_annotations
+  for select using (owner_id = auth.uid());
+
+create policy "annotations_owner_insert" on public.rally_annotations
+  for insert with check (owner_id = auth.uid());
+
+create policy "annotations_owner_update" on public.rally_annotations
+  for update using (owner_id = auth.uid())
+              with check (owner_id = auth.uid());
+
+create policy "annotations_owner_delete" on public.rally_annotations
+  for delete using (owner_id = auth.uid());
+
+-- Allow authenticated users to update only the user-editable rally_clips column.
+-- thumbnail_storage_path and annotation_count remain service-role-only.
+grant update (title) on public.rally_clips to authenticated;
