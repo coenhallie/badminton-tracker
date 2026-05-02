@@ -149,7 +149,8 @@ with open(thumb_local, "rb") as f:
 
 Failure handling: a thumbnail failure logs a warning and continues — clip
 itself is still usable, just no poster image. Same pattern as the existing
-per-rally error handling.
+per-rally error handling (both ffmpeg extraction and storage upload failures
+are caught).
 
 Cost: one extra ~50ms ffmpeg call + a small JPEG upload per clip. Negligible
 vs. the rally re-encode.

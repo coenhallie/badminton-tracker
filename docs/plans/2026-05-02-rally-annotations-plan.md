@@ -437,7 +437,7 @@ Replace it with:
                         file_options={"content-type": "image/jpeg", "upsert": "true"},
                     )
                 thumb_storage_path = candidate
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+            except Exception as e:
                 stderr = (
                     e.stderr.decode(errors="replace")
                     if hasattr(e, "stderr") and e.stderr
