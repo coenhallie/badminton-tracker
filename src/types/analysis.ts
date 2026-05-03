@@ -56,19 +56,19 @@ export interface CourtKeypoints22 {
 }
 
 /**
- * Manual 12-point court keypoints. Field names match the Convex schema
- * (`videos.manualCourtKeypoints`) exactly so there is no remapping
- * between persistence and UI shapes — every consumer imports this type.
+ * Manual 12-point court keypoints. Field names match the persisted shape
+ * (`videos.manual_court_keypoints`) exactly so there is no remapping
+ * between persistence and UI — every consumer imports this type.
  *
  * Each value is [x, y] in video-pixel coordinates.
  *
  * All 12 are required at the TypeScript layer because every UI entry
  * point (CourtSetup.vue, VideoPlayer.vue's in-player selector) always
  * produces the full set. Keypoints the user doesn't click still emit
- * [0, 0] rather than undefined. The Convex schema keeps the non-corner
- * fields optional for forward-compat with old records, but when a record
- * is read into this type we assume all 12 are present — simpler than
- * guarding every consumer against undefined.
+ * [0, 0] rather than undefined. The persisted record may store the
+ * non-corner fields as optional for forward-compat with old rows, but
+ * when a record is read into this type we assume all 12 are present —
+ * simpler than guarding every consumer against undefined.
  *
  * Anchor points:
  *   - 4 outer corners

@@ -1,8 +1,7 @@
 /**
  * Client-side heatmap computation from skeleton_data stored in Supabase.
  *
- * Mirrors the algorithm previously hosted in convex/http.ts (`generateHeatmapFromSkeleton`)
- * so the response shape is identical to what callers already expect via `HeatmapData`.
+ * Returns the same `HeatmapData` shape the rest of the app already consumes.
  */
 import { supabase } from '@/lib/supabase'
 import type { HeatmapData } from '@/services/api'

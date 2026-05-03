@@ -148,13 +148,12 @@ export interface HealthCheckResponse {
   status: 'healthy' | 'unhealthy'
   timestamp: number
   version: string
-  backend: 'local' | 'convex' | 'supabase'
+  backend: 'local' | 'supabase'
   components: {
     pose_model?: string
     court_detector?: string
     multi_model_detector?: string
     modal_inference?: string
-    convex?: string
     database?: string
   }
   system?: {
@@ -504,7 +503,7 @@ export async function getSpeedTimeline(
   })
   if (error) throw error
 
-  // The Edge Function returns the same shape the Convex /api/speed endpoint did:
+  // The Edge Function returns:
   //   { video_id, speed_data: { frame_data, statistics, ... }, manual_keypoints_used, detection_source }
   // Reshape into SpeedTimelineResponse.
   const payload = data as {

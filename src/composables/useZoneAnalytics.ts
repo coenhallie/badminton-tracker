@@ -1,13 +1,12 @@
 /**
  * Client-side zone analytics computation from skeleton_data stored in Supabase.
  *
- * Mirrors the algorithm previously hosted in convex/http.ts (`calculateZoneAnalytics`)
- * so the response shape is identical to what callers already expect via
- * `RecalculatedZoneAnalyticsResponse`.
+ * Returns the same `RecalculatedZoneAnalyticsResponse` shape the rest of the
+ * app already consumes.
  *
- * Note: avg_distance_to_net_m requires homography from manual court keypoints which is
- * not computed here (matches the Convex behavior — it returned 0 / undefined for this
- * field). The UI hides the row when avg_distance_to_net_m <= 0.
+ * Note: avg_distance_to_net_m requires homography from manual court keypoints
+ * which is not computed here (returns 0 / undefined for this field; the UI
+ * hides the row when avg_distance_to_net_m <= 0).
  */
 import { supabase } from '@/lib/supabase'
 import type { RecalculatedZoneAnalyticsResponse, PlayerZoneData } from '@/services/api'

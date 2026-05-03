@@ -109,7 +109,7 @@ const formattedDuration = computed(() => {
 })
 
 // Maximum realistic speed thresholds (km/h)
-// UNIFIED with backend (modal_convex_processor.py) and Convex speed calculator (http.ts)
+// UNIFIED with backend (modal_supabase_processor.py).
 // Research: Badminton players rarely exceed 25 km/h even in explosive movements.
 // Typical max during active play: 18-25 km/h. Average speeds: 5-15 km/h.
 const MAX_REALISTIC_SPEED_KMH = 25  // Absolute cap for max speed display

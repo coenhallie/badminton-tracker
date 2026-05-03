@@ -146,8 +146,8 @@ function handleRallySelect(rallyId: number | null) {
 
 // Manual court keypoints storage (for mini court when manually set).
 // The canonical ExtendedCourtKeypoints type lives in @/types/analysis and
-// matches the Convex schema field names — so there's no remapping layer
-// between persistence and UI. Every consumer (VideoPlayer, CourtSetup,
+// matches the persisted column shape — no remapping layer between
+// persistence and UI. Every consumer (VideoPlayer, CourtSetup,
 // SyntheticCourtView, App) imports the same shape.
 const manualCourtKeypoints = ref<ExtendedCourtKeypoints | null>(null)
 
@@ -625,7 +625,7 @@ async function triggerDelayedSpeedCalculation() {
       const statistics = speedResponse.speed_data.statistics
       
       // Maximum realistic speed threshold for statistics (km/h)
-      // UNIFIED with backend and Convex speed calculator
+      // UNIFIED with backend speed calculator (modal_supabase_processor.py)
       const MAX_VALID_SPEED_KMH = 25
       const REALISTIC_MAX_SPEED_KMH = 25  // Cap displayed max to realistic value
       
@@ -694,7 +694,7 @@ function handleUploadError(message: string) {
 }
 
 // Court setup handlers - receives 12-point keypoints from CourtSetup.
-// Field names match the Convex schema 1:1 (no remapping needed).
+// Field names match the persisted column shape 1:1 (no remapping needed).
 function handleCourtSetupComplete(keypoints: ExtendedCourtKeypoints) {
   console.log('[App] 12-point court keypoints saved:', keypoints)
   manualCourtKeypoints.value = keypoints
@@ -925,7 +925,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            alpha v1.9
+            beta v2.0
           </button>
         </div>
 
@@ -1015,51 +1015,30 @@ watch(videoSectionRef, () => {
               <div class="health-section">
                 <h3>🧩 Components</h3>
                 <div class="components-grid">
-                  <!-- Convex-specific components -->
-                  <template v-if="healthDetails.backend === 'convex'">
-                    <div class="component-item" :class="{ active: healthDetails.components.convex === 'connected' }">
-                      <span class="component-icon">☁️</span>
-                      <span class="component-name">Convex</span>
-                      <span class="component-status">{{ healthDetails.components.convex || 'unknown' }}</span>
-                    </div>
-                    <div class="component-item" :class="{ active: healthDetails.components.database === 'connected' }">
-                      <span class="component-icon">🗃️</span>
-                      <span class="component-name">Database</span>
-                      <span class="component-status">{{ healthDetails.components.database || 'unknown' }}</span>
-                    </div>
-                    <div class="component-item" :class="{ active: healthDetails.components.modal_inference === 'configured' }">
-                      <span class="component-icon">⚡</span>
-                      <span class="component-name">Modal GPU</span>
-                      <span class="component-status">{{ healthDetails.components.modal_inference || 'unknown' }}</span>
-                    </div>
-                  </template>
-                  <!-- Local backend components -->
-                  <template v-else>
-                    <div class="component-item" :class="{ active: healthDetails.components.pose_model === 'loaded' }">
-                      <span class="component-icon">🦴</span>
-                      <span class="component-name">Pose Model</span>
-                      <span class="component-status">{{ healthDetails.components.pose_model || 'unknown' }}</span>
-                    </div>
-                    <div class="component-item" :class="{ active: healthDetails.components.court_detector === 'loaded' }">
-                      <span class="component-icon">🏸</span>
-                      <span class="component-name">Court Detector</span>
-                      <span class="component-status">{{ healthDetails.components.court_detector || 'unknown' }}</span>
-                    </div>
-                    <div class="component-item" :class="{ active: healthDetails.components.multi_model_detector === 'loaded' }">
-                      <span class="component-icon">🎯</span>
-                      <span class="component-name">Multi-Model Detector</span>
-                      <span class="component-status">{{ healthDetails.components.multi_model_detector || 'unknown' }}</span>
-                    </div>
-                    <div class="component-item" :class="{ active: healthDetails.components.modal_inference === 'enabled' }">
-                      <span class="component-icon">☁️</span>
-                      <span class="component-name">Modal GPU</span>
-                      <span class="component-status">{{ healthDetails.components.modal_inference || 'unknown' }}</span>
-                    </div>
-                  </template>
+                  <div class="component-item" :class="{ active: healthDetails.components.pose_model === 'loaded' }">
+                    <span class="component-icon">🦴</span>
+                    <span class="component-name">Pose Model</span>
+                    <span class="component-status">{{ healthDetails.components.pose_model || 'unknown' }}</span>
+                  </div>
+                  <div class="component-item" :class="{ active: healthDetails.components.court_detector === 'loaded' }">
+                    <span class="component-icon">🏸</span>
+                    <span class="component-name">Court Detector</span>
+                    <span class="component-status">{{ healthDetails.components.court_detector || 'unknown' }}</span>
+                  </div>
+                  <div class="component-item" :class="{ active: healthDetails.components.multi_model_detector === 'loaded' }">
+                    <span class="component-icon">🎯</span>
+                    <span class="component-name">Multi-Model Detector</span>
+                    <span class="component-status">{{ healthDetails.components.multi_model_detector || 'unknown' }}</span>
+                  </div>
+                  <div class="component-item" :class="{ active: healthDetails.components.modal_inference === 'enabled' }">
+                    <span class="component-icon">☁️</span>
+                    <span class="component-name">Modal GPU</span>
+                    <span class="component-status">{{ healthDetails.components.modal_inference || 'unknown' }}</span>
+                  </div>
                 </div>
               </div>
 
-              <!-- System Resources (local backend only) -->
+              <!-- System Resources -->
               <div v-if="healthDetails.system" class="health-section">
                 <h3>💻 System Resources</h3>
                 <div class="resource-bars">
@@ -1084,7 +1063,7 @@ watch(videoSectionRef, () => {
                 </div>
               </div>
 
-              <!-- Video Stats (Convex only) -->
+              <!-- Video Stats -->
               <div v-if="healthDetails.stats" class="health-section">
                 <h3>📊 Video Stats</h3>
                 <div class="health-info-row">
@@ -1630,6 +1609,23 @@ watch(videoSectionRef, () => {
         <div class="changelog-content">
           <div class="changelog-entry">
             <div class="changelog-version">
+              <span class="version-tag">v2.0-beta</span>
+              <span class="version-date">May 2, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - Backend migrated from Convex to Supabase: new database, file storage, edge functions, and per-user data isolation — same app, new foundation</li>
+              <li> - Sign-in required: the app now gates behind email/password (or Google) authentication, so your videos and analysis stay private to your account</li>
+              <li> - Every detected rally is now saved as its own short video clip with a poster thumbnail, ready for browsing on web and the upcoming mobile app</li>
+              <li> - Rally clip cuts are now frame-accurate via a quick re-encode — clips no longer start a couple of seconds early on the nearest keyframe</li>
+              <li> - New schema for time-pinned text annotations on rally clips: the data layer is live; the in-app UI lands next</li>
+              <li> - Modal processing now runs on A10G GPUs with a longer timeout, so longer matches finish end-to-end in one go</li>
+            </ul>
+            <p class="changelog-note">
+              <em>This is the v2.0 beta release. We'd love your feedback as we keep improving!</em>
+            </p>
+          </div>
+          <div class="changelog-entry">
+            <div class="changelog-version">
               <span class="version-tag">v1.9-alpha</span>
               <span class="version-date">April 23, 2026</span>
             </div>
@@ -2066,12 +2062,6 @@ a:hover {
   font-size: 0.875rem;
   font-weight: 500;
   margin-bottom: 8px;
-}
-
-.backend-badge.convex {
-  background: rgba(99, 102, 241, 0.1);
-  border: 1px solid #6366f1;
-  color: #818cf8;
 }
 
 .backend-badge.local {
