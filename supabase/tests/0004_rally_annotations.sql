@@ -52,10 +52,11 @@ values ('cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid,
         '11111111-1111-1111-1111-111111111111'::uuid, 2.5, 'second');
 
 -- Trigger should have bumped annotation_count to 2.
+-- reset role at top level: SET/RESET inside a DO block doesn't propagate.
+reset role;
 do $$
 declare c int;
 begin
-  reset role;
   select annotation_count into c from public.rally_clips
     where id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid;
   if c <> 2 then raise exception 'expected annotation_count 2, got %', c; end if;
@@ -89,7 +90,8 @@ delete from public.rally_clips where id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 do $$
 declare n int;
 begin
-  select count(*) into n from public.rally_annotations;
+  select count(*) into n from public.rally_annotations
+    where clip_id = 'cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid;
   if n <> 0 then raise exception 'expected cascade to remove annotations, got %', n; end if;
 end $$;
 

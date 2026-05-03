@@ -206,8 +206,8 @@ Expected: shows the table definition with all the columns from Task 1.
 Alternative if `db dump` is awkward — connect with psql:
 
 ```bash
-psql "$(supabase status --output env | grep DB_URL | cut -d= -f2- | tr -d '\"')" -c '\d public.rally_annotations'
-psql "$(supabase status --output env | grep DB_URL | cut -d= -f2- | tr -d '\"')" -c '\d public.rally_clips'
+psql "$(supabase status --output env | grep '^DB_URL=' | cut -d= -f2- | tr -d '\"')" -c '\d public.rally_annotations'
+psql "$(supabase status --output env | grep '^DB_URL=' | cut -d= -f2- | tr -d '\"')" -c '\d public.rally_clips'
 ```
 
 Expected for `rally_annotations`: 7 columns including `timestamp_seconds`,
