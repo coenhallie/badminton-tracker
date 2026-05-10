@@ -13,9 +13,8 @@ const email = ref("");
 const password = ref("");
 const error = ref<string | null>(null);
 const submittingEmail = ref(false);
-const submittingGoogle = ref(false);
 
-const busy = computed(() => submittingEmail.value || submittingGoogle.value);
+const busy = computed(() => submittingEmail.value);
 
 async function signInEmail() {
   if (busy.value) return;
@@ -27,20 +26,6 @@ async function signInEmail() {
   });
   submittingEmail.value = false;
   if (e) error.value = e.message;
-}
-
-async function signInGoogle() {
-  if (busy.value) return;
-  submittingGoogle.value = true;
-  error.value = null;
-  const { error: e } = await supabase.auth.signInWithOAuth({
-    provider: "google",
-    options: { redirectTo: window.location.origin },
-  });
-  if (e) {
-    error.value = e.message;
-    submittingGoogle.value = false;
-  }
 }
 </script>
 
@@ -76,7 +61,7 @@ async function signInGoogle() {
           type="button"
           @click="emit('show-changelog')"
         >
-          alpha v1.9
+          beta v2.0
         </button>
       </div>
       <p class="subtitle">Sign in to continue</p>
@@ -126,24 +111,6 @@ async function signInGoogle() {
           </svg>
           <span>{{ error }}</span>
         </p>
-
-        <div class="divider"><span>or</span></div>
-
-        <button
-          class="google-btn"
-          type="button"
-          :disabled="busy"
-          @click="signInGoogle"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-            <path fill="#4285F4" d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.16c-.27 1.4-1.07 2.59-2.28 3.39v2.81h3.69c2.16-1.99 3.41-4.92 3.41-8.44z" />
-            <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.94-2.91l-3.69-2.81c-1.02.69-2.34 1.1-4.25 1.1-3.27 0-6.04-2.21-7.04-5.18H1.16v3.25C3.13 21.3 7.21 24 12 24z" />
-            <path fill="#FBBC05" d="M4.96 14.2c-.25-.69-.39-1.43-.39-2.2s.14-1.51.39-2.2V6.55H1.16C.42 8.21 0 10.06 0 12s.42 3.79 1.16 5.45l3.8-3.25z" />
-            <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.27-3.27C17.95 1.19 15.24 0 12 0 7.21 0 3.13 2.7 1.16 6.55l3.8 3.25C5.96 6.96 8.73 4.75 12 4.75z" />
-          </svg>
-          <span v-if="submittingGoogle" class="spinner spinner--dark" />
-          {{ submittingGoogle ? "Redirecting…" : "Continue with Google" }}
-        </button>
       </div>
 
       <p class="hint">
@@ -331,53 +298,6 @@ async function signInGoogle() {
   flex-shrink: 0;
 }
 
-.divider {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 20px 0;
-  color: var(--color-text-tertiary);
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.divider::before,
-.divider::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--color-border);
-}
-
-.google-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 11px 24px;
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border-secondary);
-  border-radius: 0;
-  color: var(--color-text);
-  font-size: 0.9rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  font-family: inherit;
-}
-
-.google-btn:hover:not(:disabled) {
-  background: var(--color-bg-hover);
-  border-color: var(--color-border-hover);
-}
-
-.google-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .spinner {
   width: 14px;
   height: 14px;
@@ -385,11 +305,6 @@ async function signInGoogle() {
   border-top-color: #000;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
-}
-
-.spinner--dark {
-  border-color: var(--color-border);
-  border-top-color: var(--color-text);
 }
 
 @keyframes spin {

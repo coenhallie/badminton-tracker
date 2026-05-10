@@ -14,7 +14,6 @@ const emit = defineEmits<{
 const isDragging = ref(false)
 const isUploading = ref(false)
 const selectedFile = ref<File | null>(null)
-const analysisMode = ref<'rally_only' | 'full'>('full')
 
 const allowedTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/webm']
 
@@ -125,7 +124,6 @@ async function startUpload() {
       filename: file.name,
       size: file.size,
       status: 'uploaded',
-      analysisMode: analysisMode.value,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Upload failed'
@@ -187,31 +185,6 @@ async function startUpload() {
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
         </button>
-      </div>
-
-      <!-- Analysis Mode Selector -->
-      <div v-if="!isUploading" class="mode-selector">
-        <span class="mode-label">Analysis Mode</span>
-        <div class="mode-options">
-          <button
-            class="mode-option"
-            :class="{ active: analysisMode === 'rally_only' }"
-            @click="analysisMode = 'rally_only'"
-            type="button"
-          >
-            <span class="mode-title">Rally Separation</span>
-            <span class="mode-desc">Detect rally boundaries only (faster)</span>
-          </button>
-          <button
-            class="mode-option"
-            :class="{ active: analysisMode === 'full' }"
-            @click="analysisMode = 'full'"
-            type="button"
-          >
-            <span class="mode-title">Full Analysis</span>
-            <span class="mode-desc">Player tracking, poses, speed + rallies</span>
-          </button>
-        </div>
       </div>
 
       <button
@@ -421,60 +394,4 @@ async function startUpload() {
   }
 }
 
-.mode-selector {
-  margin-bottom: 20px;
-}
-
-.mode-label {
-  display: block;
-  color: var(--color-text-secondary);
-  font-size: 0.85rem;
-  font-weight: 500;
-  margin-bottom: 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.mode-options {
-  display: flex;
-  gap: 8px;
-}
-
-.mode-option {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 12px 16px;
-  background: var(--color-bg-tertiary);
-  border: 2px solid var(--color-border-secondary);
-  border-radius: 0;
-  cursor: pointer;
-  text-align: left;
-  transition: all 0.2s ease;
-}
-
-.mode-option:hover {
-  border-color: var(--color-text-tertiary);
-}
-
-.mode-option.active {
-  border-color: var(--color-accent);
-  background: var(--color-bg-secondary);
-}
-
-.mode-title {
-  color: var(--color-text-heading);
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-
-.mode-desc {
-  color: var(--color-text-tertiary);
-  font-size: 0.75rem;
-}
-
-.mode-option.active .mode-title {
-  color: var(--color-accent);
-}
 </style>
