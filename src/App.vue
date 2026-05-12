@@ -1710,6 +1710,7 @@ watch(videoSectionRef, () => {
                 :result="analysisResult"
                 :manual-keypoints-set="manualCourtKeypoints !== null"
                 :zone-recalculation-trigger="zoneRecalculationTrigger"
+                @needs-rally-review="handlePhase1Complete"
               />
             </div>
 

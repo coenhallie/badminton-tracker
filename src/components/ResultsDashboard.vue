@@ -23,6 +23,23 @@ const props = defineProps<{
   zoneRecalculationTrigger?: number
 }>()
 
+// Defense-in-depth: if a Phase-1-only result lands here (e.g. deep link, stale
+// route, or result mutating after mount), bail out and let App.vue switch to
+// the RallyReview flow. App.vue's primary Phase-1 routing happens earlier
+// (handlePhase1Complete), so this is a safety net — only `phase === 'phase1'`
+// triggers re-routing. Legacy results without a `phase` field render normally.
+const emit = defineEmits<{
+  needsRallyReview: []
+}>()
+
+watch(
+  () => (props.result as AnalysisResult & { phase?: string })?.phase,
+  (phase) => {
+    if (phase === 'phase1') emit('needsRallyReview')
+  },
+  { immediate: true }
+)
+
 // PDF Export state
 const isExporting = ref(false)
 const exportError = ref<string | null>(null)
