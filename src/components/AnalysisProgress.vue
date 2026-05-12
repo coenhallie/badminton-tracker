@@ -3,7 +3,7 @@ import { ref, onMounted, computed, nextTick, watch, toRef } from 'vue'
 import { supabase } from '@/lib/supabase'
 import { useReactiveRow } from '@/composables/useReactiveRow'
 import { useReactiveList } from '@/composables/useReactiveList'
-import type { AnalysisResult, ProcessingLog, LogLevel, LogCategory } from '@/types/analysis'
+import type { AnalysisResult, ProcessingLog, LogLevel, LogCategory, VideoStatus } from '@/types/analysis'
 
 interface Video {
   id: string
@@ -11,7 +11,7 @@ interface Video {
   filename: string
   size: number
   storage_path: string
-  status: 'uploaded' | 'processing' | 'completed' | 'failed'
+  status: VideoStatus
   progress: number | null
   current_frame: number | null
   total_frames: number | null
@@ -35,17 +35,21 @@ interface ProcessingLogRow {
   level: LogLevel
   category: LogCategory
   timestamp: string
+  phase?: 'phase1' | 'phase2' | null
 }
 
 const props = defineProps<{
   videoId: string
   filename: string
+  phase?: 'phase1' | 'phase2'
 }>()
 
 const emit = defineEmits<{
-  complete: [result: AnalysisResult]
-  error: [message: string]
+  phase1Complete: []
+  phase2Complete: [result: AnalysisResult]
+  failed: [status: VideoStatus]
   cancel: []
+  error: [message: string]
 }>()
 
 const videoIdRef = toRef(props, 'videoId')
@@ -74,19 +78,25 @@ const analysisStarted = ref(false)
 const progress = computed(() => video.value?.progress ?? 0)
 const current_frame = computed(() => video.value?.current_frame ?? 0)
 const total_frames = computed(() => video.value?.total_frames ?? 0)
-const videoStatus = computed(() => video.value?.status ?? 'uploaded')
+const videoStatus = computed<VideoStatus>(() => video.value?.status ?? 'uploaded')
 const errorMessage = computed(() => video.value?.error ?? '')
 
 // Map db status to component status
 const status = computed(() => {
   switch (videoStatus.value) {
+    case 'pending':
     case 'uploaded':
       return 'connecting'
     case 'processing':
+    case 'processing_phase1':
+    case 'phase1_complete':
+    case 'processing_phase2':
       return 'analyzing'
     case 'completed':
       return 'complete'
     case 'failed':
+    case 'failed_phase1':
+    case 'failed_phase2':
       return 'error'
     default:
       return 'processing'
@@ -96,6 +106,14 @@ const status = computed(() => {
 const progressPercent = computed(() => Math.min(100, Math.round(progress.value)))
 
 const statusMessage = computed(() => {
+  // Phase-aware messages take precedence over the generic mapping.
+  switch (videoStatus.value) {
+    case 'processing_phase1':
+    case 'phase1_complete':
+      return 'Detecting rallies...'
+    case 'processing_phase2':
+      return 'Analyzing players, speeds, poses...'
+  }
   switch (status.value) {
     case 'connecting':
       return 'Starting analysis...'
@@ -122,8 +140,16 @@ const processingLogs = computed<ProcessingLog[]>(() => {
     category: log.category as LogCategory,
     // Postgres timestamptz returned as ISO string -> seconds since epoch
     timestamp: new Date(log.timestamp).getTime() / 1000,
+    phase: log.phase ?? null,
   }))
 })
+
+// When mounted in a phase-specific context (Phase 1 vs Phase 2), filter the
+// log stream so the user only sees the relevant phase's messages. Logs with
+// no phase tag (legacy / unscoped) always show through.
+const filteredLogs = computed(() =>
+  processingLogs.value.filter(l => !props.phase || !l.phase || l.phase === props.phase)
+)
 
 async function fetchResultsJson(): Promise<any | null> {
   if (!video.value?.results_storage_path) return null
@@ -136,8 +162,27 @@ async function fetchResultsJson(): Promise<any | null> {
   return res.json()
 }
 
-// Watch for completion or error
+// Watch for phase transitions, full completion, and errors.
+// Phase 1 finishing only flips status; RallyReview (Task 13) fetches its own
+// JSON, so we just signal the parent here. Phase 2 still does the signed-URL
+// fetch + retry to produce the final AnalysisResult.
 watch(videoStatus, async (newStatus) => {
+  if (newStatus === 'phase1_complete') {
+    emit('phase1Complete')
+    return
+  }
+
+  if (newStatus === 'failed_phase1' || newStatus === 'failed_phase2') {
+    emit('failed', newStatus)
+    return
+  }
+
+  if (newStatus === 'failed') {
+    emit('failed', newStatus)
+    emit('error', errorMessage.value || 'Analysis failed')
+    return
+  }
+
   if (newStatus === 'completed' && video.value) {
     if (video.value.results_storage_path) {
       try {
@@ -176,7 +221,7 @@ watch(videoStatus, async (newStatus) => {
           player_zone_analytics: (results.player_zone_analytics as AnalysisResult['player_zone_analytics']) ?? null,
           rallies: (results.rallies as AnalysisResult['rallies']) ?? null,
         }
-        emit('complete', analysisResult)
+        emit('phase2Complete', analysisResult)
       } catch (err) {
         console.error('Failed to fetch results:', err)
         emit('error', err instanceof Error ? err.message : 'Failed to load analysis results')
@@ -197,11 +242,9 @@ watch(videoStatus, async (newStatus) => {
           court_detection: null,
           player_zone_analytics: null,
         }
-        emit('complete', analysisResult)
+        emit('phase2Complete', analysisResult)
       }
     }
-  } else if (newStatus === 'failed') {
-    emit('error', errorMessage.value || 'Analysis failed')
   }
 })
 
@@ -211,7 +254,7 @@ watch(progress, () => {
 })
 
 // Auto-scroll logs
-watch(processingLogs, () => {
+watch(filteredLogs, () => {
   nextTick(() => {
     if (logsContainerRef.value) {
       logsContainerRef.value.scrollTop = logsContainerRef.value.scrollHeight
@@ -407,7 +450,7 @@ onMounted(() => {
             <polyline points="10 9 9 9 8 9" />
           </svg>
           <span>Processing Logs</span>
-          <span class="log-count">{{ processingLogs.length }}</span>
+          <span class="log-count">{{ filteredLogs.length }}</span>
         </div>
         <svg
           class="chevron"
@@ -423,11 +466,11 @@ onMounted(() => {
       </div>
 
       <div v-show="showLogs" ref="logsContainerRef" class="logs-container">
-        <div v-if="processingLogs.length === 0" class="logs-empty">
+        <div v-if="filteredLogs.length === 0" class="logs-empty">
           Waiting for processing logs...
         </div>
         <div
-          v-for="log in processingLogs"
+          v-for="log in filteredLogs"
           :key="log.id"
           class="log-entry"
           :class="[`log-${log.level}`, `category-${log.category}`]"

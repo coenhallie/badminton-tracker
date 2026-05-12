@@ -312,6 +312,7 @@ export interface ProcessingLog {
   level: LogLevel
   category: LogCategory
   timestamp: number
+  phase?: 'phase1' | 'phase2' | null
 }
 
 // Court detection model types
