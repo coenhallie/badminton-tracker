@@ -701,16 +701,10 @@ function handleCourtSetupComplete(keypoints: ExtendedCourtKeypoints) {
   currentState.value = 'analyzing'
 }
 
-function handleCourtSetupSkip() {
-  console.log('[App] Court setup skipped - using fallback filtering')
-  // Proceed to analysis without keypoints (Modal will use rectangular fallback filter)
-  currentState.value = 'analyzing'
-}
-
 function handleCourtSetupError(message: string) {
   console.error('[App] Court setup error:', message)
   errorMessage.value = message
-  // Allow retry or skip
+  // Allow retry
 }
 
 async function handleAnalysisComplete(result: AnalysisResult) {
@@ -1196,7 +1190,6 @@ watch(videoSectionRef, () => {
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
             @complete="handleCourtSetupComplete"
-            @skip="handleCourtSetupSkip"
             @error="handleCourtSetupError"
           />
         </div>

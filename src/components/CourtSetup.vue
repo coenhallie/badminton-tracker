@@ -10,7 +10,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   complete: [keypoints: ExtendedCourtKeypoints]
-  skip: []
   error: [message: string]
 }>()
 
@@ -373,10 +372,6 @@ async function saveAndProceed() {
   }
 }
 
-function skipSetup() {
-  emit('skip')
-}
-
 // Watch for resize
 watch(videoDimensions, () => {
   nextTick(() => {
@@ -425,13 +420,6 @@ watch(videoDimensions, () => {
                 title="Undo last keypoint"
               >
                 ↩ Undo
-              </button>
-              <button
-                class="keypoint-btn cancel"
-                @click="skipSetup"
-                title="Skip court setup"
-              >
-                ✕ Skip
               </button>
               <button
                 v-if="isComplete"
