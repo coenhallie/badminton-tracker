@@ -749,7 +749,10 @@ export type VideoStatus =
  */
 export interface Phase1Results {
   phase: 'phase1'
-  rallies: Rally[]
+  // Raw wire shape from the Phase-1 results JSON (snake_case from the Python
+  // backend). Use `BackendRally`, not the client-side normalized `Rally`,
+  // because Phase1Results models the un-normalized payload as written.
+  rallies: BackendRally[]
   shuttle_positions: Record<number, { x: number; y: number; visible: boolean }>
   fps: number
   total_frames: number
@@ -760,10 +763,11 @@ export interface Phase1Results {
 }
 
 // TODO(two-phase-pipeline): no aggregate `Analytics` type exists in this file
-// today — advanced analytics live as discrete shapes (RallySpeedStats,
-// FatigueProfile, etc.). When the Phase-2 merge step lands, replace `any`
-// with the real aggregate shape (likely a struct grouping the existing
-// per-feature analytics interfaces above).
+// today. Discrete analytics interfaces already defined elsewhere in this file
+// include: RallySpeedStats, FatigueProfile, MovementEfficiency, PressureEvent,
+// and any per-rally/per-player metrics composed by `useAdvancedAnalytics.ts`.
+// When the Phase-2 merge step lands, replace `any` with the real aggregate
+// shape grouping these.
 export type Analytics = any
 
 /**
