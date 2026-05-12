@@ -35,6 +35,13 @@ serve(async (req) => {
     .from("videos").select("*").eq("id", video_id).single();
   if (vErr || !video) return resp(404, { error: "Video not found" });
 
+  if (video.status !== "uploaded") {
+    return resp(409, { error: `Video is not in 'uploaded' state (current: ${video.status})` });
+  }
+  if (!video.manual_court_keypoints) {
+    return resp(400, { error: "Court setup required before processing" });
+  }
+
   const { data: signed, error: sErr } = await adminClient
     .storage.from("videos").createSignedUrl(video.storage_path, 3600);
   if (sErr || !signed) return resp(500, { error: "Could not sign video URL" });
@@ -57,7 +64,7 @@ serve(async (req) => {
   }
 
   const { error: updErr } = await adminClient.from("videos")
-    .update({ status: "processing", processing_started_at: new Date().toISOString() })
+    .update({ status: "processing_phase1", processing_started_at: new Date().toISOString() })
     .eq("id", video_id);
   if (updErr) {
     console.error("Failed to update video status post-Modal trigger", { video_id, error: updErr });
