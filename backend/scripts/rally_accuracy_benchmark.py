@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import statistics
 from datetime import datetime
 from pathlib import Path
@@ -86,7 +85,7 @@ def match_rallies(union: list[dict], candidate: list[dict]) -> list[tuple[dict, 
             if inter_end <= inter_start:
                 continue
             inter = inter_end - inter_start
-            union_len = max(u_end, c["end_frame"]) - min(u_start, c["start_frame"])
+            union_len = (u_end - u_start) + (c["end_frame"] - c["start_frame"]) - inter
             iou = inter / union_len if union_len > 0 else 0.0
             if iou > best_iou:
                 best_iou = iou
@@ -151,6 +150,10 @@ def evaluate_video(video: dict) -> dict:
     }
 
 
+def _fmt(v: float | None) -> str:
+    return f"{v:.2f}" if v is not None else "N/A"
+
+
 def render_report(rows: list[dict], out_path: Path) -> str:
     """Render Markdown report and write to out_path. Return summary recommendation."""
     valid = [r for r in rows if not r.get("skipped")]
@@ -186,8 +189,11 @@ def render_report(rows: list[dict], out_path: Path) -> str:
         lines.append(
             f"| `{r['video_id'][:8]}` | {r['union_count']} | {r['candidate_count']} | "
             f"{r['matched_count']} | {r['recall']:.2%} | "
-            f"{r['boundary_start_p95_s']:.2f} | {r['boundary_end_p95_s']:.2f} |"
+            f"{_fmt(r['boundary_start_p95_s'])} | {_fmt(r['boundary_end_p95_s'])} |"
         )
+    if any(r["matched_count"] < 20 for r in valid):
+        lines.append("")
+        lines.append("_Note: p95 columns degrade to max() for videos with fewer than 20 matched rally pairs._")
     if skipped:
         lines.append("")
         lines.append(f"_Skipped: {len(skipped)} videos (missing data)._")
