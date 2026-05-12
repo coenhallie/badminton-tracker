@@ -1,5 +1,15 @@
 -- 0005_two_phase_pipeline.sql
 -- Split the monolithic pipeline into Phase 1 (rallies) and Phase 2 (analytics).
+--
+-- Legacy status values 'processing' and 'failed' remain in the CHECK constraint
+-- for historical safety. They are NOT emitted by any code path after this
+-- migration:
+--   * 'failed' rows are bulk-remapped to 'failed_phase2' below.
+--   * 'processing' rows are expected to be zero at deploy time, enforced by
+--     the drain procedure documented in
+--     docs/plans/2026-05-12-two-phase-rally-first-pipeline-design.md
+--     ("Deploy procedure (drain strategy)"). Any 'processing' rows remaining
+--     after deploy are orphaned and should be investigated manually.
 
 BEGIN;
 
