@@ -24,8 +24,13 @@ import time
 
 # Import lazily so the script can be imported without Supabase env vars.
 def _supabase_client():
-    from supabase_helpers import get_supabase_client  # type: ignore
-    return get_supabase_client()
+    import sys
+    from pathlib import Path
+    backend_dir = str(Path(__file__).resolve().parents[1])
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    from supabase_helpers import supabase_client  # type: ignore
+    return supabase_client()
 
 
 def main() -> None:

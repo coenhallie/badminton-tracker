@@ -30,8 +30,17 @@ from typing import Any
 
 # Import lazily so the script can be imported for tests without Supabase env vars.
 def _supabase_client():
-    from supabase_helpers import get_supabase_client  # type: ignore
-    return get_supabase_client()
+    # `backend/` is not a Python package (no __init__.py), so the same
+    # `from supabase_helpers import ...` pattern that works inside Modal
+    # (where `/root/` is on sys.path) only works locally if we add the
+    # backend directory ourselves.
+    import sys
+    from pathlib import Path
+    backend_dir = str(Path(__file__).resolve().parents[1])
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    from supabase_helpers import supabase_client  # type: ignore
+    return supabase_client()
 
 
 def fetch_completed_videos(limit: int) -> list[dict]:
