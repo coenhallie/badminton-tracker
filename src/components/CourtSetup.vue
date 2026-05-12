@@ -618,16 +618,6 @@ watch(videoDimensions, () => {
   border-color: var(--color-accent);
 }
 
-.keypoint-btn.cancel {
-  background: #1a0000;
-  border-color: var(--color-error);
-  color: var(--color-error);
-}
-
-.keypoint-btn.cancel:hover {
-  background: #2a0000;
-}
-
 .keypoint-btn.apply {
   background: #001a00;
   border-color: var(--color-accent);
