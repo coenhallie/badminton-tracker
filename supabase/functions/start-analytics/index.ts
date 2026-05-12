@@ -51,7 +51,14 @@ serve(async (req) => {
     return resp(400, { error: "Phase 1 results missing; cannot start analytics" });
   }
 
-  // 4. Status flip (before Modal call) to prevent concurrent invocations.
+  // 4. Status flip (BEFORE Modal call) — deliberate divergence from
+  // `process-video`, which flips AFTER Modal returns OK. Phase 2 is
+  // user-triggered (the "Continue with full analytics" button), so the
+  // flip prevents double-click races. Modal failures roll back to
+  // `failed_phase2` below. Orphan risk: if the function dies between
+  // flip and Modal call, the row stays in `processing_phase2` with no
+  // worker. Acceptable today; a timeout-based watchdog can be added if
+  // we observe stuck rows in practice.
   const { error: flipErr } = await adminClient.from("videos")
     .update({
       status: "processing_phase2",
