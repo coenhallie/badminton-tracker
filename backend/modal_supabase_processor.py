@@ -4191,6 +4191,74 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
             "info", "processing",
         )
 
+        # Player-identity thumbnails — best-effort. Cosmetic UI feature
+        # consumed by PlayerIdentityPanel.vue; never block the main
+        # analysis/results write on this. Must run BEFORE `del skeleton_frames`
+        # so we still have the in-memory frame list to pick a representative
+        # frame from. Matches the legacy monolithic-worker behavior that was
+        # dropped in Task 4 and never re-added in Task 5.
+        try:
+            chosen_frame = _pick_best_two_player_frame(
+                skeleton_frames,
+                video_height=int(height),
+                max_search_seconds=10.0,
+                fps=fps,
+            )
+            if chosen_frame is None:
+                await send_log(
+                    "No qualifying 2-player frame for player thumbnails; skipping",
+                    "info", "phase2",
+                )
+            else:
+                thumbs = _capture_player_thumbnails(
+                    video_path,
+                    frame_number=int(chosen_frame["frame"]),
+                    players=chosen_frame["players"][:2],
+                )
+                if thumbs is None:
+                    await send_log(
+                        "Player thumbnail capture failed; skipping",
+                        "warning", "phase2",
+                    )
+                else:
+                    owner_id = owner_id_holder["owner_id"]
+
+                    def _upload_thumb(player_idx: int, jpeg_bytes: bytes) -> str:
+                        path = f"{owner_id}/{video_id}/player_{player_idx}.jpg"
+                        sb.storage.from_("thumbnails").upload(
+                            path=path,
+                            file=jpeg_bytes,
+                            file_options={"content-type": "image/jpeg", "upsert": "true"},
+                        )
+                        return path
+
+                    p0_path = await asyncio.to_thread(_upload_thumb, 0, thumbs[0])
+                    p1_path = await asyncio.to_thread(_upload_thumb, 1, thumbs[1])
+
+                    # Merge thumbnail paths into existing player_labels
+                    # (preserve any user-set names/swaps already on the row).
+                    def _merge_labels():
+                        existing = (
+                            sb.table("videos")
+                            .select("player_labels")
+                            .eq("id", video_id)
+                            .single()
+                            .execute()
+                        )
+                        labels = (existing.data.get("player_labels") if existing.data else None) or {}
+                        labels["player_0_thumbnail_path"] = p0_path
+                        labels["player_1_thumbnail_path"] = p1_path
+                        sb.table("videos").update({"player_labels": labels}).eq("id", video_id).execute()
+
+                    await asyncio.to_thread(_merge_labels)
+                    await send_log("Player thumbnails uploaded", "success", "phase2")
+        except Exception as thumb_err:
+            print(f"[MODAL] [phase2] Player thumbnail capture error: {thumb_err}")
+            await send_log(
+                f"Player thumbnail capture error (non-fatal): {thumb_err}",
+                "warning", "phase2",
+            )
+
         # Free large in-memory structures before the upload.
         del skeleton_frames
         del merged_results
