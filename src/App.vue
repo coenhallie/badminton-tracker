@@ -753,7 +753,7 @@ async function handleContinueAnalytics() {
         'Authorization': `Bearer ${session?.access_token ?? ''}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ videoId: uploadedVideo.value.video_id }),
+      body: JSON.stringify({ video_id: uploadedVideo.value.video_id }),
     })
     if (!res.ok) {
       console.error('[App] start-analytics failed:', res.status, await res.text())

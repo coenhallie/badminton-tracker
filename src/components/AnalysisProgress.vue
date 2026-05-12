@@ -327,6 +327,13 @@ async function startAnalysis() {
   analysisStarted.value = true
   startTime.value = Date.now()
 
+  // Phase 2 is triggered by App.vue via the `start-analytics` Edge Function
+  // when the user clicks "Continue with full analytics". This component, when
+  // mounted with `phase === 'phase2'`, is only displaying progress — it must
+  // NOT re-invoke `process-video` (which would 409 against the current
+  // `processing_phase2` state and produce console noise).
+  if (props.phase === 'phase2') return
+
   try {
     // Trigger backend processing via Supabase Edge Function
     const { error } = await supabase.functions.invoke('process-video', {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue'
 import { supabase } from '@/lib/supabase'
+import type { ExtendedCourtKeypoints } from '@/types/analysis'
 import MiniCourt from './MiniCourt.vue'
 
 const props = defineProps<{
@@ -34,21 +35,9 @@ async function getVideoSignedUrl(videoId: string): Promise<string> {
 // 11-12: Center line endpoints at service lines (CT_N, CT_F)
 // =============================================================================
 
-// Must match the Supabase videos.manual_court_keypoints schema (12-point system)
-interface ExtendedCourtKeypoints {
-  top_left: number[]
-  top_right: number[]
-  bottom_right: number[]
-  bottom_left: number[]
-  net_left?: number[]
-  net_right?: number[]
-  service_line_near_left?: number[]
-  service_line_near_right?: number[]
-  service_line_far_left?: number[]
-  service_line_far_right?: number[]
-  center_near?: number[]
-  center_far?: number[]
-}
+// Canonical ExtendedCourtKeypoints is imported from @/types/analysis above.
+// The 12-point system always emits all fields (with [0, 0] fallback for
+// unclicked points), matching the canonical "all required" shape.
 
 interface ManualCourtKeypoint {
   x: number

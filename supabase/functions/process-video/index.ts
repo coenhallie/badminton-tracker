@@ -46,6 +46,18 @@ serve(async (req) => {
     .storage.from("videos").createSignedUrl(video.storage_path, 3600);
   if (sErr || !signed) return resp(500, { error: "Could not sign video URL" });
 
+  // Flip status BEFORE invoking Modal. Mirrors start-analytics. Prevents a
+  // double-click race where a second call slips past the `status==='uploaded'`
+  // guard while the first Modal invocation is in flight. If Modal then
+  // rejects, we roll back below.
+  const { error: flipErr } = await adminClient.from("videos")
+    .update({ status: "processing_phase1", processing_started_at: new Date().toISOString() })
+    .eq("id", video_id);
+  if (flipErr) {
+    console.error("Failed to flip status to processing_phase1", { video_id, error: flipErr });
+    return resp(500, { error: "Could not update video status" });
+  }
+
   const body = JSON.stringify({
     video_id,
     owner_id: user.id,
@@ -60,15 +72,11 @@ serve(async (req) => {
   });
   if (!modalRes.ok) {
     const text = await modalRes.text();
+    // Roll back so the user can retry.
+    await adminClient.from("videos")
+      .update({ status: "failed_phase1", error: `Modal rejected: ${text.slice(0, 1000)}` })
+      .eq("id", video_id);
     return resp(502, { error: "Modal rejected", detail: text });
-  }
-
-  const { error: updErr } = await adminClient.from("videos")
-    .update({ status: "processing_phase1", processing_started_at: new Date().toISOString() })
-    .eq("id", video_id);
-  if (updErr) {
-    console.error("Failed to update video status post-Modal trigger", { video_id, error: updErr });
-    // Don't fail the request — Modal is already running. Just log.
   }
 
   return resp(200, { ok: true });
