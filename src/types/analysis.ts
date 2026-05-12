@@ -712,3 +712,68 @@ export interface PressureEvent {
   }
 }
 
+// =============================================================================
+// TWO-PHASE PIPELINE TYPES
+// =============================================================================
+
+/**
+ * Video processing status for the two-phase rally-first pipeline.
+ *
+ * New canonical values:
+ *   - pending / uploaded — pre-processing states
+ *   - processing_phase1 — running shuttle tracking + rally detection
+ *   - phase1_complete — Phase 1 finished; rally clips available for review
+ *   - processing_phase2 — running full per-frame analysis on selected rallies
+ *   - completed — Phase 2 merged; full analytics available
+ *   - failed_phase1 / failed_phase2 — phase-specific failure
+ *
+ * Legacy values ('processing', 'failed') are tolerated so historical rows
+ * still type-check; new code should emit the phase-specific values.
+ */
+export type VideoStatus =
+  | 'pending'
+  | 'uploaded'
+  | 'processing_phase1'
+  | 'phase1_complete'
+  | 'processing_phase2'
+  | 'completed'
+  | 'failed_phase1'
+  | 'failed_phase2'
+  // Legacy values tolerated for historical rows.
+  | 'processing'
+  | 'failed'
+
+/**
+ * Phase-1-only result shape: rally segmentation + shuttle positions.
+ * No per-frame skeletons / analytics yet — those come in Phase 2.
+ */
+export interface Phase1Results {
+  phase: 'phase1'
+  rallies: Rally[]
+  shuttle_positions: Record<number, { x: number; y: number; visible: boolean }>
+  fps: number
+  total_frames: number
+  video_metadata: {
+    duration_seconds: number | null
+    filename: string | null
+  }
+}
+
+// TODO(two-phase-pipeline): no aggregate `Analytics` type exists in this file
+// today — advanced analytics live as discrete shapes (RallySpeedStats,
+// FatigueProfile, etc.). When the Phase-2 merge step lands, replace `any`
+// with the real aggregate shape (likely a struct grouping the existing
+// per-feature analytics interfaces above).
+export type Analytics = any
+
+/**
+ * Full analysis result after Phase 2 merges into Phase 1 data.
+ * Same fields as Phase1Results, plus per-frame skeletons and analytics.
+ * `phase` flips from 'phase1' to 'completed' once Phase 2 is merged in.
+ */
+export interface FullAnalysisResult extends Omit<Phase1Results, 'phase'> {
+  phase: 'phase1' | 'completed'
+  skeleton_frames?: SkeletonFrame[]
+  analytics?: Analytics
+}
+
