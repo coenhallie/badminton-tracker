@@ -2250,15 +2250,845 @@ async def _run_full_yolo_loop(
 
     Returns `(skeleton_frames, tracking_state)` where `tracking_state` carries
     aggregated per-player state needed by `_compute_analytics` (positions,
-    distances, speeds, identity-tracker stats, etc.).
+    distances, speeds, identity-tracker stats, plus the in-memory
+    `tracker_metrics` accumulator).
 
-    NOT YET IMPLEMENTED — Task 5 will populate this from the pre-refactor
-    `_process_video_worker` body. Signature is stable; Phase 2 wires up to it.
+    Body lifted from the pre-refactor `_process_video_worker` (commit 9a46170)
+    — the per-frame YOLO loop + identity tracking. The TrackNet pass itself
+    runs upstream in the worker; this helper accepts the already-computed
+    `tracknet_positions` for shuttle-priority selection.
     """
-    raise NotImplementedError(
-        "_run_full_yolo_loop is reserved for Task 5 (Phase 2 worker). "
-        "See git history for the pre-refactor body inside _process_video_worker."
+    import cv2
+    import numpy as np
+    from ultralytics import YOLO
+
+    # Load YOLO26 pose model (latest version)
+    await send_log("Loading YOLO26m pose model (medium)...", "info", "model")
+    pose_model = YOLO("yolo26m-pose.pt")
+
+    # Load badminton detection model (for shuttlecock, racket detection)
+    await send_log("Loading badminton detection model...", "info", "model")
+    badminton_model_path = f"{MODELS_PATH}/badminton/best.pt"
+    if os.path.exists(badminton_model_path):
+        detection_model = YOLO(badminton_model_path)
+        await send_log("Custom badminton model loaded", "success", "model")
+    else:
+        detection_model = YOLO("yolo11n.pt")
+        await send_log("Using COCO model (custom model not found)", "info", "model")
+
+    # =========================================================
+    # TRACKER SETUP — BoT-SORT (Ultralytics built-in)
+    # =========================================================
+    effective_fps = float(fps) if fps and fps > 0 else 30.0
+    lost_buffer_frames = max(int(round(3.0 * effective_fps)), 30)
+
+    tracker_config_path = Path(f"/cache/{video_id}_botsort.yaml")
+    tracker_config_path.parent.mkdir(parents=True, exist_ok=True)
+    tracker_config_content = f"""# BoT-SORT tracker config optimized for badminton (2 players)
+tracker_type: botsort
+track_high_thresh: 0.3
+track_low_thresh: 0.1
+new_track_thresh: 0.4
+track_buffer: {lost_buffer_frames}
+match_thresh: 0.9
+fuse_score: True
+# GMC (Global Motion Compensation) for camera movement
+gmc_method: sparseOptFlow
+# Proximity and appearance thresholds
+proximity_thresh: 0.5
+appearance_thresh: 0.25
+with_reid: False
+"""
+    tracker_config_path.write_text(tracker_config_content)
+    await send_log(
+        f"BoT-SORT config written (track_buffer={lost_buffer_frames}f / 3.0s, track_high=0.3)",
+        "info", "model"
     )
+
+    # Tracking diagnostics accumulator
+    tracker_metrics = TrackerMetricsAccumulator(
+        video_id=video_id,
+        tracker_type="botsort",
+        fps=fps,
+        width=width,
+        height=height,
+        total_frames=total_frames,
+    )
+    await send_log(
+        f"Tracker metrics accumulator armed (writing to /cache/tracker_metrics/{video_id}_botsort_*)",
+        "info", "model"
+    )
+
+    # Warmup both models
+    dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
+    _ = pose_model(dummy_frame, verbose=False)
+    _ = detection_model(dummy_frame, verbose=False)
+    await send_log("Models ready (GPU accelerated)", "success", "model")
+
+    # Open video
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise Exception("Failed to open video file")
+
+    sample_rate = 1  # Process every frame for full accuracy
+
+    await send_log("Starting frame-by-frame analysis...", "info", "processing")
+
+    # Extract net-line endpoints from manual keypoints
+    tracker_net_left: Optional[Tuple[float, float]] = None
+    tracker_net_right: Optional[Tuple[float, float]] = None
+    if manual_court_keypoints:
+        nl = manual_court_keypoints.get("net_left")
+        nr = manual_court_keypoints.get("net_right")
+        if (
+            isinstance(nl, (list, tuple)) and len(nl) >= 2 and
+            isinstance(nr, (list, tuple)) and len(nr) >= 2
+        ):
+            tracker_net_left = (float(nl[0]), float(nl[1]))
+            tracker_net_right = (float(nr[0]), float(nr[1]))
+
+    # Initialize robust player identity tracker
+    identity_tracker = PlayerIdentityTracker(
+        video_height=float(height),
+        fps=fps,
+        video_width=float(width),
+        net_left=tracker_net_left,
+        net_right=tracker_net_right,
+    )
+    net_src = "manual net keypoints" if tracker_net_left is not None else "video-midline fallback"
+    await send_log(
+        f"Player identity tracker initialized ({net_src}; calibration phase: first 15 frames)",
+        "info", "processing",
+    )
+
+    # Write skeleton frames incrementally to a temp file
+    skeleton_frames_path = Path(f"/cache/{video_id}_skeleton.jsonl")
+    skeleton_frames_file = open(skeleton_frames_path, "w")
+    skeleton_frame_count = 0
+
+    player_tracks: Dict[int, Dict] = {}
+    player_positions: Dict[int, list] = {0: [], 1: []}
+    player_distances: Dict[int, float] = {0: 0.0, 1: 0.0}
+    player_speeds: Dict[int, list] = {0: [], 1: []}
+    player_speed_windows: Dict[int, list] = {0: [], 1: []}
+    SPEED_WINDOW_SIZE = 5
+    frame_count = 0
+    processed_count = 0
+
+    track_positions: Dict[int, Dict] = {}
+    track_cumulative_movement: Dict[int, float] = {}
+    MIN_CUMULATIVE_MOVEMENT = 100
+
+    court_polygon = None
+    court_roi_active = False
+    manual_court_corners = []
+
+    if manual_court_keypoints:
+        try:
+            corners = []
+            for key in ["top_left", "top_right", "bottom_right", "bottom_left"]:
+                if key in manual_court_keypoints and manual_court_keypoints[key]:
+                    pt = manual_court_keypoints[key]
+                    corners.append([float(pt[0]), float(pt[1])])
+
+            if len(corners) == 4:
+                manual_court_corners = corners
+                corners_np = np.array(corners, dtype=np.float32)
+                center = corners_np.mean(axis=0)
+                MARGIN_FACTOR = 1.02
+                expanded = center + (corners_np - center) * MARGIN_FACTOR
+                court_polygon = expanded.astype(np.int32)
+                court_roi_active = True
+                await send_log("Court ROI filter active (4-corner polygon + 2% margin)", "success", "court")
+                print(f"[MODAL] Court ROI polygon: {court_polygon.tolist()}")
+            else:
+                await send_log(f"Manual keypoints incomplete ({len(corners)}/4 corners), using position filter", "warning", "court")
+        except Exception as e:
+            await send_log(f"Failed to initialize court ROI: {e}", "warning", "court")
+            print(f"[MODAL] Court ROI init error: {e}")
+    MOVEMENT_WARMUP_FRAMES = 45
+
+    homography_matrix = None
+    if manual_court_corners and len(manual_court_corners) >= 4:
+        homography_matrix = compute_homography_matrix(manual_court_corners[:4])
+
+    shuttle_static_clusters = []
+    _shuttle_fps_scale = 30.0 / fps if fps > 0 else 1.0
+    SHUTTLE_STATIC_DIST_THRESHOLD = max(4, int(0.013 * max(width, height) * _shuttle_fps_scale))
+    SHUTTLE_STATIC_COUNT_THRESHOLD = 3
+    prev_shuttle_pos = None
+    SHUTTLE_MIN_MOVEMENT = max(2, int(0.007 * max(width, height) * _shuttle_fps_scale))
+
+    # Court ROI for shuttle filtering
+    shuttle_court_polygon = None
+    if court_polygon is not None:
+        court_center = court_polygon.astype(np.float32).mean(axis=0)
+        expanded = court_polygon.astype(np.float32).copy()
+        for i in range(len(expanded)):
+            expanded[i][0] = court_center[0] + (expanded[i][0] - court_center[0]) * 1.40
+            if expanded[i][1] < court_center[1]:
+                expanded[i][1] = 0
+            else:
+                expanded[i][1] = court_center[1] + (expanded[i][1] - court_center[1]) * 1.40
+        shuttle_court_polygon = expanded.astype(np.int32)
+        await send_log("Shuttle court ROI filter active (40% horizontal, full vertical upward)", "success", "court")
+
+    def _shuttle_in_court(sx, sy):
+        if shuttle_court_polygon is None:
+            return True
+        result = cv2.pointPolygonTest(shuttle_court_polygon, (float(sx), float(sy)), measureDist=False)
+        return result >= 0
+
+    def _is_static_cluster(sx, sy):
+        for cluster in shuttle_static_clusters:
+            if math.sqrt((sx - cluster["x"])**2 + (sy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD:
+                cluster["count"] += 1
+                cluster["x"] = (cluster["x"] * (cluster["count"] - 1) + sx) / cluster["count"]
+                cluster["y"] = (cluster["y"] * (cluster["count"] - 1) + sy) / cluster["count"]
+                return True
+        return False
+
+    def _add_to_static(sx, sy):
+        for cluster in shuttle_static_clusters:
+            if math.sqrt((sx - cluster["x"])**2 + (sy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD * 2:
+                cluster["count"] += 1
+                return
+        shuttle_static_clusters.append({"x": sx, "y": sy, "count": 1})
+
+    last_progress_update = time.time()
+    phase_start = time.time()
+
+    keypoint_names = [
+        "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+        "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+        "left_wrist", "right_wrist", "left_hip", "right_hip",
+        "left_knee", "right_knee", "left_ankle", "right_ankle"
+    ]
+
+    while True:
+        # Read actual presentation timestamp BEFORE reading the frame
+        frame_pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_count += 1
+
+        if frame_count % sample_rate != 0:
+            continue
+
+        processed_count += 1
+
+        # Run pose estimation with integrated BoT-SORT tracking
+        pose_results = pose_model.track(
+            frame,
+            persist=True,
+            verbose=False,
+            tracker=str(tracker_config_path),
+            conf=0.15,
+            iou=0.5,
+            imgsz=960,
+        )
+
+        # Run object detection
+        detection_results = detection_model(frame, verbose=False)
+
+        badminton_detections = {
+            "frame": frame_count,
+            "players": [],
+            "shuttlecocks": [],
+            "rackets": [],
+            "other": []
+        }
+
+        if detection_results and len(detection_results) > 0:
+            det_result = detection_results[0]
+            if det_result.boxes is not None and len(det_result.boxes) > 0:
+                boxes = det_result.boxes
+                for i in range(len(boxes)):
+                    box = boxes[i]
+                    cls_id = int(box.cls.cpu().numpy()[0])
+                    conf = float(box.conf.cpu().numpy()[0])
+                    xyxy = box.xyxy.cpu().numpy()[0]
+
+                    x_center = (xyxy[0] + xyxy[2]) / 2
+                    y_center = (xyxy[1] + xyxy[3]) / 2
+                    box_width = xyxy[2] - xyxy[0]
+                    box_height = xyxy[3] - xyxy[1]
+
+                    class_name = detection_model.names.get(cls_id, f"class_{cls_id}")
+
+                    det_entry = {
+                        "class": class_name,
+                        "confidence": conf,
+                        "x": float(x_center),
+                        "y": float(y_center),
+                        "width": float(box_width),
+                        "height": float(box_height),
+                        "class_id": cls_id,
+                        "detection_id": None
+                    }
+
+                    class_lower = class_name.lower()
+                    if class_lower in ["shuttle", "shuttlecock", "birdie", "ball"] or \
+                       any(s in class_lower for s in ["shuttle", "birdie", "ball"]):
+                        badminton_detections["shuttlecocks"].append(det_entry)
+                    elif class_lower in ["racket", "racquet"] or "racket" in class_lower or "racquet" in class_lower:
+                        badminton_detections["rackets"].append(det_entry)
+
+        # Extract best shuttle position
+        shuttle_position = None
+
+        if tracknet_available and frame_count in tracknet_positions:
+            tn_pos = tracknet_positions[frame_count]
+            if tn_pos.get("visible"):
+                tx, ty = tn_pos["x"], tn_pos["y"]
+                if not _shuttle_in_court(tx, ty):
+                    pass
+                elif _is_static_cluster(tx, ty):
+                    pass
+                elif prev_shuttle_pos is not None:
+                    movement = math.sqrt((tx - prev_shuttle_pos["x"])**2 + (ty - prev_shuttle_pos["y"])**2)
+                    if movement < SHUTTLE_MIN_MOVEMENT:
+                        _add_to_static(tx, ty)
+                    else:
+                        shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
+                else:
+                    shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
+
+        if shuttle_position is None and badminton_detections["shuttlecocks"]:
+            candidates = sorted(badminton_detections["shuttlecocks"], key=lambda s: s["confidence"], reverse=True)
+
+            for candidate in candidates:
+                cx, cy = candidate["x"], candidate["y"]
+
+                if not _shuttle_in_court(cx, cy):
+                    continue
+
+                is_static = False
+                for cluster in shuttle_static_clusters:
+                    if math.sqrt((cx - cluster["x"])**2 + (cy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD:
+                        cluster["count"] += 1
+                        cluster["x"] = (cluster["x"] * (cluster["count"] - 1) + cx) / cluster["count"]
+                        cluster["y"] = (cluster["y"] * (cluster["count"] - 1) + cy) / cluster["count"]
+                        is_static = True
+                        break
+
+                if is_static:
+                    continue
+
+                if prev_shuttle_pos is not None:
+                    movement = math.sqrt((cx - prev_shuttle_pos["x"])**2 + (cy - prev_shuttle_pos["y"])**2)
+                    if movement < SHUTTLE_MIN_MOVEMENT:
+                        found_cluster = False
+                        for cluster in shuttle_static_clusters:
+                            if math.sqrt((cx - cluster["x"])**2 + (cy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD * 2:
+                                cluster["count"] += 1
+                                found_cluster = True
+                                break
+                        if not found_cluster:
+                            shuttle_static_clusters.append({"x": cx, "y": cy, "count": 1})
+                        continue
+
+                shuttle_position = {"x": cx, "y": cy, "source": "yolo"}
+                break
+
+            if shuttle_position:
+                prev_shuttle_pos = shuttle_position
+
+        if shuttle_position and shuttle_position.get("source") == "tracknet":
+            prev_shuttle_pos = shuttle_position
+
+        shuttle_static_clusters = [
+            c for c in shuttle_static_clusters
+            if c["count"] >= SHUTTLE_STATIC_COUNT_THRESHOLD
+        ]
+
+        if badminton_detections["shuttlecocks"]:
+            filtered_shuttles = []
+            for det in badminton_detections["shuttlecocks"]:
+                dx, dy = det["x"], det["y"]
+                if not _shuttle_in_court(dx, dy):
+                    continue
+                is_known_static = False
+                for cluster in shuttle_static_clusters:
+                    if math.sqrt((dx - cluster["x"])**2 + (dy - cluster["y"])**2) < SHUTTLE_STATIC_DIST_THRESHOLD:
+                        is_known_static = True
+                        break
+                if is_known_static:
+                    continue
+                filtered_shuttles.append(det)
+            badminton_detections["shuttlecocks"] = filtered_shuttles
+
+        frame_data = {
+            "frame": frame_count,
+            "timestamp": frame_pts,
+            "players": [],
+            "badminton_detections": badminton_detections,
+            "shuttle_position": shuttle_position,
+        }
+
+        if pose_results and len(pose_results) > 0:
+            result = pose_results[0]
+
+            has_tracking = result.boxes is not None and result.boxes.is_track
+            track_ids = result.boxes.id.int().cpu().tolist() if has_tracking and result.boxes.id is not None else None
+            boxes = result.boxes.xyxy.cpu().numpy() if result.boxes is not None and len(result.boxes) > 0 else None
+
+            _mx_kp_xy = (result.keypoints.xy.cpu().numpy()
+                         if result.keypoints is not None
+                         and result.keypoints.xy is not None else None)
+            _mx_kp_conf = (result.keypoints.conf.cpu().numpy()
+                           if result.keypoints is not None
+                           and result.keypoints.conf is not None else None)
+            tracker_metrics.update(
+                frame_idx=frame_count,
+                frame_pts=frame_pts,
+                track_ids=track_ids,
+                boxes=boxes,
+                kpts_xy=_mx_kp_xy,
+                kpts_conf=_mx_kp_conf,
+            )
+
+            if result.keypoints is not None and result.keypoints.xy is not None:
+                kpts_data = result.keypoints.xy.cpu().numpy()
+                kpts_conf = result.keypoints.conf.cpu().numpy() if result.keypoints.conf is not None else None
+
+                skeleton_data = []
+
+                for person_idx in range(len(kpts_data)):
+                    kpts = kpts_data[person_idx]
+                    conf = kpts_conf[person_idx] if kpts_conf is not None else None
+
+                    track_id = track_ids[person_idx] if track_ids and person_idx < len(track_ids) else -1
+
+                    center = skeleton_center_from_keypoints(kpts)
+                    if center is None:
+                        continue
+
+                    bbox = None
+                    area = 0
+                    if boxes is not None and person_idx < len(boxes):
+                        box = boxes[person_idx]
+                        bbox = {"x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3]}
+                        area = (box[2] - box[0]) * (box[3] - box[1])
+                    else:
+                        bbox = skeleton_bbox_from_keypoints(kpts)
+                        if bbox:
+                            area = (bbox["x2"] - bbox["x1"]) * (bbox["y2"] - bbox["y1"])
+
+                    if bbox is None:
+                        continue
+
+                    if track_id >= 0:
+                        if track_id in track_positions:
+                            prev = track_positions[track_id]
+                            dx = center[0] - prev["x"]
+                            dy = center[1] - prev["y"]
+                            movement = (dx**2 + dy**2)**0.5
+                            track_cumulative_movement[track_id] = track_cumulative_movement.get(track_id, 0.0) + movement
+
+                        track_positions[track_id] = {"x": center[0], "y": center[1], "frame": frame_count}
+
+                    skeleton_data.append({
+                        "track_id": track_id,
+                        "center": center,
+                        "kpts": kpts,
+                        "conf": conf,
+                        "bbox": bbox,
+                        "area": area,
+                        "cumulative_movement": track_cumulative_movement.get(track_id, 0.0) if track_id >= 0 else 0.0
+                    })
+
+                # Helper: detect sitting/crouching pose (likely a judge)
+                def is_sitting_pose(kpts, bbox, conf=None, min_conf=0.2) -> bool:
+                    if bbox is None:
+                        return False
+
+                    bbox_height = bbox["y2"] - bbox["y1"]
+                    bbox_width = bbox["x2"] - bbox["x1"]
+                    if bbox_width > 0:
+                        aspect_ratio = bbox_height / bbox_width
+                        if aspect_ratio < 1.2:
+                            return True
+
+                    if len(kpts) >= 15:
+                        def _valid(idx):
+                            if idx >= len(kpts):
+                                return None
+                            pt = kpts[idx]
+                            if pt[0] <= 0:
+                                return None
+                            if len(pt) > 2 and pt[2] <= min_conf:
+                                return None
+                            return pt
+
+                        left_hip = _valid(11)
+                        right_hip = _valid(12)
+                        left_knee = _valid(13)
+                        right_knee = _valid(14)
+                        left_ankle = _valid(15)
+                        right_ankle = _valid(16)
+
+                        if left_hip is not None and left_knee is not None:
+                            hip_knee_diff = left_knee[1] - left_hip[1]
+                            if hip_knee_diff < bbox_height * 0.15:
+                                return True
+
+                        if right_hip is not None and right_knee is not None:
+                            hip_knee_diff = right_knee[1] - right_hip[1]
+                            if hip_knee_diff < bbox_height * 0.15:
+                                return True
+
+                        if left_hip is not None and left_ankle is not None:
+                            hip_ankle_diff = left_ankle[1] - left_hip[1]
+                            if hip_ankle_diff < bbox_height * 0.3:
+                                return True
+
+                        if right_hip is not None and right_ankle is not None:
+                            hip_ankle_diff = right_ankle[1] - right_hip[1]
+                            if hip_ankle_diff < bbox_height * 0.3:
+                                return True
+
+                    return False
+
+                if court_roi_active and court_polygon is not None:
+                    in_court_skeletons = []
+                    for s in skeleton_data:
+                        bbox = s["bbox"]
+                        feet_y = bbox["y2"] if bbox else s["center"][1]
+                        check_point = (float(s["center"][0]), float(feet_y))
+
+                        result_pt = cv2.pointPolygonTest(court_polygon, check_point, measureDist=False)
+                        if result_pt >= 0:
+                            if is_sitting_pose(s["kpts"], bbox, s.get("conf")):
+                                s["is_sitting"] = True
+                            else:
+                                s["is_sitting"] = False
+                            in_court_skeletons.append(s)
+                else:
+                    COURT_X_MIN = width * 0.12
+                    COURT_X_MAX = width * 0.88
+                    COURT_Y_MIN = height * 0.05
+                    COURT_Y_MAX = height * 0.95
+
+                    in_court_skeletons = []
+                    for s in skeleton_data:
+                        if COURT_X_MIN <= s["center"][0] <= COURT_X_MAX and COURT_Y_MIN <= s["center"][1] <= COURT_Y_MAX:
+                            s["is_sitting"] = is_sitting_pose(s["kpts"], s["bbox"], s.get("conf"))
+                            in_court_skeletons.append(s)
+
+                standing_skeletons = [s for s in in_court_skeletons if not s.get("is_sitting", False)]
+                sitting_skeletons = [s for s in in_court_skeletons if s.get("is_sitting", False)]
+
+                if sitting_skeletons and processed_count <= 10:
+                    print(f"[MODAL] Frame {frame_count}: Filtered {len(sitting_skeletons)} sitting person(s) (likely judges)")
+
+                if len(standing_skeletons) >= 2:
+                    candidate_skeletons = standing_skeletons
+                elif len(standing_skeletons) == 1 and len(sitting_skeletons) >= 1:
+                    high_movement_sitting = [
+                        s for s in sitting_skeletons
+                        if s.get("cumulative_movement", 0) >= MIN_CUMULATIVE_MOVEMENT
+                    ]
+                    candidate_skeletons = standing_skeletons + high_movement_sitting
+                else:
+                    candidate_skeletons = in_court_skeletons
+
+                if len(candidate_skeletons) <= 2:
+                    active_skeletons = sorted(
+                        candidate_skeletons,
+                        key=lambda s: s["area"],
+                        reverse=True
+                    )
+                elif frame_count > MOVEMENT_WARMUP_FRAMES:
+                    active_skeletons = sorted(
+                        candidate_skeletons,
+                        key=lambda s: s["cumulative_movement"],
+                        reverse=True
+                    )
+                    active_skeletons = [
+                        s for s in active_skeletons
+                        if s["cumulative_movement"] >= MIN_CUMULATIVE_MOVEMENT
+                    ][:2]
+                else:
+                    active_skeletons = sorted(
+                        candidate_skeletons,
+                        key=lambda s: s["area"],
+                        reverse=True
+                    )[:2]
+
+                for skel in active_skeletons:
+                    bbox = skel["bbox"]
+                    badminton_detections["players"].append({
+                        "class": "player",
+                        "confidence": 0.9,
+                        "x": float((bbox["x1"] + bbox["x2"]) / 2),
+                        "y": float((bbox["y1"] + bbox["y2"]) / 2),
+                        "width": float(bbox["x2"] - bbox["x1"]),
+                        "height": float(bbox["y2"] - bbox["y1"]),
+                        "class_id": 0,
+                        "detection_id": skel["track_id"],
+                    })
+
+                # =========================================================
+                # ROBUST PLAYER-SKELETON MATCHING via PlayerIdentityTracker
+                # =========================================================
+                matched_players = identity_tracker.match_skeletons(
+                    active_skeletons, frame_count
+                )
+
+                # Attach canonical player_id to each emitted player bbox
+                track_id_to_pid: Dict[Any, int] = {}
+                for _pid, _kpts, _ in matched_players:
+                    for _skel in active_skeletons:
+                        if _skel["kpts"] is _kpts:
+                            _tid = _skel.get("track_id")
+                            if _tid is not None and _tid >= 0:
+                                track_id_to_pid[_tid] = _pid
+                            break
+                for _bbox in badminton_detections["players"]:
+                    _tid = _bbox.get("detection_id")
+                    if _tid is not None and _tid in track_id_to_pid:
+                        _bbox["player_id"] = track_id_to_pid[_tid]
+
+                if frame_count == identity_tracker.CALIBRATION_FRAMES + 1:
+                    stats = identity_tracker.get_stats()
+                    await send_log(
+                        f"Player identity calibration complete: "
+                        f"midline_y={stats['court_midline_y']:.0f}, "
+                        f"P0={stats['player_0_side']}, P1={stats['player_1_side']}",
+                        "success", "processing"
+                    )
+                if identity_tracker.total_swaps_corrected > 0 and frame_count % 100 == 0:
+                    await send_log(
+                        f"Identity tracker: {identity_tracker.total_swaps_corrected} swap(s) corrected so far",
+                        "info", "processing"
+                    )
+
+                for player_id, kpts, conf in matched_players:
+                    player_data = {
+                        "player_id": player_id,
+                        "keypoints": [],
+                        "center": {"x": 0.0, "y": 0.0},
+                        "current_speed": 0.0,
+                    }
+
+                    for kp_idx, (pt, c) in enumerate(zip(kpts, conf if conf is not None else [0.5] * len(kpts))):
+                        if kp_idx < len(keypoint_names):
+                            player_data["keypoints"].append({
+                                "name": keypoint_names[kp_idx],
+                                "x": float(pt[0]),
+                                "y": float(pt[1]),
+                                "confidence": float(c),
+                            })
+
+                    left_ankle = next((k for k in player_data["keypoints"] if k["name"] == "left_ankle"), None)
+                    right_ankle = next((k for k in player_data["keypoints"] if k["name"] == "right_ankle"), None)
+                    left_hip = next((k for k in player_data["keypoints"] if k["name"] == "left_hip"), None)
+                    right_hip = next((k for k in player_data["keypoints"] if k["name"] == "right_hip"), None)
+
+                    center_x = None
+                    center_y = None
+
+                    if left_ankle and right_ankle and left_ankle.get("x", 0) > 0 and right_ankle.get("x", 0) > 0:
+                        center_x = (left_ankle["x"] + right_ankle["x"]) / 2
+                        center_y = (left_ankle["y"] + right_ankle["y"]) / 2
+                    elif left_hip and right_hip and left_hip.get("x", 0) > 0 and right_hip.get("x", 0) > 0:
+                        center_x = (left_hip["x"] + right_hip["x"]) / 2
+                        center_y = (left_hip["y"] + right_hip["y"]) / 2
+
+                    if center_x is not None and center_y is not None:
+                        player_data["position"] = {"x": center_x, "y": center_y}
+                        player_data["center"] = {"x": center_x, "y": center_y}
+
+                        if player_id in player_positions:
+                            player_positions[player_id].append({
+                                "frame": frame_count,
+                                "x": center_x,
+                                "y": center_y,
+                            })
+
+                        track_id = player_id
+                        current_speed = 0.0
+                        is_valid_tracking = True
+
+                        if track_id in player_tracks:
+                            prev = player_tracks[track_id]
+                            dt = (frame_count - prev["frame"]) / fps
+
+                            if dt > 0:
+                                    dx = center_x - prev["x"]
+                                    dy = center_y - prev["y"]
+                                    distance_px = np.sqrt(dx**2 + dy**2)
+
+                                    MAX_PX_PER_FRAME = max(80, int(0.07 * max(width, height)))
+                                    frames_elapsed = max(1, frame_count - prev["frame"])
+                                    px_per_frame = distance_px / frames_elapsed
+
+                                    if px_per_frame > MAX_PX_PER_FRAME:
+                                        current_speed = 0.0
+                                        is_valid_tracking = False
+                                    else:
+                                        if homography_matrix is not None:
+                                            pt_cur = cv2.perspectiveTransform(
+                                                np.array([[[center_x, center_y]]], dtype=np.float32),
+                                                homography_matrix
+                                            )
+                                            pt_prev = cv2.perspectiveTransform(
+                                                np.array([[[prev["x"], prev["y"]]]], dtype=np.float32),
+                                                homography_matrix
+                                            )
+                                            dm_x = pt_cur[0][0][0] - pt_prev[0][0][0]
+                                            dm_y = pt_cur[0][0][1] - pt_prev[0][0][1]
+                                            distance_m = float(np.sqrt(dm_x**2 + dm_y**2))
+                                        else:
+                                            reference_dimension = max(width, height)
+                                            meters_per_pixel = 13.4 / (reference_dimension * 0.8)
+                                            distance_m = distance_px * meters_per_pixel
+                                        speed_mps = distance_m / dt
+
+                                        MAX_VALID_SPEED_MPS = 8.5
+                                        MAX_DISTANCE_PER_FRAME = 0.25
+                                        distance_per_frame = distance_m / frames_elapsed
+
+                                        is_valid_measurement = True
+
+                                        if distance_per_frame > MAX_DISTANCE_PER_FRAME:
+                                            is_valid_measurement = False
+                                            is_valid_tracking = False
+                                            print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - distance jump {distance_per_frame:.3f}m/frame")
+                                        elif speed_mps > MAX_VALID_SPEED_MPS:
+                                            is_valid_measurement = False
+                                            is_valid_tracking = False
+                                            print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - speed {speed_mps*3.6:.1f} km/h > {MAX_VALID_SPEED_MPS*3.6:.1f} km/h limit")
+
+                                        if is_valid_measurement:
+                                            current_speed = speed_mps * 3.6
+
+                                            if track_id in player_speed_windows:
+                                                window = player_speed_windows[track_id]
+
+                                                if len(window) >= 3:
+                                                    sorted_window = sorted(window)
+                                                    median_speed = sorted_window[len(sorted_window) // 2]
+
+                                                    if current_speed > median_speed * 3.0 and median_speed > 2.0:
+                                                        is_valid_measurement = False
+                                                        is_valid_tracking = False
+                                                        print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected by median filter - {current_speed:.1f} km/h > 2x median {median_speed:.1f} km/h")
+                                                        current_speed = 0.0
+                                                    else:
+                                                        window.append(current_speed)
+                                                        if len(window) > SPEED_WINDOW_SIZE:
+                                                            window.pop(0)
+                                                else:
+                                                    window.append(current_speed)
+                                        else:
+                                            current_speed = 0.0
+
+                                        if is_valid_measurement and current_speed > 0:
+                                            if track_id in player_distances:
+                                                player_distances[track_id] += distance_m
+
+                                            if track_id in player_speeds:
+                                                player_speeds[track_id].append(current_speed)
+
+                        player_data["current_speed"] = current_speed
+
+                        if is_valid_tracking:
+                            player_tracks[track_id] = {
+                                "x": center_x,
+                                "y": center_y,
+                                "frame": frame_count,
+                            }
+
+                    if player_data["keypoints"]:
+                        pose_result = classify_pose(player_data["keypoints"])
+                        player_data["pose"] = {
+                            "pose_type": pose_result["pose_type"],
+                            "confidence": pose_result["confidence"],
+                            "body_angles": pose_result.get("body_angles"),
+                        }
+                    else:
+                        player_data["pose"] = {
+                            "pose_type": "unknown",
+                            "confidence": 0.0,
+                            "body_angles": None,
+                        }
+
+                    frame_data["players"].append(player_data)
+
+        frame_data["players"].sort(key=lambda p: p["player_id"])
+
+        skeleton_frames_file.write(json.dumps(frame_data) + "\n")
+        skeleton_frame_count += 1
+
+        # Send progress updates every 2 seconds
+        now = time.time()
+        if now - last_progress_update >= 2.0:
+            progress = (frame_count / total_frames) * 100
+            elapsed = now - phase_start
+            fps_actual = processed_count / elapsed if elapsed > 0 else 0
+            await send_status_update("processing_phase2", progress, frame_count, total_frames)
+            if int(elapsed) % 10 < 3:
+                print(f"[MODAL] [phase2] Frame {frame_count}/{total_frames} ({progress:.1f}%) | "
+                      f"{fps_actual:.1f} fps")
+            last_progress_update = now
+
+    cap.release()
+    skeleton_frames_file.close()
+
+    # Read skeleton frames back from disk
+    await send_log("Loading skeleton data for post-processing...", "info", "processing")
+    skeleton_frames: List[Dict[str, Any]] = []
+    with open(skeleton_frames_path, "r") as f:
+        for line in f:
+            skeleton_frames.append(json.loads(line))
+    print(f"[MODAL] [phase2] Loaded {len(skeleton_frames)} skeleton frames from disk")
+
+    await send_log(f"Processed {processed_count} frames", "success", "processing")
+
+    # Identity tracker summary
+    tracker_stats = identity_tracker.get_stats()
+    await send_log(
+        f"Identity tracker: calibrated={tracker_stats['calibration_complete']}, "
+        f"swaps_corrected={tracker_stats['total_swaps_corrected']}, "
+        f"P0_positions={tracker_stats['player_0_positions']}, "
+        f"P1_positions={tracker_stats['player_1_positions']}",
+        "info", "processing"
+    )
+    if tracker_stats['total_swaps_corrected'] > 0:
+        await send_log(
+            f"{tracker_stats['total_swaps_corrected']} skeleton ID swap(s) were detected and corrected",
+            "warning", "processing"
+        )
+
+    # Finalize raw-tracker metrics
+    try:
+        metrics_summary = tracker_metrics.finalize(identity_tracker_stats=tracker_stats)
+        await send_log(
+            f"Tracker metrics: id_switches={metrics_summary['id_switches']} "
+            f"({metrics_summary['id_switches_per_min']}/min), "
+            f"coverage_2p={metrics_summary['coverage_both_players']}, "
+            f"unique_tids={metrics_summary['unique_track_ids']}, "
+            f"teleports={metrics_summary['teleport_events']}",
+            "info", "processing"
+        )
+    except Exception as _mex:
+        print(f"[tracker-metrics] finalize failed: {_mex}")
+
+    tracking_state: Dict[str, Any] = {
+        "player_positions": player_positions,
+        "player_distances": player_distances,
+        "player_speeds": player_speeds,
+        "processed_count": processed_count,
+        "skeleton_frame_count": skeleton_frame_count,
+        "tracker_stats": tracker_stats,
+    }
+
+    return skeleton_frames, tracking_state
 
 
 async def _compute_analytics(
@@ -2277,17 +3107,83 @@ async def _compute_analytics(
     shuttle metrics from the full skeleton_frames produced by
     `_run_full_yolo_loop`.
 
-    Returns a dict with keys `players`, `court_detection`,
-    `player_zone_analytics`, `shuttle` — the analytics half of the legacy
-    `results_data` payload.
-
-    NOT YET IMPLEMENTED — Task 5 will populate this from the pre-refactor
-    `_process_video_worker` body.
+    Returns a dict with the legacy `results_data` analytics keys:
+      - `players` (players_summary list)
+      - `processed_frames`
+      - `video_width`, `video_height`
+      - `shuttle`, `court_detection`, `player_zone_analytics`
+        (None placeholders — the pre-refactor worker also produced None here)
+      - `skeleton_data` is NOT returned by this function (the worker merges
+        skeleton_frames into the final payload directly).
     """
-    raise NotImplementedError(
-        "_compute_analytics is reserved for Task 5 (Phase 2 worker). "
-        "See git history for the pre-refactor body inside _process_video_worker."
-    )
+    player_positions = tracking_state["player_positions"]
+    player_distances = tracking_state["player_distances"]
+    player_speeds = tracking_state["player_speeds"]
+    processed_count = tracking_state["processed_count"]
+
+    # Build player summary data from tracked positions
+    # Use physiological limits based on badminton research:
+    # - Typical footwork: 1-4 m/s (4-15 km/h)
+    # - Quick lunges/recoveries: 4-7 m/s (15-25 km/h)
+    # - Maximum burst (extremely rare): up to 7 m/s (25 km/h)
+    MAX_VALID_SPEED_KMH = 25.0
+    TYPICAL_MAX_SPEED_KMH = 15.0
+    SUSPICIOUS_SPEED_KMH = 20.0
+
+    players_summary = []
+    for player_id in range(2):
+        speeds = player_speeds.get(player_id, [])
+        positions = player_positions.get(player_id, [])
+        distance = player_distances.get(player_id, 0.0)
+
+        # Stage 1: Hard filter
+        filtered_speeds = [s for s in speeds if s <= MAX_VALID_SPEED_KMH]
+
+        # Stage 2: IQR-based outlier removal
+        if len(filtered_speeds) >= 5:
+            sorted_speeds = sorted(filtered_speeds)
+            q1_idx = len(sorted_speeds) // 4
+            q3_idx = 3 * len(sorted_speeds) // 4
+            q1 = sorted_speeds[q1_idx]
+            q3 = sorted_speeds[q3_idx]
+            iqr = q3 - q1
+            upper_bound = min(q3 + 1.5 * iqr, SUSPICIOUS_SPEED_KMH)
+            filtered_speeds = [s for s in filtered_speeds if s <= upper_bound]
+
+        # Stage 3: Remove top 5%
+        if len(filtered_speeds) >= 5:
+            sorted_filtered = sorted(filtered_speeds)
+            cutoff_idx = int(len(sorted_filtered) * 0.95)
+            if cutoff_idx > 0:
+                filtered_speeds = sorted_filtered[:cutoff_idx]
+
+        avg_speed = sum(filtered_speeds) / len(filtered_speeds) if filtered_speeds else 0.0
+        max_speed = max(filtered_speeds) if filtered_speeds else 0.0
+
+        avg_speed = min(avg_speed, TYPICAL_MAX_SPEED_KMH)
+        max_speed = min(max_speed, MAX_VALID_SPEED_KMH)
+
+        players_summary.append({
+            "player_id": player_id,
+            "avg_speed": round(avg_speed, 2),
+            "max_speed": round(max_speed, 2),
+            "total_distance": round(distance, 2),
+            "positions": positions,
+            "keypoints_history": [],
+        })
+
+    await send_log(f"Player 1: {len(player_positions[0])} positions, {player_distances[0]:.1f}m", "info", "processing")
+    await send_log(f"Player 2: {len(player_positions[1])} positions, {player_distances[1]:.1f}m", "info", "processing")
+
+    return {
+        "players": players_summary,
+        "processed_frames": processed_count,
+        "video_width": width,
+        "video_height": height,
+        "shuttle": None,
+        "court_detection": None,
+        "player_zone_analytics": None,
+    }
 
 
 # Modal app configuration
@@ -2943,6 +3839,451 @@ async def _process_video_worker(
 
         return {
             "status": "failed_phase1",
+            "video_id": video_id,
+            "error": error_msg,
+        }
+
+
+@app.function(
+    image=image,
+    secrets=[
+        modal.Secret.from_name("supabase-secrets"),
+        modal.Secret.from_name("modal-shared-secret"),
+    ],
+)
+@modal.fastapi_endpoint(method="POST")
+async def process_analytics(request: Request) -> Dict[str, Any]:
+    """
+    Phase 2 entry point: kicks off the analytics worker for a video whose
+    Phase 1 (rally segmentation + clip cutting) has already completed.
+
+    Mirrors the `process_video` endpoint: HMAC-authenticates the caller via
+    `X-Signature` over the raw body using `MODAL_SHARED_SECRET`, then spawns
+    `_process_analytics_worker` and returns 202 immediately so the Edge
+    Function caller (`start-analytics`) doesn't time out on the long
+    GPU run.
+
+    Request body: `{"video_id": "<uuid>"}`. The worker looks up the
+    `storage_path`, `owner_id`, `manual_court_keypoints`, and
+    `results_storage_path` itself — Phase 2 only needs the video_id.
+    """
+    from fastapi.responses import JSONResponse
+
+    raw_body = await request.body()
+    signature = request.headers.get("X-Signature")
+    secret = os.environ.get("MODAL_SHARED_SECRET", "")
+    if not verify_hmac(raw_body, signature, secret):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    payload = json.loads(raw_body)
+    video_id = payload.get("video_id")
+    if not video_id:
+        return JSONResponse(
+            {"error": "Missing required field: video_id"},
+            status_code=400,
+        )
+
+    _process_analytics_worker.spawn(video_id=video_id)
+
+    return {"status": "accepted", "video_id": video_id}
+
+
+@app.function(
+    gpu="A10G",
+    timeout=7200,  # 2 hours - matches Phase 1 worker
+    memory=8192,
+    image=image,
+    volumes={"/cache": vol, MODELS_PATH: models_vol},
+    secrets=[modal.Secret.from_name("supabase-secrets")],
+)
+async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
+    """
+    Phase 2 GPU worker: full per-frame YOLO loop + analytics aggregation.
+
+    Pipeline:
+      1. Send_log "Phase 2 starting" (phase="phase2").
+      2. Set status to 'processing_phase2', progress=0.
+      3. Fetch the videos row. Require `results_storage_path` and
+         `manual_court_keypoints`; raise if either is null.
+      4. Download Phase 1 results JSON from `results_storage_path` and
+         extract `rallies`, `shuttle_positions`, `fps`, `total_frames`,
+         `video_metadata`.
+      5. Re-download the source video to `/cache` (signed URL minted here
+         via the service-role client; Phase 1's URL has expired by now).
+      6. `_run_full_yolo_loop` -> `(skeleton_frames, tracking_state)`.
+      7. `_compute_analytics` -> analytics dict.
+      8. Merge analytics + skeleton_frames into the Phase 1 JSON. The
+         merged payload spreads `analytics_dict` at the top level so the
+         frontend dashboards see the same shape as the pre-refactor
+         `results_data` (players, processed_frames, video_width/height,
+         shuttle/court_detection/player_zone_analytics, skeleton_data).
+         Sets `phase: 'completed'` and preserves Phase 1's
+         `rallies`, `shuttle_positions`, `video_metadata`.
+      9. Upload merged JSON back to the same `results_storage_path`.
+     10. Flip status to 'completed'.
+     11. On exception: status -> 'failed_phase2', error -> message,
+         send_log at error level.
+    """
+    import cv2
+    import resource
+
+    print(f"[MODAL] [phase2] Starting Phase 2 for video: {video_id}")
+
+    def get_memory_mb() -> float:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
+
+    status_update_failures = 0
+
+    async def send_status_update(
+        status: str = "processing_phase2",
+        progress: float = 0,
+        current_frame: int = 0,
+        total_frames: int = 0,
+        error: Optional[str] = None,
+    ):
+        """Update the videos row with the current Phase 2 progress."""
+        nonlocal status_update_failures
+        update_payload: Dict[str, Any] = {
+            "status": status,
+            "progress": progress,
+            "current_frame": current_frame,
+            "total_frames": total_frames,
+        }
+        if error is not None:
+            update_payload["error"] = error
+        for attempt in range(3):
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase_client()
+                    .table("videos")
+                    .update(update_payload)
+                    .eq("id", video_id)
+                    .execute()
+                )
+                status_update_failures = 0
+                return
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(2.0 ** attempt)
+                else:
+                    status_update_failures += 1
+                    print(f"[MODAL] [phase2] Warning: Status update failed after 3 attempts: {e}")
+
+    # Resolve owner_id lazily — needed for processing_logs rows. Populated
+    # once we fetch the videos row in step 3 below.
+    owner_id_holder: Dict[str, Optional[str]] = {"owner_id": None}
+
+    async def send_log(
+        message: str,
+        level: str = "info",
+        category: str = "processing",
+        phase: Optional[str] = "phase2",
+    ):
+        """Insert a row into processing_logs for this video, tagged phase=phase2."""
+        log_row: Dict[str, Any] = {
+            "video_id": video_id,
+            "message": message,
+            "level": level,
+            "category": category,
+        }
+        if owner_id_holder["owner_id"] is not None:
+            log_row["owner_id"] = owner_id_holder["owner_id"]
+        if phase is not None:
+            log_row["phase"] = phase
+        for attempt in range(2):
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase_client()
+                    .table("processing_logs")
+                    .insert(log_row)
+                    .execute()
+                )
+                return
+            except Exception as e:
+                # Schema-mismatch fallback: drop the phase field once.
+                if attempt == 0 and "phase" in log_row:
+                    log_row.pop("phase", None)
+                    await asyncio.sleep(0.5)
+                    continue
+                if attempt == 0:
+                    await asyncio.sleep(2.0)
+                else:
+                    print(f"[MODAL] [phase2] Warning: Failed to send log: {e}")
+
+    pipeline_start = time.time()
+
+    try:
+        # 1. Announce start.
+        await send_log("Phase 2 starting: full analytics pipeline", "info", "processing")
+
+        # 2. Set status to processing_phase2 (idempotent — the Edge Function
+        #    already flipped it, but this clears any stale progress/frame
+        #    counters from a prior failed Phase 2 attempt).
+        await send_status_update("processing_phase2", 0, 0, 0)
+
+        # Defensive cache cleanup for retries on the same container.
+        stale_files = list(Path("/cache").glob(f"{video_id}*"))
+        for stale_path in stale_files:
+            try:
+                stale_path.unlink()
+            except Exception as cleanup_err:
+                print(f"[MODAL] [phase2] Warn: failed to remove stale {stale_path}: {cleanup_err}")
+        if stale_files:
+            print(f"[MODAL] [phase2] Removed {len(stale_files)} stale cache file(s) for {video_id}")
+
+        # 3. Fetch videos row.
+        sb = supabase_client()
+        video_row = await asyncio.to_thread(
+            lambda: sb.table("videos").select("*").eq("id", video_id).single().execute()
+        )
+        if not video_row.data:
+            raise Exception(f"Video row not found: {video_id}")
+        v = video_row.data
+        owner_id_holder["owner_id"] = v.get("owner_id")
+
+        results_storage_path = v.get("results_storage_path")
+        if not results_storage_path:
+            raise Exception("results_storage_path is null — Phase 1 must complete first")
+
+        manual_court_keypoints = v.get("manual_court_keypoints")
+        if not manual_court_keypoints:
+            raise Exception("manual_court_keypoints is null — court setup required for Phase 2")
+
+        storage_path = v.get("storage_path")
+        if not storage_path:
+            raise Exception("storage_path is null — source video reference missing")
+
+        # 4. Download Phase 1 results JSON.
+        await send_log("Loading Phase 1 results...", "info", "processing")
+        phase1_blob = await asyncio.to_thread(
+            lambda: sb.storage.from_("results").download(results_storage_path)
+        )
+        if not phase1_blob:
+            raise Exception(f"Phase 1 results not found at {results_storage_path}")
+        phase1_results = json.loads(phase1_blob)
+
+        rallies = phase1_results.get("rallies", [])
+        shuttle_positions = phase1_results.get("shuttle_positions", {})
+        fps = float(phase1_results.get("fps", 30.0))
+        total_frames = int(phase1_results.get("total_frames", 0))
+        video_metadata = phase1_results.get("video_metadata", {})
+
+        # shuttle_positions keys may have come back as strings after JSON
+        # round-trip; the YOLO loop indexes by int frame numbers.
+        if shuttle_positions and isinstance(next(iter(shuttle_positions)), str):
+            shuttle_positions = {int(k): v for k, v in shuttle_positions.items()}
+
+        await send_log(
+            f"Phase 1 results loaded: {len(rallies)} rallies, fps={fps:.1f}, "
+            f"total_frames={total_frames}",
+            "success", "processing",
+        )
+
+        # 5. Mint a signed URL for the source video and download to /cache.
+        await send_log("Downloading source video...", "info", "processing")
+        signed = await asyncio.to_thread(
+            lambda: sb.storage.from_("videos").create_signed_url(storage_path, 3600)
+        )
+        video_url = signed.get("signedURL") if isinstance(signed, dict) else None
+        if not video_url:
+            # supabase-py occasionally returns `signedURL` vs `signed_url` —
+            # accept either.
+            video_url = signed.get("signed_url") if isinstance(signed, dict) else None
+        if not video_url:
+            raise Exception(f"Failed to mint signed URL for storage_path={storage_path}")
+
+        video_path = await _download_video_to_cache(video_id, video_url, send_log)
+        file_size_mb = video_path.stat().st_size / (1024 * 1024)
+        await send_log(
+            f"Video downloaded: {file_size_mb:.1f} MB",
+            "success", "processing",
+        )
+
+        # Probe video dimensions (cheap; needed for the YOLO loop helper).
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise Exception("Failed to open video file for dimension probe")
+        probe_fps = cap.get(cv2.CAP_PROP_FPS)
+        probe_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+
+        # Prefer Phase 1's fps/total_frames (authoritative) but fall back to
+        # the probe if Phase 1 was missing them.
+        if not fps or fps <= 0:
+            fps = probe_fps
+        if not total_frames or total_frames <= 0:
+            total_frames = probe_total
+
+        await send_status_update("processing_phase2", 0, 0, total_frames)
+
+        # 6. Full per-frame YOLO loop. We pass shuttle_positions in as
+        #    tracknet_positions — they share the same schema and Phase 1's
+        #    filtered positions are the highest-quality shuttle signal
+        #    available without re-running TrackNet.
+        tracknet_available = bool(shuttle_positions)
+        skeleton_frames, tracking_state = await _run_full_yolo_loop(
+            video_path=video_path,
+            total_frames=total_frames,
+            fps=fps,
+            width=width,
+            height=height,
+            video_id=video_id,
+            manual_court_keypoints=manual_court_keypoints,
+            tracknet_positions=shuttle_positions,
+            tracknet_available=tracknet_available,
+            send_log=send_log,
+            send_status_update=send_status_update,
+        )
+
+        # 7. Analytics aggregation.
+        analytics_dict = await _compute_analytics(
+            skeleton_frames=skeleton_frames,
+            manual_court_keypoints=manual_court_keypoints,
+            shuttle_positions=shuttle_positions,
+            tracking_state=tracking_state,
+            fps=fps,
+            total_frames=total_frames,
+            width=width,
+            height=height,
+            send_log=send_log,
+        )
+
+        # 8. Merge into the final payload.
+        #    Spread analytics_dict at the top level so the frontend sees the
+        #    legacy `results_data` shape (players, processed_frames,
+        #    video_width/height, shuttle, court_detection,
+        #    player_zone_analytics) alongside Phase 1's slim keys.
+        duration = float(video_metadata.get("duration_seconds", total_frames / fps if fps > 0 else 0))
+        # `skeleton_data` is the legacy key consumed by ResultsDashboard /
+        # useAdvancedAnalytics; `skeleton_frames` mirrors it so the
+        # backend verification script (verify_phase2.py) and any new
+        # consumer that uses the Phase-2 name both see the data without
+        # duplicating it across two list copies (assignment is a reference).
+        # `analytics` exposes a nested copy of the Phase-2-only fields so
+        # consumers don't have to re-derive them from the spread keys.
+        merged_results: Dict[str, Any] = {
+            "phase": "completed",
+            "video_id": video_id,
+            "duration": duration,
+            "fps": fps,
+            "total_frames": total_frames,
+            "rallies": rallies,
+            "shuttle_positions": shuttle_positions,
+            "video_metadata": video_metadata,
+            "skeleton_data": skeleton_frames,
+            "skeleton_frames": skeleton_frames,
+            "analytics": analytics_dict,
+            **analytics_dict,  # players, processed_frames, video_width/height, shuttle, court_detection, player_zone_analytics
+        }
+
+        # 9. Upload merged JSON back to the same storage path.
+        await send_log("Serializing merged results to JSON...", "info", "processing")
+        serialize_start = time.time()
+        results_json = json.dumps(merged_results).encode("utf-8")
+        serialize_time = time.time() - serialize_start
+        results_mb = len(results_json) / (1024 * 1024)
+        mem_mb = get_memory_mb()
+        await send_log(
+            f"Uploading merged results ({results_mb:.2f} MB, "
+            f"serialized in {serialize_time:.2f}s, RAM: {mem_mb:.0f} MB)...",
+            "info", "processing",
+        )
+
+        # Free large in-memory structures before the upload.
+        del skeleton_frames
+        del merged_results
+
+        await asyncio.to_thread(
+            lambda: supabase_client()
+            .storage
+            .from_("results")
+            .upload(
+                path=results_storage_path,
+                file=results_json,
+                file_options={
+                    "content-type": "application/json",
+                    "upsert": "true",
+                },
+            )
+        )
+        print(f"[MODAL] [phase2] Results uploaded to storage: {results_storage_path}")
+
+        # Update results_meta with completed-phase fields.
+        results_meta = {
+            "phase": "completed",
+            "duration": duration,
+            "fps": fps,
+            "total_frames": total_frames,
+            "processed_frames": tracking_state.get("processed_count", 0),
+            "player_count": 2,
+            "has_court_detection": False,
+            "has_rally_detection": len(rallies) > 0,
+            "rally_count": len(rallies),
+        }
+        await asyncio.to_thread(
+            lambda: supabase_client()
+            .table("videos")
+            .update({"results_meta": results_meta})
+            .eq("id", video_id)
+            .execute()
+        )
+
+        # 10. Flip status to 'completed'.
+        total_time = time.time() - pipeline_start
+        await send_log(
+            f"Phase 2 complete! Total: {total_time:.1f}s ({total_time/60:.1f} min)",
+            "success", "processing",
+        )
+        await send_status_update(
+            "completed",
+            progress=1.0,
+            current_frame=total_frames,
+            total_frames=total_frames,
+        )
+
+        # Cleanup cache artifacts.
+        for artifact in Path("/cache").glob(f"{video_id}*"):
+            artifact.unlink(missing_ok=True)
+        try:
+            vol.commit()
+        except Exception:
+            pass
+
+        print(f"[MODAL] [phase2] Phase 2 complete for video: {video_id} in {total_time:.1f}s")
+
+        return {
+            "status": "completed",
+            "video_id": video_id,
+            "total_frames": total_frames,
+            "processed_frames": tracking_state.get("processed_count", 0),
+        }
+
+    except Exception as e:
+        import traceback
+        error_msg = str(e)
+        tb = traceback.format_exc()
+        elapsed = time.time() - pipeline_start if 'pipeline_start' in locals() else 0
+        print(f"[MODAL] [phase2] Error processing video {video_id} after {elapsed:.1f}s: {error_msg}")
+        print(f"[MODAL] [phase2] Traceback:\n{tb}")
+
+        await send_status_update("failed_phase2", error=error_msg)
+        await send_log(
+            f"Phase 2 failed after {elapsed:.1f}s: {error_msg}",
+            "error", "processing",
+        )
+
+        # Sweep cache artifacts so a retry starts from scratch.
+        for artifact in Path("/cache").glob(f"{video_id}*"):
+            artifact.unlink(missing_ok=True)
+        try:
+            vol.commit()
+        except Exception:
+            pass
+
+        return {
+            "status": "failed_phase2",
             "video_id": video_id,
             "error": error_msg,
         }
