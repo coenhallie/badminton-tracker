@@ -8,6 +8,7 @@ import VideoUpload from '@/components/VideoUpload.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import ResultsDashboard from '@/components/ResultsDashboard.vue'
 import AnalysisProgress from '@/components/AnalysisProgress.vue'
+import RallyReview from '@/components/RallyReview.vue'
 import CourtSetup from '@/components/CourtSetup.vue'
 import MiniCourt from '@/components/MiniCourt.vue'
 import PlayerLabelsProvider from '@/components/PlayerLabelsProvider.vue'
@@ -35,13 +36,21 @@ async function getVideoSignedUrl(videoId: string): Promise<string> {
   return signed.signedUrl
 }
 import type { HealthCheckResponse } from '@/services/api'
-import type { UploadResponse, AnalysisResult, SkeletonFrame, ExtendedCourtKeypoints } from '@/types/analysis'
+import type { UploadResponse, AnalysisResult, SkeletonFrame, ExtendedCourtKeypoints, VideoStatus } from '@/types/analysis'
 import type { SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
 
 const { isDark, toggleTheme } = useTheme()
 
-// App states: upload -> court-setup (new!) -> analyzing -> results
-type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
+// App states: upload -> court-setup -> analyzing-phase1 -> rally-review -> analyzing-phase2 -> results
+// Plus 'error' terminal state, reachable from either analyzing phase.
+type AppState =
+  | 'upload'
+  | 'court-setup'
+  | 'analyzing-phase1'
+  | 'rally-review'
+  | 'analyzing-phase2'
+  | 'results'
+  | 'error'
 
 // Each browser session starts fresh: no persistence of prior video / state.
 // This guarantees the UI always reflects the video the user just uploaded
@@ -49,6 +58,8 @@ type AppState = 'upload' | 'court-setup' | 'analyzing' | 'results'
 const currentState = ref<AppState>('upload')
 const uploadedVideo = ref<UploadResponse | null>(null)
 const analysisResult = ref<AnalysisResult | null>(null)
+// Tracks which phase failed so the 'error' pane can show the right copy + retry CTA.
+const lastFailedPhase = ref<'phase1' | 'phase2' | null>(null)
 
 const errorMessage = ref('')
 const isApiConnected = ref(false)
@@ -698,7 +709,7 @@ function handleUploadError(message: string) {
 function handleCourtSetupComplete(keypoints: ExtendedCourtKeypoints) {
   console.log('[App] 12-point court keypoints saved:', keypoints)
   manualCourtKeypoints.value = keypoints
-  currentState.value = 'analyzing'
+  currentState.value = 'analyzing-phase1'
 }
 
 function handleCourtSetupError(message: string) {
@@ -707,12 +718,57 @@ function handleCourtSetupError(message: string) {
   // Allow retry
 }
 
-async function handleAnalysisComplete(result: AnalysisResult) {
+async function handlePhase2Complete(result: AnalysisResult) {
   analysisResult.value = result
   currentState.value = 'results'
 
   // Fetch the video URL asynchronously (Supabase signed URL)
   await loadVideoUrl(result.video_id)
+}
+
+function handlePhase1Complete() {
+  // Status flipped to 'phase1_complete' — surface the rally review screen.
+  currentState.value = 'rally-review'
+}
+
+function handleAnalysisFailed(failedStatus: VideoStatus) {
+  // 'failed_phase1' specifically; everything else (failed_phase2, legacy 'failed')
+  // is treated as Phase 2 so the user gets a "Retry analytics" affordance.
+  lastFailedPhase.value = failedStatus === 'failed_phase1' ? 'phase1' : 'phase2'
+  currentState.value = 'error'
+}
+
+async function handleContinueAnalytics() {
+  if (!uploadedVideo.value?.video_id) return
+  const { data: { session } } = await supabase.auth.getSession()
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
+  if (!supabaseUrl) {
+    console.error('[App] VITE_SUPABASE_URL not configured')
+    return
+  }
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/start-analytics`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${session?.access_token ?? ''}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ videoId: uploadedVideo.value.video_id }),
+    })
+    if (!res.ok) {
+      console.error('[App] start-analytics failed:', res.status, await res.text())
+      return
+    }
+    currentState.value = 'analyzing-phase2'
+  } catch (e) {
+    console.error('[App] start-analytics error:', e)
+  }
+}
+
+function handleDoneForNow() {
+  currentState.value = 'upload'
+  uploadedVideo.value = null
+  analysisResult.value = null
 }
 
 function handleAnalysisError(message: string) {
@@ -875,6 +931,52 @@ async function refreshHealthStatus() {
   await performHealthCheck()
 }
 
+/**
+ * Resume from any persisted videos.status, if a video id is somehow already
+ * known at mount. This is a NO-OP in the current build: each browser session
+ * starts fresh (see comment near `currentState`), so `uploadedVideo` is null on
+ * mount and there's no localStorage / query-param hydration upstream. The
+ * function is kept ready so a future task — restoring state from a URL like
+ * `?videoId=...` or a "Resume" entry point — can wire it up without rebuilding
+ * the state machine.
+ */
+async function hydrateFromExistingVideo() {
+  if (!uploadedVideo.value?.video_id) return
+  const { data, error } = await supabase
+    .from('videos')
+    .select('status')
+    .eq('id', uploadedVideo.value.video_id)
+    .single()
+  if (error || !data) return
+  const status = data.status as VideoStatus
+  switch (status) {
+    case 'pending':
+      currentState.value = 'upload'; break
+    case 'uploaded':
+      currentState.value = 'court-setup'; break
+    case 'processing_phase1':
+      currentState.value = 'analyzing-phase1'; break
+    case 'phase1_complete':
+      currentState.value = 'rally-review'; break
+    case 'processing_phase2':
+      currentState.value = 'analyzing-phase2'; break
+    case 'completed':
+      currentState.value = 'results'; break
+    case 'failed_phase1':
+      lastFailedPhase.value = 'phase1'
+      currentState.value = 'error'; break
+    case 'failed_phase2':
+      lastFailedPhase.value = 'phase2'
+      currentState.value = 'error'; break
+    case 'failed':
+      lastFailedPhase.value = 'phase2'
+      currentState.value = 'error'; break
+    case 'processing':
+      // Legacy in-flight rows at deploy — treat as Phase 2 so user sees progress.
+      currentState.value = 'analyzing-phase2'; break
+  }
+}
+
 onMounted(async () => {
   // Initial health check
   await performHealthCheck()
@@ -888,6 +990,9 @@ onMounted(async () => {
   // Remove any leftover session key from previous app versions that used
   // sessionStorage to resume state. Harmless if the key isn't there.
   try { sessionStorage.removeItem('badminton-session') } catch {}
+
+  // Resume-from-status hook (currently a no-op — see fn docstring).
+  await hydrateFromExistingVideo()
 })
 
 onUnmounted(() => {
@@ -1194,15 +1299,53 @@ watch(videoSectionRef, () => {
           />
         </div>
 
-        <!-- Analyzing State -->
-        <div v-else-if="currentState === 'analyzing' && uploadedVideo" key="analyzing" class="content-section">
+        <!-- Analyzing Phase 1 (rally detection) -->
+        <div v-else-if="currentState === 'analyzing-phase1' && uploadedVideo" key="analyzing-phase1" class="content-section">
           <AnalysisProgress
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
-            @complete="handleAnalysisComplete"
+            :phase="'phase1'"
+            @phase1-complete="handlePhase1Complete"
+            @phase2-complete="handlePhase2Complete"
+            @failed="handleAnalysisFailed"
             @error="handleAnalysisError"
             @cancel="handleAnalysisCancel"
           />
+        </div>
+
+        <!-- Rally Review (between Phase 1 and Phase 2) -->
+        <div v-else-if="currentState === 'rally-review' && uploadedVideo" key="rally-review" class="content-section">
+          <RallyReview
+            :video-id="uploadedVideo.video_id"
+            @continue="handleContinueAnalytics"
+            @done="handleDoneForNow"
+          />
+        </div>
+
+        <!-- Analyzing Phase 2 (full analytics) -->
+        <div v-else-if="currentState === 'analyzing-phase2' && uploadedVideo" key="analyzing-phase2" class="content-section">
+          <AnalysisProgress
+            :video-id="uploadedVideo.video_id"
+            :filename="uploadedVideo.filename"
+            :phase="'phase2'"
+            @phase1-complete="handlePhase1Complete"
+            @phase2-complete="handlePhase2Complete"
+            @failed="handleAnalysisFailed"
+            @error="handleAnalysisError"
+            @cancel="handleAnalysisCancel"
+          />
+        </div>
+
+        <!-- Error State -->
+        <div v-else-if="currentState === 'error'" key="error" class="content-section">
+          <div class="error-pane">
+            <h2>Processing failed</h2>
+            <p>{{ lastFailedPhase === 'phase1' ? 'Rally detection failed.' : 'Analytics failed.' }}</p>
+            <div class="error-actions">
+              <button v-if="lastFailedPhase === 'phase2'" class="primary" @click="handleContinueAnalytics">Retry analytics</button>
+              <button class="secondary" @click="handleDoneForNow">Start over</button>
+            </div>
+          </div>
         </div>
 
         <!-- Results State -->
