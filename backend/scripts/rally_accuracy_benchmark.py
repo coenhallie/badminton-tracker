@@ -48,7 +48,7 @@ def fetch_completed_videos(limit: int) -> list[dict]:
     sb = _supabase_client()
     res = (
         sb.table("videos")
-        .select("id, filename, fps, total_frames, results_storage_path, created_at")
+        .select("id, filename, total_frames, results_storage_path, created_at")
         .eq("status", "completed")
         .not_.is_("results_storage_path", "null")
         .order("created_at", desc=True)
