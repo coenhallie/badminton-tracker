@@ -169,6 +169,10 @@ async function fetchResultsJson(): Promise<any | null> {
 // fetch + retry to produce the final AnalysisResult.
 watch(videoStatus, async (newStatus) => {
   if (newStatus === 'phase1_complete') {
+    // Only the phase-1 mount should react to `phase1_complete`. A phase-2
+    // mount may observe this status if realtime delivers a stale value
+    // before transitioning to `processing_phase2` — ignore in that case.
+    if (props.phase === 'phase2') return
     emit('phase1Complete')
     return
   }
@@ -189,6 +193,10 @@ watch(videoStatus, async (newStatus) => {
   }
 
   if (newStatus === 'completed' && video.value) {
+    // Only the phase-2 mount should react to `completed`. If a phase-1
+    // mount sees it (e.g., realtime delivers an already-completed row),
+    // ignore — the parent will resolve via resume hydration instead.
+    if (props.phase === 'phase1') return
     if (video.value.results_storage_path) {
       try {
         let results: Record<string, unknown> | null = null

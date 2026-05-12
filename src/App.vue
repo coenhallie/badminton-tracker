@@ -757,18 +757,21 @@ async function handleContinueAnalytics() {
     })
     if (!res.ok) {
       console.error('[App] start-analytics failed:', res.status, await res.text())
+      errorMessage.value = `Could not start analytics (HTTP ${res.status}). Please try again.`
       return
     }
     currentState.value = 'analyzing-phase2'
   } catch (e) {
     console.error('[App] start-analytics error:', e)
+    errorMessage.value = 'Could not start analytics. Check your connection and try again.'
   }
 }
 
 function handleDoneForNow() {
-  currentState.value = 'upload'
-  uploadedVideo.value = null
-  analysisResult.value = null
+  // Delegate to startNewAnalysis so we perform a full session reset
+  // (court keypoints, speed-calc flags, speed cache, etc.) instead of
+  // leaking state into the next upload — same intent, same handler.
+  startNewAnalysis()
 }
 
 function handleAnalysisError(message: string) {
