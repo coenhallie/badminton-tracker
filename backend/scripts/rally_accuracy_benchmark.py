@@ -35,13 +35,14 @@ def _supabase_client():
 
 
 def fetch_completed_videos(limit: int) -> list[dict]:
-    """Pull up to `limit` videos with status='completed' and results_storage_path set."""
+    """Pull the `limit` most recently uploaded videos with status='completed' and results_storage_path set."""
     sb = _supabase_client()
     res = (
         sb.table("videos")
-        .select("id, filename, fps, total_frames, results_storage_path")
+        .select("id, filename, fps, total_frames, results_storage_path, created_at")
         .eq("status", "completed")
         .not_.is_("results_storage_path", "null")
+        .order("created_at", desc=True)
         .limit(limit)
         .execute()
     )
