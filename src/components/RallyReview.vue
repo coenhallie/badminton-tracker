@@ -136,6 +136,11 @@ function onContinue() {
   if (continuing.value) return
   continuing.value = true
   emit('continue')
+  // Parent normally unmounts this component immediately on transition. If
+  // that doesn't happen (e.g., parent's start-analytics request failed
+  // before re-rendering), unlock the button so the user can retry rather
+  // than staying stranded on "Starting…".
+  window.setTimeout(() => { continuing.value = false }, 2000)
 }
 
 function onDone() {
