@@ -109,8 +109,9 @@ const statusMessage = computed(() => {
   // Phase-aware messages take precedence over the generic mapping.
   switch (videoStatus.value) {
     case 'processing_phase1':
-    case 'phase1_complete':
       return 'Detecting rallies...'
+    case 'phase1_complete':
+      return 'Rally detection complete — preparing review...'
     case 'processing_phase2':
       return 'Analyzing players, speeds, poses...'
   }
@@ -178,6 +179,10 @@ watch(videoStatus, async (newStatus) => {
   }
 
   if (newStatus === 'failed') {
+    // Legacy-only path: also fire `error()` to preserve the side effect
+    // older callers depended on before phase-aware statuses existed.
+    // `failed_phase1` / `failed_phase2` (above) do NOT double-emit —
+    // post-split callers should listen on `failed` exclusively.
     emit('failed', newStatus)
     emit('error', errorMessage.value || 'Analysis failed')
     return
