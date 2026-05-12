@@ -134,11 +134,35 @@ def boundary_errors_seconds(matches: list[tuple[dict, dict | None]], fps: float)
     }
 
 
+def _extract_shuttle_positions_from_skeleton(skeleton_data: list) -> dict:
+    """Reconstruct frame -> shuttle position dict from per-frame skeleton entries.
+
+    Today's results JSON has no top-level `shuttle_positions` — shuttle data
+    is embedded on each skeleton frame as `shuttle_position: {x, y, source} | None`.
+    The rally_detection.detect_rallies expects a dict of {frame_num: {x, y, visible}}.
+    """
+    out: dict = {}
+    for f in skeleton_data or []:
+        fn = f.get("frame")
+        if fn is None:
+            continue
+        sp = f.get("shuttle_position")
+        if sp and sp.get("x") is not None and sp.get("y") is not None:
+            out[int(fn)] = {"x": float(sp["x"]), "y": float(sp["y"]), "visible": True}
+        else:
+            out[int(fn)] = {"x": 0.0, "y": 0.0, "visible": False}
+    return out
+
+
 def evaluate_video(video: dict) -> dict:
     """Run the comparison for one video and return its row of metrics."""
     results = download_results_json(video["results_storage_path"])
     union = results.get("rallies", [])
-    shuttle_positions = results.get("shuttle_positions") or {}
+    # Prefer a top-level shuttle_positions dict (future / Phase-1 JSON shape);
+    # fall back to reconstructing from skeleton_data (today's monolithic shape).
+    shuttle_positions = results.get("shuttle_positions")
+    if not shuttle_positions:
+        shuttle_positions = _extract_shuttle_positions_from_skeleton(results.get("skeleton_data") or [])
     fps = float(video.get("fps") or results.get("fps") or 30.0)
     total_frames = int(video.get("total_frames") or results.get("total_frames") or 0)
     if not shuttle_positions or total_frames == 0:
