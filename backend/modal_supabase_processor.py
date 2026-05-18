@@ -1824,7 +1824,10 @@ async def _run_tracknet_pass(
 
         tracknet_positions = tracker.track_video(
             str(video_path),
-            batch_size=16,
+            # 32 sequences/batch × seq_len=8 = 256 frames/GPU call. A10G has
+            # 24 GB; with fp16 model+inputs this stays well under 4 GB even
+            # at 1080p input (TrackNet downsamples to 512×288 internally).
+            batch_size=32,
             log_callback=tracknet_log,
         )
         tracknet_available = True
@@ -1870,7 +1873,16 @@ async def _run_detection_only_loop(
     """
     import cv2
     import numpy as np
+    import torch
     from ultralytics import YOLO
+
+    # Phase-1 YOLO inference batch size. 16 frames/call is the sweet spot:
+    # ~5x throughput over per-frame inference (kernel-launch overhead
+    # dominates for small detection models), without bloating GPU memory
+    # at 1080p input. Larger batches give diminishing returns and risk
+    # stretching the 2s progress cadence between updates.
+    DETECT_BATCH_SIZE = 16
+    yolo_half = torch.cuda.is_available()
 
     # Load detection model only (no pose).
     await send_log("Loading badminton detection model...", "info", "model")
@@ -1882,9 +1894,11 @@ async def _run_detection_only_loop(
         detection_model = YOLO("yolo11n.pt")
         await send_log("Using COCO model (custom model not found)", "info", "model")
 
-    # Warmup
-    dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
-    _ = detection_model(dummy_frame, verbose=False)
+    # Warmup at the actual batch size so the first real batch doesn't pay
+    # the cudnn autotune cost — that delay would otherwise hit the user's
+    # ETA on the first progress emission and look like a stall.
+    dummy_batch = [np.zeros((640, 640, 3), dtype=np.uint8) for _ in range(DETECT_BATCH_SIZE)]
+    _ = detection_model(dummy_batch, verbose=False, half=yolo_half)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -1942,33 +1956,53 @@ async def _run_detection_only_loop(
     phase_start = time.time()
 
     while True:
-        frame_pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-        ret, frame = cap.read()
-        if not ret:
+        # Read up to DETECT_BATCH_SIZE frames into a batch. Timestamps must
+        # be captured BEFORE each read (CAP_PROP_POS_MSEC gives the position
+        # of the NEXT frame to be decoded).
+        batch_frames: List[Any] = []
+        batch_pts: List[float] = []
+        for _ in range(DETECT_BATCH_SIZE):
+            frame_pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            ret, frame = cap.read()
+            if not ret:
+                break
+            batch_frames.append(frame)
+            batch_pts.append(frame_pts)
+        if not batch_frames:
             break
 
-        frame_count += 1
-        processed_count += 1
+        # One GPU call for the whole batch. Ultralytics accepts a list of
+        # BGR numpy frames and returns a list of Results in input order.
+        detection_results_batch = detection_model(
+            batch_frames, verbose=False, half=yolo_half
+        )
 
-        detection_results = detection_model(frame, verbose=False)
+        # Post-process each frame sequentially: static-cluster state and
+        # prev_shuttle_pos are stateful across frames, so order matters.
+        for batch_idx, det_result in enumerate(detection_results_batch):
+            frame_pts = batch_pts[batch_idx]
+            frame_count += 1
+            processed_count += 1
 
-        badminton_detections = {
-            "frame": frame_count,
-            "players": [],
-            "shuttlecocks": [],
-            "rackets": [],
-            "other": [],
-        }
+            badminton_detections = {
+                "frame": frame_count,
+                "players": [],
+                "shuttlecocks": [],
+                "rackets": [],
+                "other": [],
+            }
 
-        if detection_results and len(detection_results) > 0:
-            det_result = detection_results[0]
             if det_result.boxes is not None and len(det_result.boxes) > 0:
                 boxes = det_result.boxes
+                # Pull all box tensors to CPU once per frame instead of per-box
+                # (avoids N small device→host copies).
+                cls_arr = boxes.cls.cpu().numpy()
+                conf_arr = boxes.conf.cpu().numpy()
+                xyxy_arr = boxes.xyxy.cpu().numpy()
                 for i in range(len(boxes)):
-                    box = boxes[i]
-                    cls_id = int(box.cls.cpu().numpy()[0])
-                    conf = float(box.conf.cpu().numpy()[0])
-                    xyxy = box.xyxy.cpu().numpy()[0]
+                    cls_id = int(cls_arr[i])
+                    conf = float(conf_arr[i])
+                    xyxy = xyxy_arr[i]
                     x_center = (xyxy[0] + xyxy[2]) / 2
                     y_center = (xyxy[1] + xyxy[3]) / 2
                     box_width = xyxy[2] - xyxy[0]
@@ -1992,102 +2026,102 @@ async def _run_detection_only_loop(
                             "racket" in class_lower or "racquet" in class_lower:
                         badminton_detections["rackets"].append(det_entry)
 
-        # Pick best shuttle position: TrackNet preferred, YOLO fallback.
-        shuttle_position: Optional[Dict[str, Any]] = None
+            # Pick best shuttle position: TrackNet preferred, YOLO fallback.
+            shuttle_position: Optional[Dict[str, Any]] = None
 
-        if tracknet_available and frame_count in tracknet_positions:
-            tn_pos = tracknet_positions[frame_count]
-            if tn_pos.get("visible"):
-                tx, ty = tn_pos["x"], tn_pos["y"]
-                if not _shuttle_in_court(tx, ty):
-                    pass
-                else:
+            if tracknet_available and frame_count in tracknet_positions:
+                tn_pos = tracknet_positions[frame_count]
+                if tn_pos.get("visible"):
+                    tx, ty = tn_pos["x"], tn_pos["y"]
+                    if not _shuttle_in_court(tx, ty):
+                        pass
+                    else:
+                        is_static = False
+                        for cluster in shuttle_static_clusters:
+                            if math.sqrt((tx - cluster["x"]) ** 2 + (ty - cluster["y"]) ** 2) < SHUTTLE_STATIC_DIST:
+                                cluster["count"] += 1
+                                cluster["x"] = (cluster["x"] * (cluster["count"] - 1) + tx) / cluster["count"]
+                                cluster["y"] = (cluster["y"] * (cluster["count"] - 1) + ty) / cluster["count"]
+                                is_static = True
+                                break
+                        if is_static:
+                            pass
+                        elif prev_shuttle_pos is not None:
+                            movement = math.sqrt((tx - prev_shuttle_pos["x"]) ** 2 + (ty - prev_shuttle_pos["y"]) ** 2)
+                            if movement < SHUTTLE_MIN_MOVE:
+                                shuttle_static_clusters.append({"x": tx, "y": ty, "count": 1})
+                            else:
+                                shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
+                        else:
+                            shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
+
+            if shuttle_position is None and badminton_detections["shuttlecocks"]:
+                candidates = sorted(
+                    badminton_detections["shuttlecocks"],
+                    key=lambda s: s["confidence"],
+                    reverse=True,
+                )
+                for candidate in candidates:
+                    cx, cy = candidate["x"], candidate["y"]
+                    if not _shuttle_in_court(cx, cy):
+                        continue
                     is_static = False
                     for cluster in shuttle_static_clusters:
-                        if math.sqrt((tx - cluster["x"]) ** 2 + (ty - cluster["y"]) ** 2) < SHUTTLE_STATIC_DIST:
+                        if math.sqrt((cx - cluster["x"]) ** 2 + (cy - cluster["y"]) ** 2) < SHUTTLE_STATIC_DIST:
                             cluster["count"] += 1
-                            cluster["x"] = (cluster["x"] * (cluster["count"] - 1) + tx) / cluster["count"]
-                            cluster["y"] = (cluster["y"] * (cluster["count"] - 1) + ty) / cluster["count"]
                             is_static = True
                             break
                     if is_static:
-                        pass
-                    elif prev_shuttle_pos is not None:
-                        movement = math.sqrt((tx - prev_shuttle_pos["x"]) ** 2 + (ty - prev_shuttle_pos["y"]) ** 2)
-                        if movement < SHUTTLE_MIN_MOVE:
-                            shuttle_static_clusters.append({"x": tx, "y": ty, "count": 1})
-                        else:
-                            shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
-                    else:
-                        shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
-
-        if shuttle_position is None and badminton_detections["shuttlecocks"]:
-            candidates = sorted(
-                badminton_detections["shuttlecocks"],
-                key=lambda s: s["confidence"],
-                reverse=True,
-            )
-            for candidate in candidates:
-                cx, cy = candidate["x"], candidate["y"]
-                if not _shuttle_in_court(cx, cy):
-                    continue
-                is_static = False
-                for cluster in shuttle_static_clusters:
-                    if math.sqrt((cx - cluster["x"]) ** 2 + (cy - cluster["y"]) ** 2) < SHUTTLE_STATIC_DIST:
-                        cluster["count"] += 1
-                        is_static = True
-                        break
-                if is_static:
-                    continue
-                if prev_shuttle_pos is not None:
-                    movement = math.sqrt((cx - prev_shuttle_pos["x"]) ** 2 + (cy - prev_shuttle_pos["y"]) ** 2)
-                    if movement < SHUTTLE_MIN_MOVE:
-                        shuttle_static_clusters.append({"x": cx, "y": cy, "count": 1})
                         continue
-                shuttle_position = {"x": cx, "y": cy, "source": "yolo"}
-                break
+                    if prev_shuttle_pos is not None:
+                        movement = math.sqrt((cx - prev_shuttle_pos["x"]) ** 2 + (cy - prev_shuttle_pos["y"]) ** 2)
+                        if movement < SHUTTLE_MIN_MOVE:
+                            shuttle_static_clusters.append({"x": cx, "y": cy, "count": 1})
+                            continue
+                    shuttle_position = {"x": cx, "y": cy, "source": "yolo"}
+                    break
 
-        if shuttle_position is not None:
-            prev_shuttle_pos = shuttle_position
+            if shuttle_position is not None:
+                prev_shuttle_pos = shuttle_position
 
-        # Prune static clusters down to confirmed ones.
-        shuttle_static_clusters = [
-            c for c in shuttle_static_clusters if c["count"] >= SHUTTLE_STATIC_COUNT
-        ]
+            # Prune static clusters down to confirmed ones.
+            shuttle_static_clusters = [
+                c for c in shuttle_static_clusters if c["count"] >= SHUTTLE_STATIC_COUNT
+            ]
 
-        # Filter raw shuttlecock detections so the slim frame echoes only valid hits.
-        if badminton_detections["shuttlecocks"]:
-            filtered = []
-            for det in badminton_detections["shuttlecocks"]:
-                dx, dy = det["x"], det["y"]
-                if not _shuttle_in_court(dx, dy):
-                    continue
-                is_known_static = False
-                for cluster in shuttle_static_clusters:
-                    if math.sqrt((dx - cluster["x"]) ** 2 + (dy - cluster["y"]) ** 2) < SHUTTLE_STATIC_DIST:
-                        is_known_static = True
-                        break
-                if is_known_static:
-                    continue
-                filtered.append(det)
-            badminton_detections["shuttlecocks"] = filtered
+            # Filter raw shuttlecock detections so the slim frame echoes only valid hits.
+            if badminton_detections["shuttlecocks"]:
+                filtered = []
+                for det in badminton_detections["shuttlecocks"]:
+                    dx, dy = det["x"], det["y"]
+                    if not _shuttle_in_court(dx, dy):
+                        continue
+                    is_known_static = False
+                    for cluster in shuttle_static_clusters:
+                        if math.sqrt((dx - cluster["x"]) ** 2 + (dy - cluster["y"]) ** 2) < SHUTTLE_STATIC_DIST:
+                            is_known_static = True
+                            break
+                    if is_known_static:
+                        continue
+                    filtered.append(det)
+                badminton_detections["shuttlecocks"] = filtered
 
-        skeleton_frames.append({
-            "frame": frame_count,
-            "timestamp": frame_pts,
-            "badminton_detections": badminton_detections,
-            "shuttle_position": shuttle_position,
-        })
+            skeleton_frames.append({
+                "frame": frame_count,
+                "timestamp": frame_pts,
+                "badminton_detections": badminton_detections,
+                "shuttle_position": shuttle_position,
+            })
 
-        now = time.time()
-        if now - last_progress >= 2.0:
-            progress = (frame_count / total_frames) * 100 if total_frames else 0
-            await send_status_update("processing_phase1", progress, frame_count, total_frames)
-            elapsed = now - phase_start
-            fps_actual = processed_count / elapsed if elapsed > 0 else 0
-            print(f"[MODAL] [phase1] Frame {frame_count}/{total_frames} "
-                  f"({progress:.1f}%) | {fps_actual:.1f} fps")
-            last_progress = now
+            now = time.time()
+            if now - last_progress >= 2.0:
+                progress = (frame_count / total_frames) * 100 if total_frames else 0
+                await send_status_update("processing_phase1", progress, frame_count, total_frames)
+                elapsed = now - phase_start
+                fps_actual = processed_count / elapsed if elapsed > 0 else 0
+                print(f"[MODAL] [phase1] Frame {frame_count}/{total_frames} "
+                      f"({progress:.1f}%) | {fps_actual:.1f} fps")
+                last_progress = now
 
     cap.release()
     return skeleton_frames
@@ -2260,7 +2294,16 @@ async def _run_full_yolo_loop(
     """
     import cv2
     import numpy as np
+    import torch
     from ultralytics import YOLO
+
+    # Phase-2 inference batch size. yolo26m-pose at imgsz=960 is much heavier
+    # than the Phase-1 nano detection model, so 8 frames/batch keeps GPU
+    # memory comfortable on A10G (24 GB) while still recovering most of the
+    # kernel-launch savings vs. per-frame inference. Bumping further only
+    # helps on a larger GPU.
+    POSE_BATCH_SIZE = 8
+    yolo_half = torch.cuda.is_available()
 
     # Load YOLO26 pose model (latest version)
     await send_log("Loading YOLO26m pose model (medium)...", "info", "model")
@@ -2319,11 +2362,17 @@ with_reid: False
         "info", "model"
     )
 
-    # Warmup both models
-    dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
-    _ = pose_model(dummy_frame, verbose=False)
-    _ = detection_model(dummy_frame, verbose=False)
-    await send_log("Models ready (GPU accelerated)", "success", "model")
+    # Warmup both models at the actual batch size + precision so the first
+    # real batch doesn't pay the cudnn autotune cost. Pose uses imgsz=960
+    # in the real track call; match that here.
+    dummy_batch = [np.zeros((640, 640, 3), dtype=np.uint8) for _ in range(POSE_BATCH_SIZE)]
+    _ = pose_model(dummy_batch, verbose=False, half=yolo_half, imgsz=960)
+    _ = detection_model(dummy_batch, verbose=False, half=yolo_half)
+    await send_log(
+        f"Models ready (GPU accelerated, {'fp16' if yolo_half else 'fp32'}, "
+        f"batch={POSE_BATCH_SIZE})",
+        "success", "model",
+    )
 
     # Open video
     cap = cv2.VideoCapture(str(video_path))
@@ -2465,34 +2514,75 @@ with_reid: False
         "left_knee", "right_knee", "left_ankle", "right_ankle"
     ]
 
-    while True:
-        # Read actual presentation timestamp BEFORE reading the frame
-        frame_pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+    # Buffered batch state. We pre-fetch POSE_BATCH_SIZE frames at a time
+    # and issue ONE batched pose.track() and ONE batched detection_model()
+    # call per refill, then iterate through the results frame-by-frame using
+    # the existing per-frame post-processing code unchanged.
+    #
+    # BoT-SORT state is preserved across batches because (a) persist=True
+    # skips tracker re-initialization, and (b) in non-stream mode ultralytics
+    # uses a single tracker instance that is updated once per result inside
+    # its on_predict_postprocess_end callback, in input order. Since the
+    # batch list is in temporal order, the tracker sees consecutive frames
+    # exactly as it would in the single-frame path.
+    _batch_frames: List[Any] = []
+    _batch_pts: List[float] = []
+    _batch_pose_results: List[Any] = []
+    _batch_det_results: List[Any] = []
+    _batch_pos = 0
 
-        ret, frame = cap.read()
-        if not ret:
-            break
+    while True:
+        # Refill the batch from the video when the current one is exhausted.
+        if _batch_pos >= len(_batch_frames):
+            _new_frames: List[Any] = []
+            _new_pts: List[float] = []
+            for _ in range(POSE_BATCH_SIZE):
+                # Read actual presentation timestamp BEFORE reading the frame
+                _pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                _ret, _frame = cap.read()
+                if not _ret:
+                    break
+                _new_frames.append(_frame)
+                _new_pts.append(_pts)
+            if not _new_frames:
+                break  # end of video
+
+            # One GPU call for pose+tracking, one for badminton detection.
+            _batch_pose_results = pose_model.track(
+                _new_frames,
+                persist=True,
+                verbose=False,
+                tracker=str(tracker_config_path),
+                conf=0.15,
+                iou=0.5,
+                imgsz=960,
+                half=yolo_half,
+            )
+            _batch_det_results = detection_model(
+                _new_frames, verbose=False, half=yolo_half
+            )
+            _batch_frames = _new_frames
+            _batch_pts = _new_pts
+            _batch_pos = 0
+
+        # Pull the next frame's data from the current batch. Wrapping each
+        # single Results object in a length-1 list lets the rest of this
+        # loop body keep using the `pose_results[0]` / `detection_results[0]`
+        # access pattern from the pre-batching code unchanged.
+        frame = _batch_frames[_batch_pos]
+        frame_pts = _batch_pts[_batch_pos]
+        pose_results = [_batch_pose_results[_batch_pos]]
+        detection_results = [_batch_det_results[_batch_pos]]
+        _batch_pos += 1
 
         frame_count += 1
 
         if frame_count % sample_rate != 0:
+            # Note: with sample_rate > 1 we'd be wasting GPU work on frames
+            # we then skip. sample_rate=1 in this codebase, so it's moot.
             continue
 
         processed_count += 1
-
-        # Run pose estimation with integrated BoT-SORT tracking
-        pose_results = pose_model.track(
-            frame,
-            persist=True,
-            verbose=False,
-            tracker=str(tracker_config_path),
-            conf=0.15,
-            iou=0.5,
-            imgsz=960,
-        )
-
-        # Run object detection
-        detection_results = detection_model(frame, verbose=False)
 
         badminton_detections = {
             "frame": frame_count,

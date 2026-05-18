@@ -42,6 +42,9 @@ class TrackNetInference:
         self.inpaintnet: Optional[InpaintNet] = None
         self.seq_len = 8
         self.bg_mode = "concat"
+        # Half-precision is enabled on CUDA for Tensor Core acceleration
+        # (~2x over fp32 on A10G/L4/A100). CPU stays fp32.
+        self.use_half = self.device.type == "cuda"
 
     def load_weights(
         self,
@@ -71,10 +74,13 @@ class TrackNetInference:
         self.tracknet = TrackNet(in_dim=in_dim, out_dim=out_dim)
         self.tracknet.load_state_dict(ckpt["model"])
         self.tracknet.to(self.device)
+        if self.use_half:
+            self.tracknet.half()
         self.tracknet.eval()
 
         print(f"[TrackNet] Loaded: seq_len={self.seq_len}, bg_mode='{self.bg_mode}', "
-              f"in_dim={in_dim}, out_dim={out_dim}, device={self.device}")
+              f"in_dim={in_dim}, out_dim={out_dim}, device={self.device}, "
+              f"dtype={'fp16' if self.use_half else 'fp32'}")
 
         # Load InpaintNet if provided
         if inpaintnet_path:
@@ -82,6 +88,8 @@ class TrackNetInference:
             self.inpaintnet = InpaintNet()
             self.inpaintnet.load_state_dict(inpaint_ckpt["model"])
             self.inpaintnet.to(self.device)
+            if self.use_half:
+                self.inpaintnet.half()
             self.inpaintnet.eval()
             print("[TrackNet] InpaintNet loaded")
 
@@ -283,11 +291,16 @@ class TrackNetInference:
                 input_tensors.append(stacked)
 
             batch_tensor = torch.stack(input_tensors).to(self.device)
+            if self.use_half:
+                batch_tensor = batch_tensor.half()
 
             with torch.no_grad():
                 heatmaps = self.tracknet(batch_tensor)
 
-            heatmaps_np = heatmaps.cpu().numpy()
+            # Cast back to fp32 on CPU so connectedComponentsWithStats /
+            # weighted-centroid math stays in fp32 (heatmap thresholding is
+            # sensitive to fp16 quantization at low magnitudes).
+            heatmaps_np = heatmaps.float().cpu().numpy()
             for seq_idx in range(len(batch_seqs)):
                 out_indices = batch_indices[seq_idx]
                 for hm_idx, fidx in enumerate(out_indices):
@@ -396,11 +409,13 @@ class TrackNetInference:
             # Build input tensor: (1, 3, L) — [x, y, visibility]
             inp = np.stack([padded_x, padded_y, padded_v], axis=0)  # (3, L)
             inp_tensor = torch.from_numpy(inp).unsqueeze(0).to(self.device)
+            if self.use_half:
+                inp_tensor = inp_tensor.half()
 
             with torch.no_grad():
                 out = self.inpaintnet(inp_tensor)  # (1, 2, L)
 
-            out_np = out.cpu().numpy()[0]  # (2, L)
+            out_np = out.float().cpu().numpy()[0]  # (2, L)
             pred_x = out_np[0, :len(chunk_x)]
             pred_y = out_np[1, :len(chunk_y)]
 

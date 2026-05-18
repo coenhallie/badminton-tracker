@@ -1,6 +1,12 @@
 import { ref, watchEffect, type Ref } from "vue";
 import { supabase } from "@/lib/supabase";
 
+// Per-call counter ensures unique Supabase channel names so multiple
+// consumers of the same (table, id) don't collide. Reusing a channel name
+// returns the existing channel; calling .on() on a channel that has already
+// .subscribe()d throws "cannot add postgres_changes callbacks after subscribe()".
+let channelSeq = 0;
+
 export function useReactiveRow<T>(table: string, id: Ref<string | null | undefined>) {
   const row = ref<T | null>(null);
   const loading = ref(false);
@@ -24,7 +30,7 @@ export function useReactiveRow<T>(table: string, id: Ref<string | null | undefin
     loading.value = false;
 
     const channel = supabase
-      .channel(`${table}-row-${id.value}`)
+      .channel(`${table}-row-${id.value}-${++channelSeq}`)
       .on("postgres_changes",
           { event: "UPDATE", schema: "public", table, filter: `id=eq.${id.value}` },
           (payload) => { row.value = payload.new as T; })

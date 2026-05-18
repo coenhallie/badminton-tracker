@@ -155,6 +155,23 @@ onMounted(loadRallies)
     <header class="review-header">
       <h2>Rally Review</h2>
       <p class="subtitle">{{ summaryLine }}</p>
+      <div class="android-banner" role="note">
+        <svg
+          class="android-banner-icon"
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+          <line x1="12" y1="18" x2="12.01" y2="18" />
+        </svg>
+        <span>These rallies are synced to your account — open the Android app to view them.</span>
+      </div>
     </header>
 
     <div v-if="loading" class="loading-state">
@@ -171,8 +188,8 @@ onMounted(loadRallies)
       <p>No rallies were detected for this video.</p>
     </div>
 
-    <ul v-else class="rally-list">
-      <li v-for="rally in rallies" :key="rally.id" class="rally-row">
+    <ul v-else class="rally-grid">
+      <li v-for="rally in rallies" :key="rally.id" class="rally-card">
         <div class="rally-preview">
           <img
             v-if="rally.previewKind === 'thumbnail' && rally.previewUrl"
@@ -188,15 +205,13 @@ onMounted(loadRallies)
             playsinline
           ></video>
           <div v-else class="preview-fallback">No preview</div>
+          <span class="rally-badge">#{{ rally.rally_index }}</span>
         </div>
         <div class="rally-meta">
-          <div class="rally-title">
-            <span class="rally-number">#{{ rally.rally_index }}</span>
-            <span class="rally-name">{{ rally.title ?? `Rally #${rally.rally_index}` }}</span>
-          </div>
-          <div class="rally-range">
-            {{ formatDuration(rally.start_timestamp) }} — {{ formatDuration(rally.end_timestamp) }}
-          </div>
+          <span class="rally-duration">{{ formatDuration(rally.duration_seconds) }}</span>
+          <span class="rally-range">
+            {{ formatDuration(rally.start_timestamp) }}–{{ formatDuration(rally.end_timestamp) }}
+          </span>
         </div>
       </li>
     </ul>
@@ -237,6 +252,35 @@ onMounted(loadRallies)
   margin: 0;
 }
 
+.android-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px auto 0;
+  padding: 8px 14px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
+  border-left: 2px solid var(--color-accent);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.85rem;
+  line-height: 1.3;
+  text-align: left;
+}
+
+.android-banner-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--color-accent);
+}
+
+@media (max-width: 600px) {
+  .android-banner {
+    display: flex;
+    width: 100%;
+  }
+}
+
 .loading-state,
 .error-state,
 .empty-state {
@@ -268,28 +312,33 @@ onMounted(loadRallies)
   }
 }
 
-.rally-list {
+.rally-grid {
   list-style: none;
   padding: 0;
   margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
 }
 
-.rally-row {
+.rally-card {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 12px;
+  flex-direction: column;
   background: var(--color-bg);
   border: 1px solid var(--color-border-secondary);
+  overflow: hidden;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.rally-card:hover {
+  border-color: var(--color-accent);
+  transform: translateY(-1px);
 }
 
 .rally-preview {
-  width: 160px;
-  height: 90px;
-  flex-shrink: 0;
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
   background: #000;
   display: flex;
   align-items: center;
@@ -310,38 +359,43 @@ onMounted(loadRallies)
   font-size: 0.8rem;
 }
 
+.rally-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.75);
+  color: var(--color-accent);
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  border: 1px solid var(--color-border-secondary);
+}
+
 .rally-meta {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  flex: 1;
-}
-
-.rally-title {
-  display: flex;
   align-items: baseline;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  min-width: 0;
 }
 
-.rally-number {
-  color: var(--color-accent);
-  font-weight: bold;
-  font-size: 0.9rem;
-}
-
-.rally-name {
+.rally-duration {
   color: rgba(255, 255, 255, 0.9);
-  font-size: 1rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .rally-range {
-  color: rgba(255, 255, 255, 0.6);
-  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .review-footer {
@@ -384,16 +438,6 @@ onMounted(loadRallies)
 }
 
 @media (max-width: 600px) {
-  .rally-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .rally-preview {
-    width: 100%;
-    height: 180px;
-  }
-
   .review-footer {
     flex-direction: column-reverse;
   }

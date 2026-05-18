@@ -9,6 +9,7 @@ import VideoPlayer from '@/components/VideoPlayer.vue'
 import ResultsDashboard from '@/components/ResultsDashboard.vue'
 import AnalysisProgress from '@/components/AnalysisProgress.vue'
 import RallyReview from '@/components/RallyReview.vue'
+import PhaseHeader from '@/components/PhaseHeader.vue'
 import CourtSetup from '@/components/CourtSetup.vue'
 import MiniCourt from '@/components/MiniCourt.vue'
 import PlayerLabelsProvider from '@/components/PlayerLabelsProvider.vue'
@@ -1027,7 +1028,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            beta v2.0
+            beta v2.1
           </button>
         </div>
 
@@ -1304,6 +1305,7 @@ watch(videoSectionRef, () => {
 
         <!-- Analyzing Phase 1 (rally detection) -->
         <div v-else-if="currentState === 'analyzing-phase1' && uploadedVideo" key="analyzing-phase1" class="content-section">
+          <PhaseHeader :video-id="uploadedVideo.video_id" active-phase="phase1" />
           <AnalysisProgress
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
@@ -1318,6 +1320,7 @@ watch(videoSectionRef, () => {
 
         <!-- Rally Review (between Phase 1 and Phase 2) -->
         <div v-else-if="currentState === 'rally-review' && uploadedVideo" key="rally-review" class="content-section">
+          <PhaseHeader :video-id="uploadedVideo.video_id" active-phase="phase2" />
           <RallyReview
             :video-id="uploadedVideo.video_id"
             @continue="handleContinueAnalytics"
@@ -1327,6 +1330,7 @@ watch(videoSectionRef, () => {
 
         <!-- Analyzing Phase 2 (full analytics) -->
         <div v-else-if="currentState === 'analyzing-phase2' && uploadedVideo" key="analyzing-phase2" class="content-section">
+          <PhaseHeader :video-id="uploadedVideo.video_id" active-phase="phase2" />
           <AnalysisProgress
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
@@ -1747,6 +1751,21 @@ watch(videoSectionRef, () => {
           </button>
         </div>
         <div class="changelog-content">
+          <div class="changelog-entry">
+            <div class="changelog-version">
+              <span class="version-tag">v2.1-beta</span>
+              <span class="version-date">May 18, 2026</span>
+            </div>
+            <ul class="changelog-list">
+              <li> - Rally-first pipeline: rally detection now runs as its own faster first pass, so you can review rallies as soon as they're ready instead of waiting for the full analysis to finish</li>
+              <li> - Full analytics (pose, speeds, heatmaps) is now an opt-in second step from Rally Review — skip it entirely if all you needed were the clips</li>
+              <li> - New pipeline progress header shown across all three screens (Rally Detection → Rally Review → Full Analytics), so it's always clear where you are and what's already done</li>
+              <li> - Rally Review now shows clips as a compact card grid instead of a long vertical list — a 14-rally match fits in a couple of rows instead of a full page of scrolling</li>
+            </ul>
+            <p class="changelog-note">
+              <em>Thanks for the feedback on the v2.0 flow — keep it coming!</em>
+            </p>
+          </div>
           <div class="changelog-entry">
             <div class="changelog-version">
               <span class="version-tag">v2.0-beta</span>

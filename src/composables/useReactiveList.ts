@@ -4,6 +4,11 @@ import { supabase } from "@/lib/supabase";
 interface ListFilter { column: string; value: string; }
 interface Options { orderBy?: string; ascending?: boolean; }
 
+// Per-call counter — see comment in useReactiveRow.ts. Same hazard applies:
+// reusing a channel name returns the existing channel and .on() after
+// .subscribe() throws.
+let channelSeq = 0;
+
 export function useReactiveList<T extends { id: string | number }>(
   table: string,
   filter: Ref<ListFilter | null>,
@@ -36,7 +41,7 @@ export function useReactiveList<T extends { id: string | number }>(
     loading.value = false;
 
     const channel = supabase
-      .channel(`${table}-list-${column}-${value}`)
+      .channel(`${table}-list-${column}-${value}-${++channelSeq}`)
       .on("postgres_changes",
           { event: "INSERT", schema: "public", table, filter: `${column}=eq.${value}` },
           (p) => { items.value = [...items.value, p.new as T]; })

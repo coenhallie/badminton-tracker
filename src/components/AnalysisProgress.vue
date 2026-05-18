@@ -105,6 +105,16 @@ const status = computed(() => {
 
 const progressPercent = computed(() => Math.min(100, Math.round(progress.value)))
 
+const tipMessage = computed(() => {
+  if (props.phase === 'phase2') {
+    return 'Full analytics is the slower step — pose, speed, heatmaps. You can leave this tab; results will be saved.'
+  }
+  if (props.phase === 'phase1') {
+    return 'Detecting rallies — usually faster than full analytics.'
+  }
+  return 'Tip: Analysis time depends on video length and resolution. Shorter clips process faster.'
+})
+
 const statusMessage = computed(() => {
   // Phase-aware messages take precedence over the generic mapping.
   switch (videoStatus.value) {
@@ -433,28 +443,6 @@ onMounted(() => {
             <div class="progress-fill" :style="{ width: `${progressPercent}%` }" />
           </div>
         </div>
-
-        <div class="analysis-steps">
-          <div class="step" :class="{ active: status !== 'connecting', complete: progress > 0 }">
-            <div class="step-icon">1</div>
-            <span>Initialize</span>
-          </div>
-          <div class="step-connector" :class="{ active: progress > 0 }" />
-          <div class="step" :class="{ active: progress > 0, complete: progress > 30 }">
-            <div class="step-icon">2</div>
-            <span>Pose Detection</span>
-          </div>
-          <div class="step-connector" :class="{ active: progress > 30 }" />
-          <div class="step" :class="{ active: progress > 30, complete: progress > 60 }">
-            <div class="step-icon">3</div>
-            <span>Speed Calculation</span>
-          </div>
-          <div class="step-connector" :class="{ active: progress > 60 }" />
-          <div class="step" :class="{ active: progress > 60, complete: progress >= 100 }">
-            <div class="step-icon">4</div>
-            <span>Finalize</span>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -510,7 +498,7 @@ onMounted(() => {
           <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
           <line x1="12" y1="17" x2="12.01" y2="17" />
         </svg>
-        Tip: Analysis time depends on video length and resolution. Shorter clips process faster.
+        {{ tipMessage }}
       </p>
     </div>
   </div>
@@ -717,66 +705,6 @@ onMounted(() => {
   background: var(--color-accent);
   border-radius: 0;
   transition: width 0.3s ease;
-}
-
-.analysis-steps {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.step {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  opacity: 0.4;
-  transition: opacity 0.3s ease;
-}
-
-.step.active {
-  opacity: 0.7;
-}
-
-.step.complete {
-  opacity: 1;
-}
-
-.step-icon {
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-bg-tertiary);
-  border-radius: 50%;
-  color: var(--color-text-secondary);
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.step.complete .step-icon {
-  background: var(--color-bg-tertiary);
-  color: var(--color-accent);
-}
-
-.step span {
-  color: var(--color-text-tertiary);
-  font-size: 0.625rem;
-  text-align: center;
-}
-
-.step-connector {
-  flex: 1;
-  height: 2px;
-  background: var(--color-border);
-  margin: 0 4px;
-  margin-bottom: 18px;
-  transition: background 0.3s ease;
-}
-
-.step-connector.active {
-  background: var(--color-accent);
 }
 
 .progress-footer {
