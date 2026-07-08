@@ -35,6 +35,15 @@ except ImportError:  # pragma: no cover - only happens outside the Modal image
 from supabase_helpers import supabase_client, verify_hmac  # noqa: F401  (used in HMAC-protected endpoints)
 
 
+# Path where the Modal "badminton-tracker-models" volume is mounted inside
+# worker containers (see `models_vol`/`app`/`image` config further down).
+# Defined here, ahead of every module-level constant that is built from it
+# (e.g. GB_BALL_MODEL_PATH below), because top-level assignments execute at
+# import time in file order — unlike the in-function uses of MODELS_PATH,
+# which resolve lazily and would tolerate a later definition.
+MODELS_PATH = "/models"
+
+
 # --- Rally clip generation ----------------------------------------------------
 # Cut the source video into per-rally MP4 clips using ffmpeg stream copy
 # (no re-encode), upload each to the 'clips' bucket, and insert a rally_clips
@@ -1847,6 +1856,129 @@ async def _run_tracknet_pass(
     return tracknet_positions, tracknet_available
 
 
+# Good-Badminton shuttlecock detector (Apache-2.0, yo-WASSUP/Good-Badminton
+# v0.1.0). Params mirror their ShuttlecockTracker defaults.
+GB_BALL_MODEL_PATH = f"{MODELS_PATH}/gb_ball/yolo11s-ball.pt"
+GB_BALL_CONF = 0.18
+GB_BALL_MAX_AREA_RATIO = 0.004
+GB_BALL_MAX_ASPECT = 4.0
+
+
+def _gb_ball_detect_sync(video_path: str, model) -> Dict[int, Dict[str, Any]]:
+    """Blocking full-video pass with the GB ball detector, batched 32 frames."""
+    import cv2
+
+    positions: Dict[int, Dict[str, Any]] = {}
+    cap = cv2.VideoCapture(video_path)
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1
+    frame_area = float(width * height)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+    batch: List[Any] = []
+    batch_idx: List[int] = []
+    frame_idx = 0
+
+    def flush():
+        if not batch:
+            return
+        preds = model(batch, conf=GB_BALL_CONF, verbose=False)
+        for fi, pred in zip(batch_idx, preds):
+            best = None
+            if pred.boxes is not None and len(pred.boxes) > 0:
+                xywh = pred.boxes.xywh.cpu().numpy()
+                confs = pred.boxes.conf.cpu().numpy()
+                for (cx, cy, w, h), conf in zip(xywh, confs):
+                    if w * h / frame_area > GB_BALL_MAX_AREA_RATIO:
+                        continue
+                    aspect = max(w, h) / max(min(w, h), 1e-6)
+                    if aspect > GB_BALL_MAX_ASPECT:
+                        continue
+                    if best is None or conf > best[2]:
+                        best = (float(cx), float(cy), float(conf))
+            if best is not None:
+                positions[fi] = {"x": best[0], "y": best[1], "visible": True}
+            else:
+                positions[fi] = {"x": 0, "y": 0, "visible": False}
+        batch.clear()
+        batch_idx.clear()
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        batch.append(frame)
+        batch_idx.append(frame_idx)
+        if len(batch) >= 32:
+            flush()
+            if total and frame_idx % 2048 < 32:
+                print(f"[MODAL] [phase1] GB ball pass: {frame_idx}/{total}")
+        frame_idx += 1
+    flush()
+    cap.release()
+    return positions
+
+
+async def _run_gb_ball_pass(
+    video_path: "Path",
+    send_log,
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Run the Good-Badminton yolo11s-ball shuttlecock detector over the full
+    video. Returns `{frame_num: {x, y, visible}}`.
+
+    Raises RuntimeError if the weight is missing: a gb_fusion run must never
+    silently degrade to legacy, or the A/B comparison is poisoned.
+    """
+    from ultralytics import YOLO
+
+    if not os.path.exists(GB_BALL_MODEL_PATH):
+        raise RuntimeError(
+            "pipeline_variant=gb_fusion but the GB ball weight is missing at "
+            f"{GB_BALL_MODEL_PATH}. Upload it with backend/upload_gb_ball.py."
+        )
+
+    await send_log("Loading Good-Badminton ball detector (yolo11s-ball)...", "info", "model")
+    model = YOLO(GB_BALL_MODEL_PATH)
+    await send_log("GB ball detector loaded, running full-video pass...", "info", "model")
+    positions = await asyncio.to_thread(_gb_ball_detect_sync, str(video_path), model)
+
+    visible = sum(1 for p in positions.values() if p.get("visible"))
+    pct = 100 * visible / max(len(positions), 1)
+    await send_log(
+        f"GB ball detector: shuttle detected in {visible}/{len(positions)} frames ({pct:.1f}%)",
+        "success", "model",
+    )
+    return positions
+
+
+def _merge_shuttle_sources(
+    tracknet_positions: Dict[int, Dict[str, Any]],
+    gb_positions: Dict[int, Dict[str, Any]],
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Fuse per-frame shuttle positions: TrackNet wins where visible, the GB
+    detector fills the gaps. Visible entries gain a `source` tag
+    ('tracknet' | 'gb_yolo') that the detection loop propagates into each
+    frame's shuttle_position.
+    """
+    merged: Dict[int, Dict[str, Any]] = {}
+    for fn, pos in tracknet_positions.items():
+        if pos.get("visible"):
+            merged[fn] = {**pos, "source": "tracknet"}
+    for fn, pos in gb_positions.items():
+        if fn in merged:
+            continue
+        if pos.get("visible"):
+            merged[fn] = {**pos, "source": "gb_yolo"}
+        else:
+            merged[fn] = {"x": 0, "y": 0, "visible": False}
+    for fn, pos in tracknet_positions.items():
+        if fn not in merged:
+            merged[fn] = pos
+    return merged
+
+
 async def _run_detection_only_loop(
     video_path: "Path",
     total_frames: int,
@@ -2051,9 +2183,9 @@ async def _run_detection_only_loop(
                             if movement < SHUTTLE_MIN_MOVE:
                                 shuttle_static_clusters.append({"x": tx, "y": ty, "count": 1})
                             else:
-                                shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
+                                shuttle_position = {"x": tx, "y": ty, "source": tn_pos.get("source", "tracknet")}
                         else:
-                            shuttle_position = {"x": tx, "y": ty, "source": "tracknet"}
+                            shuttle_position = {"x": tx, "y": ty, "source": tn_pos.get("source", "tracknet")}
 
             if shuttle_position is None and badminton_detections["shuttlecocks"]:
                 candidates = sorted(
@@ -3284,7 +3416,9 @@ vol = modal.Volume.from_name("badminton-processor-cache", create_if_missing=True
 
 # Volume for trained models (shared with modal_inference.py)
 models_vol = modal.Volume.from_name("badminton-tracker-models", create_if_missing=True)
-MODELS_PATH = "/models"
+# MODELS_PATH is defined near the top of the file (see comment there) so that
+# module-level constants built from it, e.g. GB_BALL_MODEL_PATH, resolve at
+# import time.
 
 # Image with all dependencies
 # Add local backend modules (tracknet, rally_detection) to the container
@@ -3620,6 +3754,20 @@ async def _process_video_worker(
         await send_status_update("processing_phase1", 0, 0, 0)
         await send_log("Phase 1: rally segmentation + clip cutting", "info", "processing")
 
+        # Pipeline variant (migration 0006). Fetched from the row rather than
+        # the request payload so re-runs and duplicates are self-describing.
+        # A fetch failure fails the run — never silently run legacy.
+        variant_row = await asyncio.to_thread(
+            lambda: supabase_client()
+            .table("videos")
+            .select("pipeline_variant")
+            .eq("id", video_id)
+            .single()
+            .execute()
+        )
+        pipeline_variant = (variant_row.data or {}).get("pipeline_variant") or "legacy"
+        await send_log(f"Pipeline variant: {pipeline_variant}", "info", "processing")
+
         # ------------------------------------------------------------------
         # 1. Download video
         # ------------------------------------------------------------------
@@ -3663,6 +3811,29 @@ async def _process_video_worker(
             "info", "processing",
         )
         phase_start = time.time()
+
+        # ------------------------------------------------------------------
+        # 3b. Good-Badminton ball detector pass (gb_fusion variant only)
+        # ------------------------------------------------------------------
+        if pipeline_variant == "gb_fusion":
+            gb_positions = await _run_gb_ball_pass(video_path, send_log)
+            tracknet_positions = _merge_shuttle_sources(tracknet_positions, gb_positions)
+            tracknet_available = tracknet_available or any(
+                p.get("visible") for p in gb_positions.values()
+            )
+            from collections import Counter
+            src_counts = Counter(
+                p["source"]
+                for p in tracknet_positions.values()
+                if p.get("visible") and p.get("source")
+            )
+            await send_log(
+                f"Fused shuttle coverage by source: {dict(src_counts)}",
+                "info", "model",
+            )
+            gb_time = time.time() - phase_start
+            await send_log(f"GB ball phase complete in {gb_time:.1f}s", "info", "processing")
+            phase_start = time.time()
 
         # ------------------------------------------------------------------
         # 4. Detection-only YOLO frame loop (Phase 1's stripped loop)
@@ -3778,6 +3949,7 @@ async def _process_video_worker(
         # Per-frame skeleton/analytics payload is deferred to Phase 2.
         phase1_results = {
             "phase": "phase1",
+            "pipeline_variant": pipeline_variant,
             "rallies": detected_rallies,
             "shuttle_positions": shuttle_positions,
             "fps": fps,
