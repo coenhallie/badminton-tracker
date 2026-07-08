@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, watch, inject } from 'vue'
-import type { AnalysisResult, PlayerMetrics, ShuttleMetrics, CourtDetection, PlayersZoneAnalytics, ZoneCoverage } from '@/types/analysis'
+import type { AnalysisResult, PlayerMetrics, ShuttleMetrics, CourtDetection, PlayersZoneAnalytics, ZoneCoverage, PipelineVariant } from '@/types/analysis'
 import { PLAYER_COLORS } from '@/types/analysis'
 import { exportPDFWithFrontendData, getRecalculatedZoneAnalytics, clearZoneAnalyticsCache, type PlayerZoneData } from '@/services/api'
 import { PLAYER_LABELS_KEY } from '@/composables/usePlayerLabels'
@@ -21,6 +21,9 @@ const props = defineProps<{
   manualKeypointsSet?: boolean
   // Counter that increments when keypoints are confirmed (triggers zone recalculation)
   zoneRecalculationTrigger?: number
+  // Pipeline A/B comparison (design doc 2026-07-08)
+  pipelineVariant?: PipelineVariant
+  hasSibling?: boolean
 }>()
 
 // Defense-in-depth: if a Phase-1-only result lands here (e.g. deep link, stale
@@ -30,6 +33,8 @@ const props = defineProps<{
 // triggers re-routing. Legacy results without a `phase` field render normally.
 const emit = defineEmits<{
   needsRallyReview: []
+  rerunOtherPipeline: []
+  openSibling: []
 }>()
 
 watch(
@@ -278,6 +283,20 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
 
 <template>
   <div class="results-dashboard">
+    <div class="pipeline-bar">
+      <span
+        class="pipeline-badge"
+        :class="pipelineVariant === 'gb_fusion' ? 'pipeline-badge--gb' : 'pipeline-badge--legacy'"
+      >
+        {{ pipelineVariant === 'gb_fusion' ? 'Good-Badminton fusion' : 'Legacy pipeline' }}
+      </span>
+      <button v-if="hasSibling" class="pipeline-bar-action" @click="emit('openSibling')">
+        Compare: open {{ pipelineVariant === 'gb_fusion' ? 'legacy' : 'Good-Badminton' }} run
+      </button>
+      <button v-else class="pipeline-bar-action" @click="emit('rerunOtherPipeline')">
+        Re-run with {{ pipelineVariant === 'gb_fusion' ? 'legacy' : 'Good-Badminton' }} pipeline
+      </button>
+    </div>
     <header class="dashboard-header">
       <div class="header-left">
         <h2>Analysis Results</h2>
@@ -1236,5 +1255,34 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
   color: var(--color-accent);
   font-size: 0.875rem;
   font-weight: 600;
+}
+
+.pipeline-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.pipeline-badge {
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.pipeline-badge--legacy {
+  background: rgba(100, 116, 139, 0.15);
+  color: #64748b;
+}
+.pipeline-badge--gb {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+.pipeline-bar-action {
+  font-size: 0.8rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid currentColor;
+  background: transparent;
+  cursor: pointer;
 }
 </style>

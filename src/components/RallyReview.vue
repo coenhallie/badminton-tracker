@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { supabase } from '@/lib/supabase'
+import type { PipelineVariant } from '@/types/analysis'
 
 const props = defineProps<{
   videoId: string
+  pipelineVariant?: PipelineVariant
 }>()
 
 const emit = defineEmits<{
@@ -152,6 +154,7 @@ onMounted(loadRallies)
 
 <template>
   <div class="rally-review">
+    <span v-if="pipelineVariant === 'gb_fusion'" class="pipeline-badge-mini">Good-Badminton fusion</span>
     <header class="review-header">
       <h2>Rally Review</h2>
       <p class="subtitle">{{ summaryLine }}</p>
@@ -441,5 +444,16 @@ onMounted(loadRallies)
   .review-footer {
     flex-direction: column-reverse;
   }
+}
+
+.pipeline-badge-mini {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  margin-bottom: 0.5rem;
 }
 </style>

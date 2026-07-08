@@ -37,7 +37,7 @@ async function getVideoSignedUrl(videoId: string): Promise<string> {
   return signed.signedUrl
 }
 import type { HealthCheckResponse } from '@/services/api'
-import type { UploadResponse, AnalysisResult, SkeletonFrame, ExtendedCourtKeypoints, VideoStatus } from '@/types/analysis'
+import type { UploadResponse, AnalysisResult, SkeletonFrame, ExtendedCourtKeypoints, VideoStatus, PipelineVariant } from '@/types/analysis'
 import type { SpeedDataResponse, SpeedTimelineResponse } from '@/services/api'
 
 const { isDark, toggleTheme } = useTheme()
@@ -59,6 +59,8 @@ type AppState =
 const currentState = ref<AppState>('upload')
 const uploadedVideo = ref<UploadResponse | null>(null)
 const analysisResult = ref<AnalysisResult | null>(null)
+const pipelineVariant = ref<PipelineVariant>('legacy')
+const siblingVideoId = ref<string | null>(null)
 // Tracks which phase failed so the 'error' pane can show the right copy + retry CTA.
 const lastFailedPhase = ref<'phase1' | 'phase2' | null>(null)
 
@@ -717,6 +719,7 @@ async function loadCompletedResults(videoId: string): Promise<boolean> {
     const results = await res.json()
     analysisResult.value = { ...results, video_id: videoId } as AnalysisResult
     await loadVideoUrl(videoId)
+    await loadPipelineInfo(videoId)
     return true
   } catch (err) {
     console.error('Failed to load completed results:', err)
@@ -754,11 +757,13 @@ async function handlePhase2Complete(result: AnalysisResult) {
 
   // Fetch the video URL asynchronously (Supabase signed URL)
   await loadVideoUrl(result.video_id)
+  await loadPipelineInfo(result.video_id)
 }
 
 function handlePhase1Complete() {
   // Status flipped to 'phase1_complete' — surface the rally review screen.
   currentState.value = 'rally-review'
+  if (uploadedVideo.value?.video_id) void loadPipelineInfo(uploadedVideo.value.video_id)
 }
 
 function handleAnalysisFailed(failedStatus: VideoStatus) {
@@ -1013,6 +1018,55 @@ async function hydrateFromExistingVideo() {
       // Legacy in-flight rows at deploy — treat as Phase 2 so user sees progress.
       currentState.value = 'analyzing-phase2'; break
   }
+}
+
+/** Load the current video's pipeline variant + sibling (if any). */
+async function loadPipelineInfo(videoId: string) {
+  pipelineVariant.value = 'legacy'
+  siblingVideoId.value = null
+  const { data } = await supabase
+    .from('videos')
+    .select('pipeline_variant, source_video_id')
+    .eq('id', videoId)
+    .single()
+  if (!data) return
+  pipelineVariant.value = (data.pipeline_variant ?? 'legacy') as PipelineVariant
+  if (data.source_video_id) {
+    siblingVideoId.value = data.source_video_id
+    return
+  }
+  const { data: dup } = await supabase
+    .from('videos')
+    .select('id')
+    .eq('source_video_id', videoId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+  siblingVideoId.value = dup?.[0]?.id ?? null
+}
+
+/** Duplicate the current video with the opposite pipeline and process it. */
+async function rerunWithOtherPipeline() {
+  if (!uploadedVideo.value?.video_id) return
+  const { data, error } = await supabase.functions.invoke('duplicate-video', {
+    body: { video_id: uploadedVideo.value.video_id },
+  })
+  if (error || !data?.new_video_id) {
+    errorMessage.value = 'Could not duplicate the video for a pipeline re-run'
+    return
+  }
+  uploadedVideo.value = { ...uploadedVideo.value, video_id: data.new_video_id, status: 'uploaded' }
+  analysisResult.value = null
+  pipelineVariant.value = data.pipeline_variant as PipelineVariant
+  siblingVideoId.value = null
+  // AnalysisProgress invokes process-video on mount; keypoints were copied,
+  // so court setup is skipped entirely.
+  currentState.value = 'analyzing-phase1'
+}
+
+/** Open the sibling run in a new tab for side-by-side comparison. */
+function openSibling() {
+  if (!siblingVideoId.value) return
+  window.open(`${window.location.pathname}?videoId=${siblingVideoId.value}`, '_blank')
 }
 
 onMounted(async () => {
@@ -1376,6 +1430,7 @@ watch(videoSectionRef, () => {
           <PhaseHeader :video-id="uploadedVideo.video_id" active-phase="phase2" />
           <RallyReview
             :video-id="uploadedVideo.video_id"
+            :pipeline-variant="pipelineVariant"
             @continue="handleContinueAnalytics"
             @done="handleDoneForNow"
           />
@@ -1767,7 +1822,11 @@ watch(videoSectionRef, () => {
                 :result="analysisResult"
                 :manual-keypoints-set="manualCourtKeypoints !== null"
                 :zone-recalculation-trigger="zoneRecalculationTrigger"
+                :pipeline-variant="pipelineVariant"
+                :has-sibling="!!siblingVideoId"
                 @needs-rally-review="handlePhase1Complete"
+                @rerun-other-pipeline="rerunWithOtherPipeline"
+                @open-sibling="openSibling"
               />
             </div>
 
