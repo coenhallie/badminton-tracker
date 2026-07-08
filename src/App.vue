@@ -996,7 +996,9 @@ async function hydrateFromExistingVideo() {
     case 'processing_phase1':
       currentState.value = 'analyzing-phase1'; break
     case 'phase1_complete':
-      currentState.value = 'rally-review'; break
+      currentState.value = 'rally-review'
+      void loadPipelineInfo(uploadedVideo.value.video_id)
+      break
     case 'processing_phase2':
       currentState.value = 'analyzing-phase2'; break
     case 'completed': {
@@ -1047,8 +1049,10 @@ async function loadPipelineInfo(videoId: string) {
 /** Duplicate the current video with the opposite pipeline and process it. */
 async function rerunWithOtherPipeline() {
   if (!uploadedVideo.value?.video_id) return
+  // Save the old id before overwriting uploadedVideo (for cache clearing).
+  const previousVideoId = uploadedVideo.value.video_id
   const { data, error } = await supabase.functions.invoke('duplicate-video', {
-    body: { video_id: uploadedVideo.value.video_id },
+    body: { video_id: previousVideoId },
   })
   if (error || !data?.new_video_id) {
     errorMessage.value = 'Could not duplicate the video for a pipeline re-run'
@@ -1056,8 +1060,17 @@ async function rerunWithOtherPipeline() {
   }
   uploadedVideo.value = { ...uploadedVideo.value, video_id: data.new_video_id, status: 'uploaded' }
   analysisResult.value = null
+  errorMessage.value = ''
   pipelineVariant.value = data.pipeline_variant as PipelineVariant
   siblingVideoId.value = null
+  // Reset per-video processing state so the previous run's delayed speed
+  // calculation doesn't leak into the re-run (mirrors startNewAnalysis;
+  // manualCourtKeypoints is kept — the keypoints were copied server-side).
+  videoPlaybackStarted.value = false
+  speedCalculationTriggered.value = false
+  isSpeedCalculating.value = false
+  calculatedSpeedData.value = null
+  clearSpeedCache(previousVideoId)
   // AnalysisProgress invokes process-video on mount; keypoints were copied,
   // so court setup is skipped entirely.
   currentState.value = 'analyzing-phase1'

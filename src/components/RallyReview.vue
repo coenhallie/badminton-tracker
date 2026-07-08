@@ -448,6 +448,7 @@ onMounted(loadRallies)
 
 .pipeline-badge-mini {
   display: inline-block;
+  align-self: flex-start;
   padding: 0.15rem 0.5rem;
   border-radius: 999px;
   font-size: 0.7rem;
