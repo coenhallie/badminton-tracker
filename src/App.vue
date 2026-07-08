@@ -701,22 +701,27 @@ async function loadVideoUrl(videoId: string) {
  * Mirrors AnalysisProgress.fetchResultsJson + handlePhase2Complete.
  */
 async function loadCompletedResults(videoId: string): Promise<boolean> {
-  const { data: row } = await supabase
-    .from('videos')
-    .select('results_storage_path')
-    .eq('id', videoId)
-    .single()
-  if (!row?.results_storage_path) return false
-  const { data: signed } = await supabase.storage
-    .from('results')
-    .createSignedUrl(row.results_storage_path, 3600)
-  if (!signed) return false
-  const res = await fetch(signed.signedUrl)
-  if (!res.ok) return false
-  const results = await res.json()
-  analysisResult.value = { ...results, video_id: videoId } as AnalysisResult
-  await loadVideoUrl(videoId)
-  return true
+  try {
+    const { data: row } = await supabase
+      .from('videos')
+      .select('results_storage_path')
+      .eq('id', videoId)
+      .single()
+    if (!row?.results_storage_path) return false
+    const { data: signed } = await supabase.storage
+      .from('results')
+      .createSignedUrl(row.results_storage_path, 3600)
+    if (!signed) return false
+    const res = await fetch(signed.signedUrl)
+    if (!res.ok) return false
+    const results = await res.json()
+    analysisResult.value = { ...results, video_id: videoId } as AnalysisResult
+    await loadVideoUrl(videoId)
+    return true
+  } catch (err) {
+    console.error('Failed to load completed results:', err)
+    return false
+  }
 }
 
 function handleUploadComplete(response: UploadResponse) {
