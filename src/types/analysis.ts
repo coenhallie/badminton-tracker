@@ -274,6 +274,12 @@ export interface AnalysisResult {
   rallies?: BackendRally[] | null
 }
 
+/**
+ * Which Phase 1 shuttle pipeline processes a video.
+ * Mirrors videos.pipeline_variant (migration 0006).
+ */
+export type PipelineVariant = 'legacy' | 'gb_fusion'
+
 export interface UploadResponse {
   video_id: string
   filename: string
