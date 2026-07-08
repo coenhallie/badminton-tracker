@@ -695,6 +695,30 @@ async function loadVideoUrl(videoId: string) {
   }
 }
 
+/**
+ * Load a completed video's results JSON from storage so the dashboard can
+ * render outside the live AnalysisProgress flow (URL hydration, siblings).
+ * Mirrors AnalysisProgress.fetchResultsJson + handlePhase2Complete.
+ */
+async function loadCompletedResults(videoId: string): Promise<boolean> {
+  const { data: row } = await supabase
+    .from('videos')
+    .select('results_storage_path')
+    .eq('id', videoId)
+    .single()
+  if (!row?.results_storage_path) return false
+  const { data: signed } = await supabase.storage
+    .from('results')
+    .createSignedUrl(row.results_storage_path, 3600)
+  if (!signed) return false
+  const res = await fetch(signed.signedUrl)
+  if (!res.ok) return false
+  const results = await res.json()
+  analysisResult.value = { ...results, video_id: videoId } as AnalysisResult
+  await loadVideoUrl(videoId)
+  return true
+}
+
 function handleUploadComplete(response: UploadResponse) {
   uploadedVideo.value = response
   currentState.value = 'court-setup'
@@ -936,13 +960,14 @@ async function refreshHealthStatus() {
 }
 
 /**
- * Resume from any persisted videos.status, if a video id is somehow already
- * known at mount. This is a NO-OP in the current build: each browser session
- * starts fresh (see comment near `currentState`), so `uploadedVideo` is null on
- * mount and there's no localStorage / query-param hydration upstream. The
- * function is kept ready so a future task — restoring state from a URL like
- * `?videoId=...` or a "Resume" entry point — can wire it up without rebuilding
- * the state machine.
+ * Resume from any persisted videos.status, once a video id is known at mount.
+ * Historically this was a NO-OP: each browser session started fresh (see
+ * comment near `currentState`), so `uploadedVideo` was always null on mount.
+ * It is now fed by `?videoId=...` URL hydration in `onMounted` (below), which
+ * populates `uploadedVideo` before this runs — restoring upload / court-setup
+ * / in-progress / completed state by link. For `completed` videos this also
+ * fetches the stored results JSON via `loadCompletedResults` so the results
+ * dashboard can render directly.
  */
 async function hydrateFromExistingVideo() {
   if (!uploadedVideo.value?.video_id) return
@@ -964,8 +989,12 @@ async function hydrateFromExistingVideo() {
       currentState.value = 'rally-review'; break
     case 'processing_phase2':
       currentState.value = 'analyzing-phase2'; break
-    case 'completed':
-      currentState.value = 'results'; break
+    case 'completed': {
+      const loaded = await loadCompletedResults(uploadedVideo.value.video_id)
+      currentState.value = loaded ? 'results' : 'error'
+      if (!loaded) errorMessage.value = 'Could not load stored results for this video'
+      break
+    }
     case 'failed_phase1':
       lastFailedPhase.value = 'phase1'
       currentState.value = 'error'; break
@@ -995,7 +1024,26 @@ onMounted(async () => {
   // sessionStorage to resume state. Harmless if the key isn't there.
   try { sessionStorage.removeItem('badminton-session') } catch {}
 
-  // Resume-from-status hook (currently a no-op — see fn docstring).
+  // Deep link: /?videoId=<id> restores that video (used by the pipeline
+  // comparison sibling links to open two runs in two tabs).
+  const urlVideoId = new URLSearchParams(window.location.search).get('videoId')
+  if (urlVideoId && !uploadedVideo.value) {
+    const { data: urlVideo } = await supabase
+      .from('videos')
+      .select('id, filename, size, status')
+      .eq('id', urlVideoId)
+      .single()
+    if (urlVideo) {
+      uploadedVideo.value = {
+        video_id: urlVideo.id,
+        filename: urlVideo.filename,
+        size: urlVideo.size,
+        status: urlVideo.status,
+      }
+    }
+  }
+
+  // Resume-from-status hook, now fed by URL hydration above — see fn docstring.
   await hydrateFromExistingVideo()
 })
 
