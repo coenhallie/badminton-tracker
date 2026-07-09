@@ -24,6 +24,7 @@ const props = defineProps<{
   // Pipeline A/B comparison (design doc 2026-07-08)
   pipelineVariant?: PipelineVariant
   hasSibling?: boolean
+  rerunDisabled?: boolean
 }>()
 
 // Defense-in-depth: if a Phase-1-only result lands here (e.g. deep link, stale
@@ -293,7 +294,12 @@ watch(() => props.zoneRecalculationTrigger, (newValue, oldValue) => {
       <button v-if="hasSibling" class="pipeline-bar-action" @click="emit('openSibling')">
         Compare: open {{ pipelineVariant === 'gb_fusion' ? 'legacy' : 'Good-Badminton' }} run
       </button>
-      <button v-else class="pipeline-bar-action" @click="emit('rerunOtherPipeline')">
+      <button
+        v-else
+        class="pipeline-bar-action"
+        :disabled="rerunDisabled"
+        @click="emit('rerunOtherPipeline')"
+      >
         Re-run with {{ pipelineVariant === 'gb_fusion' ? 'legacy' : 'Good-Badminton' }} pipeline
       </button>
     </div>

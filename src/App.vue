@@ -61,6 +61,10 @@ const uploadedVideo = ref<UploadResponse | null>(null)
 const analysisResult = ref<AnalysisResult | null>(null)
 const pipelineVariant = ref<PipelineVariant>('legacy')
 const siblingVideoId = ref<string | null>(null)
+// Guards rerunWithOtherPipeline against double-clicks (duplicate-video calls
+// the edge function + mutates shared state; a second concurrent call would
+// duplicate the duplicate).
+const isRerunning = ref(false)
 // Tracks which phase failed so the 'error' pane can show the right copy + retry CTA.
 const lastFailedPhase = ref<'phase1' | 'phase2' | null>(null)
 
@@ -1048,32 +1052,38 @@ async function loadPipelineInfo(videoId: string) {
 
 /** Duplicate the current video with the opposite pipeline and process it. */
 async function rerunWithOtherPipeline() {
+  if (isRerunning.value) return
   if (!uploadedVideo.value?.video_id) return
-  // Save the old id before overwriting uploadedVideo (for cache clearing).
-  const previousVideoId = uploadedVideo.value.video_id
-  const { data, error } = await supabase.functions.invoke('duplicate-video', {
-    body: { video_id: previousVideoId },
-  })
-  if (error || !data?.new_video_id) {
-    errorMessage.value = 'Could not duplicate the video for a pipeline re-run'
-    return
+  isRerunning.value = true
+  try {
+    // Save the old id before overwriting uploadedVideo (for cache clearing).
+    const previousVideoId = uploadedVideo.value.video_id
+    const { data, error } = await supabase.functions.invoke('duplicate-video', {
+      body: { video_id: previousVideoId },
+    })
+    if (error || !data?.new_video_id) {
+      errorMessage.value = 'Could not duplicate the video for a pipeline re-run'
+      return
+    }
+    uploadedVideo.value = { ...uploadedVideo.value, video_id: data.new_video_id, status: 'uploaded' }
+    analysisResult.value = null
+    errorMessage.value = ''
+    pipelineVariant.value = data.pipeline_variant as PipelineVariant
+    siblingVideoId.value = null
+    // Reset per-video processing state so the previous run's delayed speed
+    // calculation doesn't leak into the re-run (mirrors startNewAnalysis;
+    // manualCourtKeypoints is kept — the keypoints were copied server-side).
+    videoPlaybackStarted.value = false
+    speedCalculationTriggered.value = false
+    isSpeedCalculating.value = false
+    calculatedSpeedData.value = null
+    clearSpeedCache(previousVideoId)
+    // AnalysisProgress invokes process-video on mount; keypoints were copied,
+    // so court setup is skipped entirely.
+    currentState.value = 'analyzing-phase1'
+  } finally {
+    isRerunning.value = false
   }
-  uploadedVideo.value = { ...uploadedVideo.value, video_id: data.new_video_id, status: 'uploaded' }
-  analysisResult.value = null
-  errorMessage.value = ''
-  pipelineVariant.value = data.pipeline_variant as PipelineVariant
-  siblingVideoId.value = null
-  // Reset per-video processing state so the previous run's delayed speed
-  // calculation doesn't leak into the re-run (mirrors startNewAnalysis;
-  // manualCourtKeypoints is kept — the keypoints were copied server-side).
-  videoPlaybackStarted.value = false
-  speedCalculationTriggered.value = false
-  isSpeedCalculating.value = false
-  calculatedSpeedData.value = null
-  clearSpeedCache(previousVideoId)
-  // AnalysisProgress invokes process-video on mount; keypoints were copied,
-  // so court setup is skipped entirely.
-  currentState.value = 'analyzing-phase1'
 }
 
 /** Open the sibling run in a new tab for side-by-side comparison. */
@@ -1102,7 +1112,7 @@ onMounted(async () => {
   if (urlVideoId && !uploadedVideo.value) {
     const { data: urlVideo } = await supabase
       .from('videos')
-      .select('id, filename, size, status')
+      .select('id, filename, size, status, manual_court_keypoints')
       .eq('id', urlVideoId)
       .single()
     if (urlVideo) {
@@ -1111,6 +1121,9 @@ onMounted(async () => {
         filename: urlVideo.filename,
         size: urlVideo.size,
         status: urlVideo.status,
+      }
+      if (urlVideo.manual_court_keypoints) {
+        manualCourtKeypoints.value = urlVideo.manual_court_keypoints as ExtendedCourtKeypoints
       }
     }
   }
@@ -1837,6 +1850,7 @@ watch(videoSectionRef, () => {
                 :zone-recalculation-trigger="zoneRecalculationTrigger"
                 :pipeline-variant="pipelineVariant"
                 :has-sibling="!!siblingVideoId"
+                :rerun-disabled="isRerunning"
                 @needs-rally-review="handlePhase1Complete"
                 @rerun-other-pipeline="rerunWithOtherPipeline"
                 @open-sibling="openSibling"

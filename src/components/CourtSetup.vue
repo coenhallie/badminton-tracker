@@ -100,7 +100,25 @@ onMounted(async () => {
     console.error('Failed to load video:', error)
     emit('error', 'Failed to load video for court setup')
   }
+  await loadPipelineVariant()
 })
+
+// A gb_fusion duplicate that re-enters court setup (e.g. sibling comparison)
+// must not silently reset to 'legacy' on save — hydrate the ref from the
+// existing row first. Failure here is non-fatal; 'legacy' remains the
+// fallback.
+async function loadPipelineVariant() {
+  try {
+    const { data, error } = await supabase
+      .from('videos').select('pipeline_variant').eq('id', props.videoId).single()
+    if (error || !data) return
+    if (data.pipeline_variant) {
+      pipelineVariant.value = data.pipeline_variant as PipelineVariant
+    }
+  } catch (error) {
+    console.error('Failed to load existing pipeline variant:', error)
+  }
+}
 
 async function loadVideo() {
   return new Promise<void>((resolve, reject) => {
