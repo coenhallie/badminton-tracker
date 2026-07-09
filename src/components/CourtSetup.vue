@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch, nextTick } from 'vue'
 import { supabase } from '@/lib/supabase'
-import type { ExtendedCourtKeypoints, PipelineVariant } from '@/types/analysis'
+import type { ExtendedCourtKeypoints } from '@/types/analysis'
 import MiniCourt from './MiniCourt.vue'
 
 const props = defineProps<{
@@ -81,8 +81,6 @@ const videoRef = ref<HTMLVideoElement | null>(null)
 const manualKeypoints = ref<ManualCourtKeypoint[]>([])
 const isSaving = ref(false)
 const videoDimensions = ref({ width: 0, height: 0 })
-const pipelineVariant = ref<PipelineVariant>('legacy')
-
 // Computed
 const currentPointIndex = computed(() => manualKeypoints.value.length)
 const currentPointLabel = computed(() => {
@@ -100,25 +98,7 @@ onMounted(async () => {
     console.error('Failed to load video:', error)
     emit('error', 'Failed to load video for court setup')
   }
-  await loadPipelineVariant()
 })
-
-// A gb_fusion duplicate that re-enters court setup (e.g. sibling comparison)
-// must not silently reset to 'legacy' on save — hydrate the ref from the
-// existing row first. Failure here is non-fatal; 'legacy' remains the
-// fallback.
-async function loadPipelineVariant() {
-  try {
-    const { data, error } = await supabase
-      .from('videos').select('pipeline_variant').eq('id', props.videoId).single()
-    if (error || !data) return
-    if (data.pipeline_variant) {
-      pipelineVariant.value = data.pipeline_variant as PipelineVariant
-    }
-  } catch (error) {
-    console.error('Failed to load existing pipeline variant:', error)
-  }
-}
 
 async function loadVideo() {
   return new Promise<void>((resolve, reject) => {
@@ -366,7 +346,7 @@ async function saveAndProceed() {
     // Save to Supabase database
     const { error: updateError } = await supabase
       .from('videos')
-      .update({ manual_court_keypoints: keypoints, pipeline_variant: pipelineVariant.value })
+      .update({ manual_court_keypoints: keypoints })
       .eq('id', props.videoId)
     if (updateError) throw updateError
 
@@ -419,17 +399,6 @@ watch(videoDimensions, () => {
             <div class="keypoint-info">
               <span class="keypoint-title">🎯 Court Mapping</span>
               <span class="keypoint-count">{{ manualKeypoints.length }} / {{ TOTAL_KEYPOINTS }} points</span>
-            </div>
-            <div class="pipeline-select">
-              <span class="pipeline-select-label">Pipeline</span>
-              <label class="pipeline-option">
-                <input type="radio" value="legacy" v-model="pipelineVariant" />
-                <span><strong>Current</strong> — TrackNet + YOLO shuttle detection</span>
-              </label>
-              <label class="pipeline-option">
-                <input type="radio" value="gb_fusion" v-model="pipelineVariant" />
-                <span><strong>Good-Badminton fusion</strong> — adds the GB ball detector (A/B experiment)</span>
-              </label>
             </div>
             <div class="keypoint-buttons">
               <button
@@ -667,29 +636,6 @@ watch(videoDimensions, () => {
   margin: 0;
   font-size: 13px;
   line-height: 1.5;
-}
-
-.pipeline-select {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin: 0.75rem 0;
-  font-size: 0.85rem;
-}
-
-.pipeline-select-label {
-  font-weight: 600;
-  opacity: 0.75;
-  text-transform: uppercase;
-  font-size: 0.7rem;
-  letter-spacing: 0.05em;
-}
-
-.pipeline-option {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  cursor: pointer;
 }
 
 /* Responsive layout */

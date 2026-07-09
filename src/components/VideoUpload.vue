@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue'
 import { supabase } from '@/lib/supabase'
 import { useSession } from '@/composables/useSession'
-import type { UploadResponse } from '@/types/analysis'
+import type { PipelineVariant, UploadResponse } from '@/types/analysis'
 
 const { user } = useSession()
 
@@ -14,6 +14,7 @@ const emit = defineEmits<{
 const isDragging = ref(false)
 const isUploading = ref(false)
 const selectedFile = ref<File | null>(null)
+const pipelineVariant = ref<PipelineVariant>('legacy')
 
 const allowedTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/webm']
 
@@ -102,6 +103,7 @@ async function uploadAndCreate(file: File): Promise<string> {
       size: file.size,
       storage_path: path,
       status: 'uploaded',
+      pipeline_variant: pipelineVariant.value,
     })
     .select()
     .single()
@@ -185,6 +187,18 @@ async function startUpload() {
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
         </button>
+      </div>
+
+      <div class="pipeline-select">
+        <span class="pipeline-select-label">Pipeline</span>
+        <label class="pipeline-option">
+          <input type="radio" value="legacy" v-model="pipelineVariant" :disabled="isUploading" />
+          <span><strong>Current</strong> — TrackNet + YOLO shuttle detection</span>
+        </label>
+        <label class="pipeline-option">
+          <input type="radio" value="gb_fusion" v-model="pipelineVariant" :disabled="isUploading" />
+          <span><strong>Good-Badminton fusion</strong> — adds the GB ball detector (A/B experiment)</span>
+        </label>
       </div>
 
       <button
@@ -337,6 +351,30 @@ async function startUpload() {
 .remove-btn:hover {
   background: var(--color-border);
   border-color: var(--color-error);
+}
+
+.pipeline-select {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+  font-size: 0.85rem;
+  text-align: left;
+}
+
+.pipeline-select-label {
+  font-weight: 600;
+  opacity: 0.75;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+}
+
+.pipeline-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
 }
 
 .upload-btn {

@@ -37,6 +37,12 @@ session scratchpad (`spike_good_badminton.py`, `spike_results.json`).
   the user opens both results dashboards.
 - Toggle placement: **CourtSetup**, next to the start-analysis action.
   **Default: legacy** — existing behavior is unchanged unless opted in.
+  - *Amended 2026-07-09:* moved to **VideoUpload** (file-preview card, set at
+    row-insert time) — in CourtSetup the selector sat inside the
+    keypoint-controls overlay on top of the video frame. CourtSetup no longer
+    reads or writes `pipeline_variant` (which also moots the
+    duplicate-reset-to-legacy concern); `duplicate-video` still sets the
+    variant server-side.
 
 ## 1. Data model — migration `0006_pipeline_variant`
 
