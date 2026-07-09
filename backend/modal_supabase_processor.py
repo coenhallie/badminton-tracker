@@ -1870,6 +1870,8 @@ def _gb_ball_detect_sync(video_path: str, model) -> Dict[int, Dict[str, Any]]:
 
     positions: Dict[int, Dict[str, Any]] = {}
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError("GB ball pass could not open video")
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1
     frame_area = float(width * height)
@@ -4434,6 +4436,7 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
             "rallies": rallies,
             "shuttle_positions": shuttle_positions,
             "video_metadata": video_metadata,
+            "pipeline_variant": phase1_results.get("pipeline_variant", "legacy"),
             "skeleton_data": skeleton_frames,
             "skeleton_frames": skeleton_frames,
             "analytics": analytics_dict,
