@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { supabase } from '@/lib/supabase'
 import type { PipelineVariant } from '@/types/analysis'
 
@@ -42,6 +42,14 @@ const errorMsg = ref<string | null>(null)
 const rallies = ref<RallyClipView[]>([])
 const matchDurationSeconds = ref<number | null>(null)
 const continuing = ref(false)
+const videoStatus = ref<string | null>(null)
+
+// Phase 1 cuts a PRELIMINARY rally set (shuttle data only); the full
+// analytics pass re-cuts the clips to the final client rally separation and
+// removes extras. Until the video reaches 'completed', what's on screen (and
+// on the phones) is the preliminary set — label it as such and keep polling
+// so the grid refreshes itself the moment the final set lands.
+const isFinal = computed(() => videoStatus.value === 'completed')
 
 function formatDuration(s: number): string {
   const m = Math.floor(s / 60)
@@ -51,10 +59,14 @@ function formatDuration(s: number): string {
 
 const summaryLine = computed(() => {
   const n = rallies.value.length
+  const noun = n === 1 ? 'rally' : 'rallies'
+  const detected = isFinal.value
+    ? `${n} ${noun} detected`
+    : `${n} preliminary ${noun} detected`
   if (matchDurationSeconds.value == null) {
-    return `${n} ${n === 1 ? 'rally' : 'rallies'} detected`
+    return detected
   }
-  return `${n} ${n === 1 ? 'rally' : 'rallies'} detected · total match duration ${formatDuration(matchDurationSeconds.value)}`
+  return `${detected} · total match duration ${formatDuration(matchDurationSeconds.value)}`
 })
 
 async function signPreview(row: RallyClipRow): Promise<RallyClipView> {
@@ -105,8 +117,8 @@ async function loadMatchDuration(videoId: string): Promise<number | null> {
   }
 }
 
-async function loadRallies() {
-  loading.value = true
+async function loadRallies(quiet = false) {
+  if (!quiet) loading.value = true
   errorMsg.value = null
   try {
     const { data, error } = await supabase
@@ -128,11 +140,39 @@ async function loadRallies() {
     rallies.value = signed
     matchDurationSeconds.value = duration
   } catch (e) {
-    errorMsg.value = e instanceof Error ? e.message : 'Failed to load rallies'
+    if (!quiet) errorMsg.value = e instanceof Error ? e.message : 'Failed to load rallies'
   } finally {
-    loading.value = false
+    if (!quiet) loading.value = false
   }
 }
+
+let statusTimer: number | undefined
+
+async function checkVideoStatus() {
+  const { data, error } = await supabase
+    .from('videos')
+    .select('status')
+    .eq('id', props.videoId)
+    .single()
+  if (error || !data) return
+  const wasFinal = isFinal.value
+  videoStatus.value = data.status
+  if (isFinal.value) {
+    stopStatusPolling()
+    // Full analytics just finished: the clips were re-cut to the final
+    // rally separation — refresh the grid in place (no spinner).
+    if (!wasFinal) void loadRallies(true)
+  }
+}
+
+function stopStatusPolling() {
+  if (statusTimer !== undefined) {
+    window.clearInterval(statusTimer)
+    statusTimer = undefined
+  }
+}
+
+onUnmounted(stopStatusPolling)
 
 function onContinue() {
   if (continuing.value) return
@@ -149,7 +189,11 @@ function onDone() {
   emit('done')
 }
 
-onMounted(loadRallies)
+onMounted(() => {
+  void loadRallies()
+  void checkVideoStatus()
+  statusTimer = window.setInterval(checkVideoStatus, 8000)
+})
 </script>
 
 <template>
@@ -173,7 +217,8 @@ onMounted(loadRallies)
           <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
           <line x1="12" y1="18" x2="12.01" y2="18" />
         </svg>
-        <span>These rallies are synced to your account — open the Android app to view them.</span>
+        <span v-if="isFinal">These rallies are synced to your account — open the Android app to view them.</span>
+        <span v-else>Preliminary rally detection — the final rallies are refined during full analytics, then synced to your account and the Android app.</span>
       </div>
     </header>
 
@@ -184,7 +229,7 @@ onMounted(loadRallies)
 
     <div v-else-if="errorMsg" class="error-state">
       <p>{{ errorMsg }}</p>
-      <button class="secondary" @click="loadRallies">Retry</button>
+      <button class="secondary" @click="loadRallies()">Retry</button>
     </div>
 
     <div v-else-if="rallies.length === 0" class="empty-state">
