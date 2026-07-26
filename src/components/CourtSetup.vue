@@ -7,6 +7,7 @@ import MiniCourt from './MiniCourt.vue'
 const props = defineProps<{
   videoId: string
   filename: string
+  title?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -373,6 +374,7 @@ watch(videoDimensions, () => {
   <div class="court-setup">
     <div class="setup-header">
       <h2>Court Mapping</h2>
+      <p v-if="props.title" class="match-title" :title="props.title">{{ props.title }}</p>
       <p class="subtitle">{{ props.filename }}</p>
     </div>
 
@@ -465,6 +467,18 @@ watch(videoDimensions, () => {
   color: var(--color-accent);
   font-size: 1.5rem;
   margin: 0 0 8px 0;
+}
+
+/* Clamped to one line so an over-long name (or a pre-cap row from the DB)
+   can't push the court frame down the page. */
+.setup-header .match-title {
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 600;
+  margin: 0 auto 2px;
+  max-width: 32rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .setup-header .subtitle {

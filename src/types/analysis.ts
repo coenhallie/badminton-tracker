@@ -285,6 +285,8 @@ export interface UploadResponse {
   filename: string
   size: number
   status: string
+  /** User-supplied match name, set at upload. Null when left blank. */
+  title: string | null
 }
 
 export interface AnalyzeResponse {

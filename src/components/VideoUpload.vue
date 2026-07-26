@@ -15,6 +15,13 @@ const isDragging = ref(false)
 const isUploading = ref(false)
 const selectedFile = ref<File | null>(null)
 const pipelineVariant = ref<PipelineVariant>('legacy')
+// Optional match name. Becomes rally_clips.title for every clip cut from this
+// video, which is what the mobile app shows in its clip list.
+const matchTitle = ref('')
+// Capped so the name can't crowd out the filename or the Cancel button in the
+// progress header, or the clip metadata in the mobile list. Enforced twice:
+// maxlength on the input, and a slice on the value that reaches the DB.
+const MAX_TITLE_LENGTH = 60
 
 const allowedTypes = ['video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/webm']
 
@@ -55,6 +62,10 @@ function handleFileSelect(event: Event) {
   }
 }
 
+function normalizedTitle(): string | null {
+  return matchTitle.value.trim().slice(0, MAX_TITLE_LENGTH) || null
+}
+
 function validateAndSetFile(file: File) {
   if (!allowedTypes.includes(file.type)) {
     emit('error', `Invalid file type. Please upload a video file (MP4, MPEG, MOV, AVI, or WebM).`)
@@ -78,6 +89,8 @@ function validateAndSetFile(file: File) {
 }
 
 function removeFile() {
+  // Leave matchTitle alone — the name may already be typed and the user is
+  // only swapping in the right file.
   selectedFile.value = null
 }
 
@@ -104,6 +117,8 @@ async function uploadAndCreate(file: File): Promise<string> {
       storage_path: path,
       status: 'uploaded',
       pipeline_variant: pipelineVariant.value,
+      // null, never '' — the mobile app falls back to "Rally #N" on null.
+      title: normalizedTitle(),
     })
     .select()
     .single()
@@ -126,6 +141,7 @@ async function startUpload() {
       filename: file.name,
       size: file.size,
       status: 'uploaded',
+      title: normalizedTitle(),
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Upload failed'
@@ -187,6 +203,25 @@ async function startUpload() {
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
         </button>
+      </div>
+
+      <div class="match-title-field">
+        <label class="match-title-label" for="match-title-input">Match name</label>
+        <input
+          id="match-title-input"
+          v-model="matchTitle"
+          type="text"
+          class="match-title-input"
+          :maxlength="MAX_TITLE_LENGTH"
+          placeholder="e.g. Thu League vs Marco"
+          :disabled="isUploading"
+        />
+        <span class="match-title-hint">
+          Optional — shown on every rally clip in the mobile app.
+          <span class="match-title-count" :class="{ 'is-full': matchTitle.length >= MAX_TITLE_LENGTH }">
+            {{ matchTitle.length }}/{{ MAX_TITLE_LENGTH }}
+          </span>
+        </span>
       </div>
 
       <div class="pipeline-select">
@@ -351,6 +386,64 @@ async function startUpload() {
 .remove-btn:hover {
   background: var(--color-border);
   border-color: var(--color-error);
+}
+
+.match-title-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+  text-align: left;
+}
+
+.match-title-label {
+  font-weight: 600;
+  opacity: 0.75;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+}
+
+.match-title-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 0;
+  color: var(--color-text-heading);
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
+.match-title-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.match-title-input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.match-title-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.match-title-hint {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+}
+
+.match-title-count {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.match-title-count.is-full {
+  color: var(--color-accent);
 }
 
 .pipeline-select {

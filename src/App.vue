@@ -565,35 +565,24 @@ async function triggerDelayedSpeedCalculation() {
     if (analysisResult.value?.skeleton_data && timelineResponse.players) {
       console.log('[App] Updating skeleton_data with calculated speeds...')
       
-      // Maximum realistic speed threshold (km/h) - filter out tracking errors
-      // UNIFIED: Badminton players rarely exceed 25 km/h even in explosive movements
-      const MAX_VALID_SPEED_KMH = 25
-      
-      // Build a frame-to-speed lookup for each player
+      // No client-side speed filtering here either — the cap lives once in
+      // backend/speed_calc.py and is applied before these values are returned.
+      // Zeroing values above a duplicate local threshold also corrupted
+      // downstream aggregates: useAdvancedAnalytics.rallySpeedStats counts only
+      // non-zero current_speed, so a client-side zero silently dropped a
+      // player's fastest movements out of the per-rally stats.
       const playerSpeedsByFrame: Record<number, Record<number, number>> = {}
-      let filteredOutCount = 0
-      
+
       for (const [playerId, playerTimeline] of Object.entries(timelineResponse.players)) {
         const pid = parseInt(playerId)
         playerTimeline.frames.forEach((frameNum: number, idx: number) => {
           if (!playerSpeedsByFrame[frameNum]) {
             playerSpeedsByFrame[frameNum] = {}
           }
-          // Filter out unrealistic speeds (tracking errors, ID swaps)
-          const rawSpeed = playerTimeline.speeds_kmh[idx] ?? 0
-          if (rawSpeed > MAX_VALID_SPEED_KMH) {
-            filteredOutCount++
-            playerSpeedsByFrame[frameNum][pid] = 0 // Treat as stationary
-          } else {
-            playerSpeedsByFrame[frameNum][pid] = rawSpeed
-          }
+          playerSpeedsByFrame[frameNum][pid] = playerTimeline.speeds_kmh[idx] ?? 0
         })
       }
-      
-      if (filteredOutCount > 0) {
-        console.log(`[App] Filtered out ${filteredOutCount} unrealistic speed values (>${MAX_VALID_SPEED_KMH} km/h)`)
-      }
-      
+
       // Debug: Check frame lookup coverage
       const frameNumbers = Object.keys(playerSpeedsByFrame).map(Number)
       console.log(`[App] Frame speed lookup: ${frameNumbers.length} frames covered, ` +
@@ -641,31 +630,21 @@ async function triggerDelayedSpeedCalculation() {
       console.log('[App] Updating player summary statistics...')
       
       const statistics = speedResponse.speed_data.statistics
-      
-      // Maximum realistic speed threshold for statistics (km/h)
-      // UNIFIED with backend speed calculator (modal_supabase_processor.py)
-      const MAX_VALID_SPEED_KMH = 25
-      const REALISTIC_MAX_SPEED_KMH = 25  // Cap displayed max to realistic value
-      
+
+      // No client-side re-capping. The speed cap is enforced once, in
+      // backend/speed_calc.py (MAX_REALISTIC_SPEED_KMH), which both the Phase 2
+      // processing loop and `recalculate_speeds` now share. A duplicate
+      // threshold here used to silently clamp whatever the backend returned —
+      // which masked the fact that the two backend implementations disagreed
+      // (30.6 km/h vs 25 km/h caps). Display what was computed; if a number
+      // looks wrong, that is a backend bug worth seeing, not hiding.
       for (const player of analysisResult.value.players) {
         // Statistics are keyed by player_id as string
         const playerStats = statistics[String(player.player_id)]
         if (playerStats) {
-          // Update player metrics with calculated speeds (in km/h)
-          // Backend returns nested structure: { avg: { speed_kmh }, max: { speed_kmh }, total_distance_m }
-          const rawAvgSpeed = playerStats.avg?.speed_kmh ?? 0
-          const rawMaxSpeed = playerStats.max?.speed_kmh ?? 0
-          
-          // Filter out unrealistic values - if avg or max exceeds threshold,
-          // the data is corrupted by tracking errors
-          if (rawAvgSpeed > MAX_VALID_SPEED_KMH || rawMaxSpeed > MAX_VALID_SPEED_KMH) {
-            console.warn(`[App]   Player ${player.player_id}: Unrealistic speed detected (avg=${rawAvgSpeed.toFixed(1)}, max=${rawMaxSpeed.toFixed(1)}), capping to realistic values`)
-            player.avg_speed = Math.min(rawAvgSpeed, REALISTIC_MAX_SPEED_KMH)
-            player.max_speed = Math.min(rawMaxSpeed, REALISTIC_MAX_SPEED_KMH)
-          } else {
-            player.avg_speed = rawAvgSpeed
-            player.max_speed = rawMaxSpeed
-          }
+          // Nested shape: { avg: { speed_kmh }, max: { speed_kmh }, total_distance_m }
+          player.avg_speed = playerStats.avg?.speed_kmh ?? 0
+          player.max_speed = playerStats.max?.speed_kmh ?? 0
           player.total_distance = playerStats.total_distance_m ?? 0
           
           console.log(`[App]   Player ${player.player_id}: avg=${player.avg_speed.toFixed(1)} km/h, max=${player.max_speed.toFixed(1)} km/h, dist=${player.total_distance.toFixed(1)}m`)
@@ -863,15 +842,13 @@ async function handleCourtKeypointsSet(keypoints: ExtendedCourtKeypoints) {
       return
     }
 
-    // Backend API still uses 4-corner format for basic court detection
-    // Send the 4 corners for backward compatibility
-    const fourCornerFormat = {
-      top_left: keypoints.top_left,
-      top_right: keypoints.top_right,
-      bottom_right: keypoints.bottom_right,
-      bottom_left: keypoints.bottom_left
-    }
-    const response = await setManualCourtKeypoints(fourCornerFormat, videoId)
+    // Send the FULL 12-point set, not just the 4 corners. manual_court_keypoints
+    // is a jsonb column, so an update replaces the whole value — writing a
+    // 4-corner subset here would delete net_left/net_right, and the backend
+    // silently falls back to the video midline for court sides when those are
+    // missing. Player identity depends on the net line (players never switch
+    // sides within a video), so losing it degrades every per-player metric.
+    const response = await setManualCourtKeypoints(keypoints, videoId)
     console.log('[App] Manual keypoints set successfully:', response)
     // Show success feedback (optional)
     errorMessage.value = '' // Clear any previous error
@@ -890,23 +867,15 @@ async function handleKeypointsConfirmed(keypoints: ExtendedCourtKeypoints) {
     // Store locally for MiniCourt component
     manualCourtKeypoints.value = keypoints
 
-    // Backend API still uses 4-corner format for basic court detection
-    // Send the 4 corners to backend for homography calculation
-    const fourCornerFormat = {
-      top_left: keypoints.top_left,
-      top_right: keypoints.top_right,
-      bottom_right: keypoints.bottom_right,
-      bottom_left: keypoints.bottom_left
-    }
-
     const videoId = analysisResult.value?.video_id
     if (!videoId) {
       console.warn('[App] No video context for setting keypoints')
       return
     }
 
-    // Set keypoints on backend
-    await setManualCourtKeypoints(fourCornerFormat, videoId)
+    // Full 12-point set — see the note in handleCourtKeypointsSet. A 4-corner
+    // subset would drop net_left/net_right from the jsonb column.
+    await setManualCourtKeypoints(keypoints, videoId)
     console.log('[App] Manual keypoints sent to backend')
 
     // Clear zone analytics cache to force fresh recalculation
@@ -1112,7 +1081,7 @@ onMounted(async () => {
   if (urlVideoId && !uploadedVideo.value) {
     const { data: urlVideo } = await supabase
       .from('videos')
-      .select('id, filename, size, status, manual_court_keypoints')
+      .select('id, filename, title, size, status, manual_court_keypoints')
       .eq('id', urlVideoId)
       .single()
     if (urlVideo) {
@@ -1121,6 +1090,7 @@ onMounted(async () => {
         filename: urlVideo.filename,
         size: urlVideo.size,
         status: urlVideo.status,
+        title: urlVideo.title,
       }
       if (urlVideo.manual_court_keypoints) {
         manualCourtKeypoints.value = urlVideo.manual_court_keypoints as ExtendedCourtKeypoints
@@ -1431,6 +1401,7 @@ watch(videoSectionRef, () => {
           <CourtSetup
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
+            :title="uploadedVideo.title"
             @complete="handleCourtSetupComplete"
             @error="handleCourtSetupError"
           />
@@ -1442,6 +1413,7 @@ watch(videoSectionRef, () => {
           <AnalysisProgress
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
+            :title="uploadedVideo.title"
             :phase="'phase1'"
             @phase1-complete="handlePhase1Complete"
             @phase2-complete="handlePhase2Complete"
@@ -1468,6 +1440,7 @@ watch(videoSectionRef, () => {
           <AnalysisProgress
             :video-id="uploadedVideo.video_id"
             :filename="uploadedVideo.filename"
+            :title="uploadedVideo.title"
             :phase="'phase2'"
             @phase1-complete="handlePhase1Complete"
             @phase2-complete="handlePhase2Complete"

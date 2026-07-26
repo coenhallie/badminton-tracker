@@ -41,6 +41,7 @@ interface ProcessingLogRow {
 const props = defineProps<{
   videoId: string
   filename: string
+  title?: string | null
   phase?: 'phase1' | 'phase2'
 }>()
 
@@ -373,7 +374,8 @@ onMounted(() => {
           <polygon points="23 7 16 12 23 17 23 7" />
           <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
         </svg>
-        <span class="filename">{{ filename }}</span>
+        <span v-if="title" class="match-title" :title="title">{{ title }}</span>
+        <span class="filename" :title="filename">{{ filename }}</span>
       </div>
       <button
         v-if="status !== 'complete' && status !== 'error'"
@@ -522,28 +524,57 @@ onMounted(() => {
   margin-bottom: 24px;
 }
 
+/* min-width: 0 is what keeps a long match name from shoving Cancel out of the
+   card — without it the nowrap children force an intrinsic min width and this
+   flex item refuses to shrink. */
 .file-info {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
   color: var(--color-text-heading);
 }
 
 .file-info svg {
   width: 24px;
   height: 24px;
+  flex-shrink: 0;
   color: var(--color-accent);
 }
 
-.filename {
-  font-weight: 500;
-  max-width: 300px;
+.match-title {
+  font-weight: 600;
+  color: var(--color-text-heading);
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.filename {
+  font-weight: 500;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* With a match name present, the filename becomes secondary — visually, and in
+   the width fight: the large shrink factor makes it absorb effectively all of
+   the deficit, so the title only truncates once the filename hits its floor. */
+.match-title + .filename {
+  font-weight: 400;
+  color: var(--color-text-tertiary);
+  flex-shrink: 100;
+  min-width: 3rem;
+}
+
 .cancel-btn {
+  flex-shrink: 0;
   padding: 8px 16px;
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border-secondary);

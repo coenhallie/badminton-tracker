@@ -49,6 +49,9 @@ serve(async (req) => {
     id: newId,
     owner_id: user.id,
     filename: video.filename,
+    // Carry the match name onto the A/B sibling so both runs' clips stay
+    // identifiable on the phone.
+    title: video.title,
     size: video.size,
     storage_path: newPath,
     status: "uploaded",

@@ -1,7 +1,8 @@
 # Match Title — Design
 
 Date: 2026-07-25
-Status: Approved (brainstorming complete, ready for implementation plan)
+Status: Implemented. §3 and §7 were corrected after testing on device — see the
+addendum at the end before trusting the mobile claims in this document.
 
 ## 1. Problem
 
@@ -184,3 +185,43 @@ manual smoke (see the `no-test-framework` memory note).
   repo, and unnecessary once the title line is populated.
 - Naming the downloaded `.mp4` file itself; the issue reported was the in-app
   clip list, not files in Photos.
+
+## 8. Addendum (2026-07-25, after on-device testing)
+
+**§3's central claim was wrong.** It said no mobile change was needed because
+the app renders `rally_clips.title` per
+`docs/plans/2026-05-04-kmp-rally-clips-mobile-design.md` §5.2. That design doc
+no longer describes the shipped app. The app was rebuilt around a **two-level
+structure**:
+
+1. A **match list**, where clips are grouped by `video_id` into a `MatchSummary`
+   whose row label was hardcoded to `"Match · <date>"`. `MatchSummary` had no
+   title field, so `rally_clips.title` was never read here.
+2. A **rally list** inside each match, plus a clip detail screen — these *are*
+   the surfaces that render `clip.title ?? "Rally #N"`.
+
+Everything in §5 (schema, upload field, backend propagation, duplicate) is
+correct and unchanged. The title does reach the phone. It simply had nothing
+rendering it at the match level.
+
+Two consequences, both fixed in `badminton-rally-mobile`:
+
+- `MatchSummary` gained a `title`, derived from the **most common** non-null
+  title among the match's clips — not the cover clip's, so retitling one clip
+  in the app cannot relabel the whole match.
+- Because §4 chose "match name only", every clip carries the same title, which
+  would have made every rally row and clip-detail header read the match name
+  instead of "Rally #1", "Rally #2". The apps now suppress a clip title that
+  equals the match title and fall back to the rally number. `rally_index` is
+  1-based (`backend/rally_detection_shot_gap.py:141` writes `i + 1`), so rows
+  read "Rally #1" upward.
+
+The §4 "match name only" decision still stands — it was about the match row,
+which is exactly where the name now appears. Rally numbering inside a match was
+a surface that decision never covered.
+
+**Note:** `badminton-rally-mobile` has its own `supabase/migrations/` that also
+alters `public.videos` (e.g. `20260720000000_analyze_status_reset_grant.sql`).
+Two repos issue migrations against the same table with different naming schemes
+and no shared ordering. Out of scope here, but it is a real hazard — the §5.1
+reasoning about grants can be invalidated from the other repo without warning.
