@@ -45,16 +45,99 @@ MODELS_PATH = "/models"
 
 
 # --- Rally clip generation ----------------------------------------------------
-# Cut the source video into per-rally MP4 clips using ffmpeg stream copy
-# (no re-encode), upload each to the 'clips' bucket, and insert a rally_clips
-# row. Idempotent via UNIQUE (video_id, rally_index).
+# Cut the source video into per-rally MP4 clips with a frame-accurate ffmpeg
+# re-encode, upload each to the 'clips' bucket, and upsert a rally_clips row.
+# Idempotent via UNIQUE (video_id, rally_index).
+
+# Clip padding. Detected rally bounds are first-shot → last-shot CONTACT, and
+# both ends cut off footage the viewer needs:
+#   * a serve is not a shuttle direction reversal (static → moving keeps
+#     dot > 0), so the first shot the detector fires on is the RETURN of
+#     serve — the serve itself is always outside the detected window;
+#   * the window ends at the last racket contact, so the shuttle is still
+#     airborne and the outcome (in/out, winner) is never on screen.
+# Padding is applied at CUT time only: the rally bounds in results.json stay
+# the raw analytical window, so player/shot metrics are unaffected. The
+# rally_clips row stores the PADDED bounds, because those describe the clip
+# file the apps actually play (its duration and seek offsets).
+CLIP_PRE_ROLL_S = 2.0
+CLIP_POST_ROLL_S = 1.5
+
+
+def probe_video_duration(video_path: str) -> Optional[float]:
+    """Source duration in seconds via ffprobe, or None if it can't be read.
+
+    Used only to clamp post-roll; ffmpeg itself stops cleanly at EOF, so a
+    None here costs nothing but a possibly-optimistic end_timestamp in the DB.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1",
+                video_path,
+            ],
+            check=True, capture_output=True, timeout=30,
+        )
+        return float(out.stdout.decode().strip())
+    except Exception as e:
+        print(f"[MODAL] ffprobe duration probe failed ({e}); post-roll unclamped")
+        return None
+
+
+def pad_rally_windows(
+    rallies: list,
+    video_duration: Optional[float] = None,
+    pre_roll: float = CLIP_PRE_ROLL_S,
+    post_roll: float = CLIP_POST_ROLL_S,
+) -> list:
+    """Add `clip_start`/`clip_end` to each rally: the detected window widened
+    by pre/post roll.
+
+    Padding may only consume the dead air BETWEEN rallies — it never reaches
+    into a neighbour's detected window, so no two clips duplicate rally
+    footage. It also never shrinks a window below what was detected (relevant
+    when the incoming rallies themselves overlap), and is clamped to
+    [0, video_duration].
+
+    Returns a new list sorted by start_timestamp; input dicts are not mutated.
+    """
+    ordered = sorted(rallies, key=lambda r: r["start_timestamp"])
+    padded = []
+    for i, rally in enumerate(ordered):
+        start = float(rally["start_timestamp"])
+        end = float(rally["end_timestamp"])
+
+        clip_start = start - pre_roll
+        clip_end = end + post_roll
+
+        if i > 0:
+            clip_start = max(clip_start, float(ordered[i - 1]["end_timestamp"]))
+        if i + 1 < len(ordered):
+            clip_end = min(clip_end, float(ordered[i + 1]["start_timestamp"]))
+
+        # Never shrink the detected window, then clamp to the real video.
+        clip_start = max(0.0, min(clip_start, start))
+        clip_end = max(clip_end, end)
+        if video_duration and video_duration > 0:
+            clip_end = min(clip_end, video_duration)
+
+        padded.append({**rally, "clip_start": clip_start, "clip_end": clip_end})
+    return padded
+
 
 def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, owner_id: str):
     """
-    For each detected rally, cut the source video using ffmpeg `-c copy`
-    (stream copy — fast, no quality loss, cuts on nearest keyframe so clips
-    may start up to ~2s before the requested timestamp), upload to the
-    'clips' Supabase Storage bucket, and upsert a rally_clips DB row.
+    For each detected rally, cut the source video with a frame-accurate
+    libx264 re-encode, upload to the 'clips' Supabase Storage bucket, and
+    upsert a rally_clips DB row.
+
+    Each cut covers the rally window widened by CLIP_PRE_ROLL_S /
+    CLIP_POST_ROLL_S (see `pad_rally_windows`) so the serve and the shuttle's
+    landing are inside the clip.
 
     A single bad rally (e.g., end_timestamp past actual video duration) logs
     a warning and continues — partial success is acceptable.
@@ -63,10 +146,29 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
 
     sb = supabase_client()
 
-    for rally in rallies:
+    # User-supplied match name, set once at upload. Copied onto every clip so
+    # the mobile app's clip list identifies the match instead of falling back
+    # to "Rally #{index}". Fetched here rather than passed in, to avoid
+    # threading a new argument through both call sites. Best-effort: a failure
+    # just means clips keep the old generic label.
+    try:
+        _row = sb.table("videos").select("title").eq("id", video_id).single().execute()
+        match_title = (_row.data or {}).get("title")
+    except Exception:
+        match_title = None
+
+    padded = pad_rally_windows(rallies, video_duration=probe_video_duration(video_path))
+
+    for rally in padded:
         rally_id = rally.get("id")
         if rally_id is None:
             continue
+        clip_start = rally["clip_start"]
+        clip_end = rally["clip_end"]
+        # Offset of the first detected shot within the clip — where the
+        # thumbnail should be grabbed, so it shows play rather than the
+        # pre-serve pause the pre-roll adds.
+        shot_offset = max(0.5, float(rally["start_timestamp"]) - clip_start)
         clip_local = f"/cache/{video_id}_rally_{rally_id}.mp4"
         try:
             # Frame-accurate re-encode (libx264 ultrafast). The -ss BEFORE -i
@@ -75,11 +177,15 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
             # timestamp. Roughly 10-15s per clip on A10G; ~50x slower than
             # `-c copy` but produces clips with exact rally boundaries
             # instead of keyframe-aligned ones.
+            # NOTE: as INPUT options (before -i), -ss and -to are both
+            # absolute positions in the source timeline, so -to is the cut's
+            # end — not a duration relative to -ss. Verified against the
+            # image's ffmpeg; do not reorder these past -i.
             subprocess.run(
                 [
                     "ffmpeg", "-y",
-                    "-ss", str(rally["start_timestamp"]),
-                    "-to", str(rally["end_timestamp"]),
+                    "-ss", str(clip_start),
+                    "-to", str(clip_end),
                     "-i", video_path,
                     "-c:v", "libx264",
                     "-preset", "ultrafast",
@@ -129,7 +235,7 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
                 subprocess.run(
                     [
                         "ffmpeg", "-y",
-                        "-ss", "0.5",
+                        "-ss", str(shot_offset),
                         "-i", clip_local,
                         "-vframes", "1",
                         "-vf", "scale=480:-1",
@@ -171,16 +277,30 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
                 except OSError:
                     pass
 
+            # Padded bounds: these describe the clip file, so the apps' seek
+            # offsets and displayed duration match what plays. The unpadded
+            # analytical window stays in results.json's `rallies`.
             sb.table("rally_clips").upsert({
                 "video_id":               video_id,
                 "owner_id":               owner_id,
                 "rally_index":            rally_id,
-                "start_timestamp":        rally["start_timestamp"],
-                "end_timestamp":          rally["end_timestamp"],
-                "duration_seconds":       rally["duration_seconds"],
+                "start_timestamp":        clip_start,
+                "end_timestamp":          clip_end,
+                "duration_seconds":       clip_end - clip_start,
                 "clip_storage_path":      storage_path,
                 "thumbnail_storage_path": thumb_storage_path,
             }, on_conflict="video_id,rally_index").execute()
+
+            # Stamp the match name, but only where the user hasn't set one.
+            # 0004 grants authenticated UPDATE on rally_clips.title, so a clip
+            # may have been renamed from the phone; putting title in the upsert
+            # payload above would wipe that edit on every re-cut.
+            if match_title:
+                sb.table("rally_clips").update({"title": match_title}) \
+                    .eq("video_id", video_id) \
+                    .eq("rally_index", rally_id) \
+                    .is_("title", "null") \
+                    .execute()
         except Exception as e:
             try:
                 sb.table("processing_logs").insert({
@@ -198,6 +318,111 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
                     os.remove(clip_local)
             except OSError:
                 pass
+
+
+def delete_stale_rally_clips(video_id: str, keep_count: int):
+    """Delete rally_clips rows (plus their storage objects and annotations)
+    with rally_index > keep_count. Needed after a re-cut that produced fewer
+    rallies than an earlier cut for the same video — upsert alone would
+    leave the old higher-numbered clips visible in the apps."""
+    sb = supabase_client()
+    stale = (
+        sb.table("rally_clips")
+        .select("id,clip_storage_path,thumbnail_storage_path")
+        .eq("video_id", video_id)
+        .gt("rally_index", keep_count)
+        .execute()
+    ).data or []
+    if not stale:
+        return 0
+
+    clip_paths = [r["clip_storage_path"] for r in stale if r.get("clip_storage_path")]
+    thumb_paths = [r["thumbnail_storage_path"] for r in stale if r.get("thumbnail_storage_path")]
+    try:
+        if clip_paths:
+            sb.storage.from_("clips").remove(clip_paths)
+        if thumb_paths:
+            sb.storage.from_("thumbnails").remove(thumb_paths)
+    except Exception as e:
+        # Orphaned storage objects are invisible to the apps (they read the
+        # DB rows); don't let storage hiccups block the row cleanup.
+        print(f"[MODAL] stale clip storage removal failed: {e}")
+
+    clip_ids = [r["id"] for r in stale]
+    try:
+        sb.table("rally_annotations").delete().in_("clip_id", clip_ids).execute()
+    except Exception as e:
+        print(f"[MODAL] stale clip annotation cleanup failed: {e}")
+    sb.table("rally_clips").delete().eq("video_id", video_id).gt(
+        "rally_index", keep_count
+    ).execute()
+    return len(stale)
+
+
+DEFAULT_FPS = 30.0
+
+
+def normalize_fps(value: Any, default: float = DEFAULT_FPS) -> Tuple[float, bool]:
+    """Coerce a probed frame rate to something usable.
+
+    Returns `(fps, was_substituted)`.
+
+    OpenCV's CAP_PROP_FPS returns 0 for some containers and variable-frame-rate
+    sources. An unclamped 0 is quietly destructive in two different ways:
+    every rally detector bails on its `fps <= 0` guard (so no rallies and no
+    clips, while the web app's `result.fps || 30` still renders a client-side
+    timeline), and the Phase 2 speed loop divides by it.
+    """
+    try:
+        fps = float(value)
+    except (TypeError, ValueError):
+        return default, True
+    if not math.isfinite(fps) or fps <= 0:
+        return default, True
+    return fps, False
+
+
+def valid_net_line(
+    nl: Optional[Tuple[float, float]],
+    nr: Optional[Tuple[float, float]],
+    width: float = 0.0,
+    height: float = 0.0,
+) -> bool:
+    """Is this pair of net endpoints usable as a court-side divider?
+
+    Requires two distinct, in-frame points with enough horizontal separation
+    for the y-at-x interpolation in `PlayerIdentityTracker._get_court_side`
+    to be well-conditioned.
+
+    Today's only writer of manual_court_keypoints (CourtSetup.vue) requires
+    all 12 keypoints, so real placements always pass. This guard exists
+    because a degenerate line fails SILENTLY and catastrophically rather than
+    loudly: `_get_court_side` skips interpolation when dx == 0 and compares
+    against `court_midline_y`, which for (0,0)/(0,0) endpoints is 0 — so every
+    position in the frame classifies as "bottom". That single condition
+    disables the heaviest term in the assignment cost matrix, swap detection,
+    and single-visible-player re-acquisition all at once, while the startup log
+    still reports "manual net keypoints".
+    """
+    if nl is None or nr is None:
+        return False
+    for pt in (nl, nr):
+        for v in pt:
+            if not math.isfinite(v) or v < 0:
+                return False
+    # Both endpoints at the origin is the classic "unplaced keypoint" payload.
+    if nl[0] == 0 and nl[1] == 0 and nr[0] == 0 and nr[1] == 0:
+        return False
+    # The net spans the court's width, so its endpoints must be meaningfully
+    # separated horizontally. 1% of frame width, floored at 2px for tiny inputs.
+    min_dx = max(2.0, 0.01 * width) if width > 0 else 2.0
+    if abs(nr[0] - nl[0]) < min_dx:
+        return False
+    if width > 0 and (nl[0] > width or nr[0] > width):
+        return False
+    if height > 0 and (nl[1] > height or nr[1] > height):
+        return False
+    return True
 
 
 def compute_homography_matrix(corners, court_width=6.1, court_length=13.4):
@@ -1049,16 +1274,29 @@ class PlayerIdentityTracker:
     """
     Maintains consistent player_id ↔ skeleton mapping throughout a video session.
 
+    Rests on the FIXED-SIDES INVARIANT: an uploaded video is always exactly one
+    badminton game, so each player stays on one side of the net for its whole
+    duration. Court side is therefore ground truth for identity, not a hint.
+
     Design principles:
     1. CALIBRATION PHASE: First frame locks initial assignment by Y-sort,
-       subsequent calibration frames use track-ID continuity (no re-sorting)
-    2. VELOCITY PREDICTION: Predict expected position using exponential moving average
-    3. COMPOSITE COST MATCHING: Combine distance, velocity, court-side, area,
-       track-ID, and assignment-stickiness costs
-    4. MAJORITY-VOTE SMOOTHING: Only switch assignment when the new mapping
-       dominates a sliding window (prevents single-frame flicker)
-    5. SWAP DETECTION: Detect when both assignments violate court-side consistency
-    6. SWAP CORRECTION: Re-associate when swap confirmed over 2 consecutive frames
+       subsequent calibration frames use track-ID continuity (no re-sorting).
+       Completion guarantees the two players hold DIFFERENT sides.
+    2. HARD SIDE CONSTRAINT: after calibration a skeleton may only be assigned
+       to the player who owns its side of the net. Each player is therefore
+       chosen from its own disjoint candidate set, so the two assignments cannot
+       trade places — a swap is not something to detect and repair, it is
+       structurally impossible. A narrow NET_BAND_PX hysteresis band around the
+       net keeps tight net play from dropping frames.
+    3. VELOCITY PREDICTION: Predict expected position using an exponential
+       moving average.
+    4. COMPOSITE COST MATCHING: distance, velocity, area, track-ID and
+       stickiness costs break ties WITHIN a player's own side.
+
+    Superseded by principle 2 and deliberately removed: majority-vote smoothing
+    over a sliding window, and swap detection/correction. Both existed to damp
+    or repair assignment flips that the hard constraint cannot produce. See
+    docs/2026-07-25-metric-pipeline-audit.md.
 
     Convention:
     - Player 0 = top of video (far side of court, smaller Y)
@@ -1103,6 +1341,11 @@ class PlayerIdentityTracker:
 
         # Calibration parameters
         self.CALIBRATION_FRAMES = 15  # Frames to establish baseline
+        # Upper bound on extending calibration while both players still resolve
+        # to the same court side (see _run_calibration). 300 frames = 10s at
+        # 30fps — long enough to outlast a warm-up or a walk-on, short enough
+        # that the fallback still leaves most of the video calibrated.
+        self.CALIBRATION_MAX_FRAMES = 300
         self.calibration_observations: Dict[int, List[Tuple[float, float]]] = {0: [], 1: []}
         self.calibration_complete = False
         self.calibration_initial_locked = False  # True after first 2-player frame locks assignment
@@ -1114,33 +1357,41 @@ class PlayerIdentityTracker:
         self.MAX_MATCH_DISTANCE = 250.0  # Max pixels for valid match
         self.AREA_SMOOTHING = 0.1  # EMA alpha for area
 
-        # Swap detection parameters. Raised 2→6 (≈0.2 s @ 30 fps) to avoid
-        # firing on brief glitches: a jump/dive that briefly puts a player on
-        # the wrong side of the net, a 1-2 frame pose-keypoint failure, or a
-        # transient skeleton-index reordering. Real swaps (players actually
-        # trading halves) always persist well past 0.2 s, so raising the
-        # threshold reduces oscillation without missing real events.
-        self.SWAP_CONSECUTIVE_THRESHOLD = 6
-        self.swap_violation_count = 0  # Running count of consecutive court-side violations
-        self.total_swaps_corrected = 0
+        # Hysteresis band around the net line, in pixels. A skeleton whose feet
+        # fall inside this band is treated as claimable by EITHER player rather
+        # than being excluded by the hard side constraint below — otherwise
+        # tight net play, where a lunging front foot can cross the net line by a
+        # few pixels, would drop frames. Scales with resolution.
+        self.NET_BAND_PX = max(8.0, 0.01 * max(video_width, video_height))
 
-        # Cost weights for composite matching
+        # Diagnostics. Two distinct things, deliberately NOT merged:
+        #
+        #   frames_unsplittable — 2+ skeletons were available but could not be
+        #     split one-per-side, so a player was left unassigned. This is the
+        #     failure mode the hard side constraint newly introduces, and the
+        #     measurement that sizes NET_BAND_PX. Should be near zero.
+        #   frames_single_skeleton — only one skeleton existed at all, so the
+        #     second player was never assignable. Upstream pose coverage, not an
+        #     identity problem, and common on real footage (pose routinely drops
+        #     the far player). Counting these in the same bucket would drown the
+        #     signal above in normal noise.
+        self.frames_unsplittable = 0
+        self.frames_single_skeleton = 0
+
+        # Cost weights for composite matching. These now only break ties WITHIN
+        # a player's own side of the net — the side itself is a hard constraint,
+        # not a weighted term (see match_skeletons).
         self.W_DISTANCE = 1.0       # Weight for Euclidean distance cost
         self.W_VELOCITY = 0.6       # Weight for velocity-predicted distance
-        self.W_COURT_SIDE = 0.8     # Weight for court-side consistency
+        self.W_COURT_SIDE = 0.8     # Only discriminates inside NET_BAND_PX now
         self.W_AREA = 0.2           # Weight for bbox area similarity
         self.W_TRACK_ID = 0.15      # Weight for YOLO track ID continuity (low — far player IDs are unreliable)
         self.W_STICKINESS = 0.5     # Weight for keeping same assignment as previous frame (hysteresis)
 
         # Previous-frame assignment map: skeleton_index -> player_id
-        # Used for stickiness cost and majority-vote smoothing
+        # Used for the stickiness cost term.
         self.prev_assignment: Dict[int, int] = {}  # skel_idx -> pid last frame
         self.prev_skel_centers: List[Tuple[float, float]] = []  # centres from previous frame
-
-        # Majority-vote sliding window: list of recent assignment tuples
-        # Each entry is a tuple of (pid_for_skel0, pid_for_skel1) — the "raw" best assignment
-        self.VOTE_WINDOW_SIZE = 5
-        self.assignment_vote_history: List[Tuple[int, int]] = []  # (pid_for_skel0, pid_for_skel1)
     
     def _predict_position(self, player_id: int) -> Optional[Tuple[float, float]]:
         """
@@ -1198,17 +1449,45 @@ class PlayerIdentityTracker:
         so tilted-camera frames correctly identify which side of the NET a
         player is on — not which side of the arbitrary pixel midline.
         """
-        if self.net_line is not None and x is not None:
+        if x is not None:
+            return "top" if y < self._net_y_at(x) else "bottom"
+        return "top" if y < self.court_midline_y else "bottom"
+    
+    def _net_y_at(self, x: float) -> float:
+        """The net line's y at a given x, or the fallback midline."""
+        if self.net_line is not None:
             x0, y0, x1, y1 = self.net_line
             dx = x1 - x0
             if abs(dx) > 1e-6:
-                # Linear interp of net line at this x, extrapolated when the
-                # player is outside the net's x-range.
-                t = (x - x0) / dx
-                net_y = y0 + t * (y1 - y0)
-                return "top" if y < net_y else "bottom"
-        return "top" if y < self.court_midline_y else "bottom"
-    
+                return y0 + ((x - x0) / dx) * (y1 - y0)
+        return self.court_midline_y
+
+    def _in_net_band(self, y: float, x: float) -> bool:
+        """Is this point close enough to the net that its side is ambiguous?
+
+        Inside the band the hard side constraint is relaxed so a lunging front
+        foot crossing the net line by a few pixels does not cost a frame.
+        """
+        return abs(y - self._net_y_at(x)) <= self.NET_BAND_PX
+
+    def _claimable_skeletons(
+        self, player_id: int, skeletons: List[Dict]
+    ) -> List[int]:
+        """Indices of skeletons this player is allowed to be assigned to.
+
+        The hard constraint: a skeleton belongs to the player who owns its side
+        of the net. Because the two players hold different sides (guaranteed by
+        _run_calibration), the two candidate lists are disjoint except inside
+        the net band — which is what makes swaps structurally impossible.
+        """
+        expected = self.court_sides[player_id]
+        out: List[int] = []
+        for idx, skel in enumerate(skeletons):
+            sx, sy = skel["center"]
+            if self._get_court_side(sy, sx) == expected or self._in_net_band(sy, sx):
+                out.append(idx)
+        return out
+
     def _compute_assignment_cost(
         self,
         player_id: int,
@@ -1361,162 +1640,54 @@ class PlayerIdentityTracker:
 
         # Check if calibration is complete
         if self.frames_processed >= self.CALIBRATION_FRAMES:
-            for pid in [0, 1]:
-                if self.calibration_observations[pid]:
-                    obs = self.calibration_observations[pid]
-                    avg_y = sum(o[1] for o in obs) / len(obs)
-                    avg_x = sum(o[0] for o in obs) / len(obs)
-                    self.court_sides[pid] = self._get_court_side(avg_y, avg_x)
-                    self.calibrated[pid] = True
+            obs = {pid: self.calibration_observations[pid] for pid in (0, 1)}
+            if not (obs[0] and obs[1]):
+                # A side can only be locked once both players have been seen.
+                # Keep collecting rather than half-calibrating.
+                return
 
-            # Refine court midline based on observed positions
-            if self.calibration_observations[0] and self.calibration_observations[1]:
-                avg_y_top = sum(o[1] for o in self.calibration_observations[0]) / len(self.calibration_observations[0])
-                avg_y_bot = sum(o[1] for o in self.calibration_observations[1]) / len(self.calibration_observations[1])
-                self.court_midline_y = (avg_y_top + avg_y_bot) / 2.0
+            avg_y = {pid: sum(o[1] for o in obs[pid]) / len(obs[pid]) for pid in (0, 1)}
+            avg_x = {pid: sum(o[0] for o in obs[pid]) / len(obs[pid]) for pid in (0, 1)}
+
+            # Refine the fallback midline BEFORE deriving sides from it.
+            # This ordering is load-bearing: it used to run *after* the
+            # assignment below, so both players were classified against the raw
+            # pixel centre and could land on the same side — and the refinement
+            # then cemented that state for the rest of the video. Placing the
+            # midline midway between the two observed players makes opposite
+            # sides automatic whenever no net line is available.
+            self.court_midline_y = (avg_y[0] + avg_y[1]) / 2.0
+
+            sides = {pid: self._get_court_side(avg_y[pid], avg_x[pid]) for pid in (0, 1)}
+
+            if sides[0] == sides[1]:
+                # Both players resolved to the same side. With a real net line
+                # this means the calibration window is unrepresentative — a
+                # warm-up, players walking on, one player fetching the shuttle —
+                # not a geometry error. Keep collecting and re-evaluate.
+                if self.frames_processed < self.CALIBRATION_MAX_FRAMES:
+                    return
+
+                # Waited long enough: the net line is empirically contradicted
+                # for this clip, so drop it and split by relative position,
+                # which cannot yield equal sides. Keeping the net line here
+                # would lock an assignment that live classification then
+                # disagrees with on every frame.
+                print(
+                    "[TRACKER] Both players stayed on one side of the net line for "
+                    f"{self.frames_processed} frames; ignoring the net line and "
+                    "splitting players by relative position"
+                )
+                self.net_line = None
+                top_pid = 0 if avg_y[0] <= avg_y[1] else 1
+                sides = {top_pid: "top", 1 - top_pid: "bottom"}
+
+            for pid in (0, 1):
+                self.court_sides[pid] = sides[pid]
+                self.calibrated[pid] = True
 
             self.calibration_complete = True
     
-    def _detect_and_correct_swap(self, assignments: List[Tuple[int, int]],
-                                  skeletons: List[Dict]) -> List[Tuple[int, int]]:
-        """
-        Detect if a swap has occurred by checking court-side consistency.
-        If both players are on wrong sides, swap their assignments.
-        
-        Args:
-            assignments: List of (player_id, skeleton_index) tuples
-            skeletons: The active skeletons list
-            
-        Returns:
-            Corrected assignments list
-        """
-        if not self.calibration_complete or len(assignments) != 2:
-            return assignments
-        
-        # Check if both assignments violate court-side expectations
-        violations = 0
-        for pid, skel_idx in assignments:
-            if skel_idx < len(skeletons):
-                skel_x, skel_y = skeletons[skel_idx]["center"]
-                actual_side = self._get_court_side(skel_y, skel_x)
-                expected_side = self.court_sides[pid]
-                if actual_side != expected_side:
-                    violations += 1
-        
-        if violations == 2:
-            # Both players on wrong sides - this is a swap!
-            self.swap_violation_count += 1
-            
-            if self.swap_violation_count >= self.SWAP_CONSECUTIVE_THRESHOLD:
-                # Confirmed swap - correct it by swapping the assignments
-                corrected = [(assignments[1][0], assignments[0][1]),
-                             (assignments[0][0], assignments[1][1])]
-                self.swap_violation_count = 0
-                self.total_swaps_corrected += 1
-                # Exchange every piece of per-player state that we keep
-                # history for, so the next frame's cost matrix reasons
-                # about the CORRECT player for pid 0 / pid 1. Without this
-                # exchange, positions[0] still points to the other player's
-                # trajectory and the cost matrix immediately wants to re-swap,
-                # producing frame-to-frame oscillation in the player labels.
-                # Court_sides[pid] stays fixed — those are the canonical
-                # identity anchors we're correcting _towards_.
-                self.positions[0], self.positions[1] = (
-                    self.positions[1], self.positions[0]
-                )
-                self.velocities[0], self.velocities[1] = (
-                    self.velocities[1], self.velocities[0]
-                )
-                self.avg_areas[0], self.avg_areas[1] = (
-                    self.avg_areas[1], self.avg_areas[0]
-                )
-                if 0 in self.last_track_ids or 1 in self.last_track_ids:
-                    t0 = self.last_track_ids.get(0)
-                    t1 = self.last_track_ids.get(1)
-                    if t0 is not None:
-                        self.last_track_ids[1] = t0
-                    else:
-                        self.last_track_ids.pop(1, None)
-                    if t1 is not None:
-                        self.last_track_ids[0] = t1
-                    else:
-                        self.last_track_ids.pop(0, None)
-                print(f"[TRACKER] Swap detected and corrected at frame {self.frames_processed} "
-                      f"(total corrections: {self.total_swaps_corrected})")
-                return corrected
-        elif violations == 0:
-            # No violations - reset the counter
-            self.swap_violation_count = 0
-        # Single violation (1) might be temporary - don't reset but don't correct
-        
-        return assignments
-    
-    def _apply_majority_vote(self, raw_assignments: List[Tuple[int, int]],
-                             active_skeletons: List[Dict]) -> List[Tuple[int, int]]:
-        """
-        Majority-vote smoothing over a sliding window of recent assignments.
-        Prevents single-frame cost fluctuations from flipping the assignment.
-
-        We represent each assignment as a canonical tuple:
-          (pid_assigned_to_skel0, pid_assigned_to_skel1)
-        and pick whichever mapping appeared most often in the last VOTE_WINDOW_SIZE frames.
-        """
-        if len(raw_assignments) != 2 or len(active_skeletons) < 2:
-            return raw_assignments
-
-        # Build the current mapping tuple
-        # Match each skeleton to a previous-frame skeleton by proximity so
-        # "skel 0" / "skel 1" labels are spatially consistent across frames
-        skel_centers = [s["center"] for s in active_skeletons[:2]]
-
-        # Map current skel indices to "canonical" slots via proximity to
-        # the first two prev_skel_centers (if available)
-        if len(self.prev_skel_centers) >= 2:
-            # Compute which ordering of current skeletons best matches
-            # the previous frame's skeleton positions
-            d00 = ((skel_centers[0][0] - self.prev_skel_centers[0][0])**2 +
-                    (skel_centers[0][1] - self.prev_skel_centers[0][1])**2)
-            d01 = ((skel_centers[0][0] - self.prev_skel_centers[1][0])**2 +
-                    (skel_centers[0][1] - self.prev_skel_centers[1][1])**2)
-            swapped_order = d01 < d00  # current skel 0 is closer to prev skel 1
-        else:
-            swapped_order = False
-
-        # Build mapping: canonical_slot -> pid
-        slot_to_pid: Dict[int, int] = {}
-        for pid, skel_idx in raw_assignments:
-            canonical_slot = skel_idx
-            if swapped_order:
-                canonical_slot = 1 - skel_idx if skel_idx < 2 else skel_idx
-            slot_to_pid[canonical_slot] = pid
-
-        vote_tuple = (slot_to_pid.get(0, 0), slot_to_pid.get(1, 1))
-
-        # Append to history
-        self.assignment_vote_history.append(vote_tuple)
-        if len(self.assignment_vote_history) > self.VOTE_WINDOW_SIZE:
-            self.assignment_vote_history.pop(0)
-
-        # Count votes
-        from collections import Counter
-        counts = Counter(self.assignment_vote_history)
-        winner = counts.most_common(1)[0][0]
-
-        # If majority agrees with raw, keep raw. Otherwise override.
-        if winner == vote_tuple:
-            return raw_assignments
-
-        # Reconstruct assignments from winner tuple, undoing the canonical swap
-        result_slot_to_pid = {0: winner[0], 1: winner[1]}
-        corrected = []
-        for canonical_slot, pid in result_slot_to_pid.items():
-            skel_idx = canonical_slot
-            if swapped_order:
-                skel_idx = 1 - canonical_slot if canonical_slot < 2 else canonical_slot
-            corrected.append((pid, skel_idx))
-
-        return corrected
-
     def match_skeletons(
         self,
         active_skeletons: List[Dict],
@@ -1525,10 +1696,13 @@ class PlayerIdentityTracker:
         """
         Main entry point: match active skeletons to player IDs.
 
-        Returns list of (player_id, keypoints, confidences) tuples.
-        Uses composite cost matching with velocity prediction, court-side priors,
-        swap detection/correction, YOLO track ID continuity, assignment stickiness,
-        and majority-vote smoothing.
+        Returns list of (player_id, keypoints, confidences) tuples. May return
+        fewer than 2 entries — a player with no claimable skeleton on its side is
+        left unassigned rather than guessed at.
+
+        Post-calibration, court side is a HARD constraint; the composite cost
+        (distance, velocity, area, track-ID, stickiness) only breaks ties within
+        a player's own side.
         """
         self.frames_processed = frame_number
 
@@ -1570,105 +1744,60 @@ class PlayerIdentityTracker:
 
             return result
 
-        # --- MAIN MATCHING (post-calibration) ---
-        n_skeletons = len(active_skeletons)
+        # --- MAIN MATCHING (post-calibration): HARD SIDE CONSTRAINT ---
+        # Each player may only be assigned a skeleton on its own side of the net
+        # (plus the narrow NET_BAND_PX ambiguity band). The two candidate sets
+        # are therefore disjoint outside that band, so no ordering of costs can
+        # make the players trade places. This replaces the old global 2xN
+        # assignment plus majority-vote smoothing plus swap detection/correction:
+        # a swap is not detected and repaired, it cannot be represented.
+        cost_matrix = [
+            [
+                self._compute_assignment_cost(pid, skel, skel["center"], skeleton_index=skel_idx)
+                for skel_idx, skel in enumerate(active_skeletons)
+            ]
+            for pid in range(2)
+        ]
 
-        if n_skeletons == 1:
-            # Only one skeleton visible. Assign ONLY when we have a
-            # high-confidence signal:
-            #   1. Court side — once calibrated, each player is locked to
-            #      a side of the net. A visible skeleton's side is a
-            #      deterministic signal that does not drift with missed
-            #      detections.
-            #   2. YOLO26 track_id continuity — the tracker's own id says
-            #      "this is the same object we were following".
-            # If neither applies, return [] so the pid is not set on the
-            # emitted bbox. The frontend renders it as unassigned rather
-            # than showing a confidently-wrong label.
-            skel = active_skeletons[0]
-            center = skel["center"]
-            sx, sy = center
-            skel_tid = skel.get("track_id", -1)
+        candidates = {pid: self._claimable_skeletons(pid, active_skeletons) for pid in (0, 1)}
 
-            pid: Optional[int] = None
+        # Prefer placing BOTH players: cheapest pair of distinct skeletons drawn
+        # from their respective candidate sets.
+        assignments: List[Tuple[int, int]] = []
+        best_pair_cost = float("inf")
+        for i in candidates[0]:
+            for j in candidates[1]:
+                if i == j:
+                    continue  # only reachable inside the net band
+                pair_cost = cost_matrix[0][i] + cost_matrix[1][j]
+                if pair_cost < best_pair_cost:
+                    best_pair_cost = pair_cost
+                    assignments = [(0, i), (1, j)]
 
-            if self.calibration_complete:
-                actual_side = self._get_court_side(sy, sx)
-                for candidate_pid in (0, 1):
-                    if (self.calibrated[candidate_pid]
-                            and self.court_sides[candidate_pid] == actual_side):
-                        pid = candidate_pid
-                        break
-
-            if pid is None and skel_tid >= 0:
-                for candidate_pid, last_tid in self.last_track_ids.items():
-                    if last_tid == skel_tid:
-                        pid = candidate_pid
-                        break
-
-            if pid is None:
-                # No confident assignment. Don't guess — don't update
-                # state either, since a wrong assignment would pollute
-                # last_track_ids and court_sides for later frames.
-                return []
-
-            # Update state
-            self._update_velocity(pid, center[0], center[1])
-            self._add_position(pid, center[0], center[1], frame_number)
-            self._update_area(pid, skel.get("area", 0))
-            if skel.get("track_id", -1) >= 0:
-                self.last_track_ids[pid] = skel["track_id"]
-
-            # Update prev state
-            self.prev_skel_centers = [center]
-            self.prev_assignment = {0: pid}
-
-            return [(pid, skel["kpts"], skel.get("conf"))]
-
-        # Two or more skeletons: compute cost matrix and find optimal assignment
-        # Build 2 x N cost matrix (2 players, N skeletons)
-        cost_matrix = []
-        for pid in range(2):
-            row = []
-            for skel_idx, skel in enumerate(active_skeletons):
-                cost = self._compute_assignment_cost(pid, skel, skel["center"], skeleton_index=skel_idx)
-                row.append(cost)
-            cost_matrix.append(row)
-
-        # Solve assignment (exhaustive for 2-player case)
-        assignments = []  # List of (player_id, skeleton_index)
-
-        if n_skeletons >= 2:
-            if n_skeletons > 2:
-                # Evaluate all pairs
-                best_pair = None
-                best_pair_cost = float("inf")
-                for i in range(n_skeletons):
-                    for j in range(n_skeletons):
-                        if i == j:
-                            continue
-                        pair_cost = cost_matrix[0][i] + cost_matrix[1][j]
-                        if pair_cost < best_pair_cost:
-                            best_pair_cost = pair_cost
-                            best_pair = (i, j)
-
-                if best_pair:
-                    assignments = [(0, best_pair[0]), (1, best_pair[1])]
+        if not assignments:
+            # No disjoint pair available — one player is not visible on its side
+            # this frame, or both can only claim the same band skeleton. Place
+            # the better-supported player and leave the other unassigned rather
+            # than guessing: a missing frame costs a longer dt in the speed
+            # calculation, a wrong frame corrupts both players' statistics.
+            singles = [
+                (min(cost_matrix[pid][k] for k in candidates[pid]), pid)
+                for pid in (0, 1)
+                if candidates[pid]
+            ]
+            if singles:
+                _, pid = min(singles)
+                best_idx = min(candidates[pid], key=lambda k: cost_matrix[pid][k])
+                assignments = [(pid, best_idx)]
+            # Only count this against the constraint when there WERE two
+            # skeletons to split. With one skeleton a disjoint pair is impossible
+            # by definition, and single-skeleton frames are common — lumping them
+            # in would make the counter track pose coverage instead of the
+            # constraint's own failure mode.
+            if len(active_skeletons) >= 2:
+                self.frames_unsplittable += 1
             else:
-                # Exactly 2 skeletons - compare both options
-                cost_a = cost_matrix[0][0] + cost_matrix[1][1]
-                cost_b = cost_matrix[0][1] + cost_matrix[1][0]
-
-                if cost_a <= cost_b:
-                    assignments = [(0, 0), (1, 1)]
-                else:
-                    assignments = [(0, 1), (1, 0)]
-
-        # --- MAJORITY-VOTE SMOOTHING ---
-        assignments = self._apply_majority_vote(assignments, active_skeletons)
-
-        # --- SWAP DETECTION AND CORRECTION ---
-        assignments = self._detect_and_correct_swap(assignments, active_skeletons)
+                self.frames_single_skeleton += 1
 
         # --- BUILD RESULTS AND UPDATE STATE ---
         result = []
@@ -1717,7 +1846,12 @@ class PlayerIdentityTracker:
         """Get tracker statistics for logging."""
         return {
             "calibration_complete": self.calibration_complete,
-            "total_swaps_corrected": self.total_swaps_corrected,
+            # Swaps are structurally impossible under the hard side constraint,
+            # so there is no swap counter. These are the replacement signals —
+            # see the comments on the fields for why they are kept apart.
+            "frames_unsplittable": self.frames_unsplittable,
+            "frames_single_skeleton": self.frames_single_skeleton,
+            "net_line_used": self.net_line is not None,
             "court_midline_y": self.court_midline_y,
             "player_0_side": self.court_sides[0],
             "player_1_side": self.court_sides[1],
@@ -2527,8 +2661,28 @@ with_reid: False
             isinstance(nl, (list, tuple)) and len(nl) >= 2 and
             isinstance(nr, (list, tuple)) and len(nr) >= 2
         ):
-            tracker_net_left = (float(nl[0]), float(nl[1]))
-            tracker_net_right = (float(nr[0]), float(nr[1]))
+            cand_l: Optional[Tuple[float, float]] = None
+            cand_r: Optional[Tuple[float, float]] = None
+            try:
+                cand_l = (float(nl[0]), float(nl[1]))
+                cand_r = (float(nr[0]), float(nr[1]))
+            except (TypeError, ValueError):
+                cand_l = cand_r = None
+
+            if valid_net_line(cand_l, cand_r, float(width), float(height)):
+                tracker_net_left = cand_l
+                tracker_net_right = cand_r
+            else:
+                # Never accept a degenerate net line — see valid_net_line().
+                # The midline fallback is far from perfect on a tilted camera,
+                # but it is honest and it is logged; a zero-length net line
+                # would classify every position as "bottom" in silence.
+                await send_log(
+                    f"Net keypoints present but unusable ({cand_l} -> {cand_r}); "
+                    "falling back to the video midline for court sides. "
+                    "Re-run court setup to restore net-accurate player identity.",
+                    "warning", "court",
+                )
 
     # Initialize robust player identity tracker
     identity_tracker = PlayerIdentityTracker(
@@ -2554,7 +2708,27 @@ with_reid: False
     player_distances: Dict[int, float] = {0: 0.0, 1: 0.0}
     player_speeds: Dict[int, list] = {0: [], 1: []}
     player_speed_windows: Dict[int, list] = {0: [], 1: []}
-    SPEED_WINDOW_SIZE = 5
+    # This loop divides by fps (per-frame dt for speed), so never trust a
+    # caller-supplied rate. Both callers normalize already; this is the
+    # boundary guard so the helper is safe on its own terms.
+    fps, _fps_substituted = normalize_fps(fps)
+    if _fps_substituted:
+        print(f"[MODAL] [phase2] Invalid fps passed to the YOLO loop; using {fps:.0f}")
+
+    # Speed/distance filter thresholds — imported so this loop and
+    # `recalculate_speeds` (speed_calc.calculate_speeds_from_skeleton) apply
+    # identical filtering. They used to differ, so results.json disagreed with
+    # what the browser displayed. speed_calc.py is mounted at /root in the image.
+    sys.path.insert(0, "/root")
+    from speed_calc import (
+        MAX_REALISTIC_SPEED_MPS,
+        SPEED_MEDIAN_WINDOW as SPEED_WINDOW_SIZE,
+        max_frame_jump_pixels,
+        median_speed_rejects,
+    )
+
+    # Hoisted out of the per-frame path — depends only on video geometry.
+    MAX_PX_PER_FRAME = max_frame_jump_pixels(float(width), float(height), fps)
     frame_count = 0
     processed_count = 0
 
@@ -3085,9 +3259,12 @@ with_reid: False
                         f"P0={stats['player_0_side']}, P1={stats['player_1_side']}",
                         "success", "processing"
                     )
-                if identity_tracker.total_swaps_corrected > 0 and frame_count % 100 == 0:
+                if identity_tracker.frames_unsplittable > 0 and frame_count % 500 == 0:
+                    pct = 100.0 * identity_tracker.frames_unsplittable / max(frame_count, 1)
                     await send_log(
-                        f"Identity tracker: {identity_tracker.total_swaps_corrected} swap(s) corrected so far",
+                        f"Identity tracker: {identity_tracker.frames_unsplittable} frame(s) "
+                        f"({pct:.1f}%) had two skeletons that could not be split "
+                        "one-per-side of the net",
                         "info", "processing"
                     )
 
@@ -3147,7 +3324,6 @@ with_reid: False
                                     dy = center_y - prev["y"]
                                     distance_px = np.sqrt(dx**2 + dy**2)
 
-                                    MAX_PX_PER_FRAME = max(80, int(0.07 * max(width, height)))
                                     frames_elapsed = max(1, frame_count - prev["frame"])
                                     px_per_frame = distance_px / frames_elapsed
 
@@ -3173,20 +3349,19 @@ with_reid: False
                                             distance_m = distance_px * meters_per_pixel
                                         speed_mps = distance_m / dt
 
-                                        MAX_VALID_SPEED_MPS = 8.5
-                                        MAX_DISTANCE_PER_FRAME = 0.25
-                                        distance_per_frame = distance_m / frames_elapsed
-
+                                        # Thresholds come from speed_calc so this
+                                        # loop and `recalculate_speeds` cannot
+                                        # disagree. The old metres-per-frame gate
+                                        # is gone: it was the same gate as the
+                                        # speed cap expressed per frame, which
+                                        # made it fps-dependent (binding at 25fps,
+                                        # inert at 60fps).
                                         is_valid_measurement = True
 
-                                        if distance_per_frame > MAX_DISTANCE_PER_FRAME:
+                                        if speed_mps > MAX_REALISTIC_SPEED_MPS:
                                             is_valid_measurement = False
                                             is_valid_tracking = False
-                                            print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - distance jump {distance_per_frame:.3f}m/frame")
-                                        elif speed_mps > MAX_VALID_SPEED_MPS:
-                                            is_valid_measurement = False
-                                            is_valid_tracking = False
-                                            print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - speed {speed_mps*3.6:.1f} km/h > {MAX_VALID_SPEED_MPS*3.6:.1f} km/h limit")
+                                            print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected - speed {speed_mps*3.6:.1f} km/h > {MAX_REALISTIC_SPEED_MPS*3.6:.1f} km/h limit")
 
                                         if is_valid_measurement:
                                             current_speed = speed_mps * 3.6
@@ -3194,21 +3369,15 @@ with_reid: False
                                             if track_id in player_speed_windows:
                                                 window = player_speed_windows[track_id]
 
-                                                if len(window) >= 3:
-                                                    sorted_window = sorted(window)
-                                                    median_speed = sorted_window[len(sorted_window) // 2]
-
-                                                    if current_speed > median_speed * 3.0 and median_speed > 2.0:
-                                                        is_valid_measurement = False
-                                                        is_valid_tracking = False
-                                                        print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected by median filter - {current_speed:.1f} km/h > 2x median {median_speed:.1f} km/h")
-                                                        current_speed = 0.0
-                                                    else:
-                                                        window.append(current_speed)
-                                                        if len(window) > SPEED_WINDOW_SIZE:
-                                                            window.pop(0)
+                                                if median_speed_rejects(window, current_speed):
+                                                    is_valid_measurement = False
+                                                    is_valid_tracking = False
+                                                    print(f"[MODAL] Player {track_id} frame {frame_count}: Rejected by median filter - {current_speed:.1f} km/h vs running median")
+                                                    current_speed = 0.0
                                                 else:
                                                     window.append(current_speed)
+                                                    if len(window) > SPEED_WINDOW_SIZE:
+                                                        window.pop(0)
                                         else:
                                             current_speed = 0.0
 
@@ -3278,16 +3447,37 @@ with_reid: False
     tracker_stats = identity_tracker.get_stats()
     await send_log(
         f"Identity tracker: calibrated={tracker_stats['calibration_complete']}, "
-        f"swaps_corrected={tracker_stats['total_swaps_corrected']}, "
+        f"sides=P0:{tracker_stats['player_0_side']}/P1:{tracker_stats['player_1_side']} "
+        f"(net_line={'yes' if tracker_stats['net_line_used'] else 'midline fallback'}), "
         f"P0_positions={tracker_stats['player_0_positions']}, "
         f"P1_positions={tracker_stats['player_1_positions']}",
         "info", "processing"
     )
-    if tracker_stats['total_swaps_corrected'] > 0:
-        await send_log(
-            f"{tracker_stats['total_swaps_corrected']} skeleton ID swap(s) were detected and corrected",
-            "warning", "processing"
-        )
+    # Court side is a hard constraint, so identity swaps cannot occur. Two
+    # separate coverage signals replace the old swap counter.
+    if processed_count:
+        unsplittable = tracker_stats["frames_unsplittable"]
+        single = tracker_stats["frames_single_skeleton"]
+        # The constraint's own failure mode: both players were detected but both
+        # landed on one side, so one was dropped. This is what sizes NET_BAND_PX
+        # — it should be near zero on healthy footage.
+        if unsplittable:
+            pct = 100.0 * unsplittable / processed_count
+            await send_log(
+                f"{unsplittable} frame(s) ({pct:.1f}%) had two skeletons that could not "
+                f"be split one-per-side of the net (NET_BAND_PX="
+                f"{identity_tracker.NET_BAND_PX:.0f}px). Consistently high means the "
+                "band is too narrow for this camera angle.",
+                "warning" if pct > 5 else "info", "processing"
+            )
+        # Upstream pose coverage, not identity: only one player was detected at
+        # all. Common on real footage; informational only.
+        if single:
+            await send_log(
+                f"{single} frame(s) ({100.0 * single / processed_count:.1f}%) had only "
+                "one player detected; the other carries no data on those frames",
+                "info", "processing"
+            )
 
     # Finalize raw-tracker metrics
     try:
@@ -3791,12 +3981,21 @@ async def _process_video_worker(
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             raise Exception("Failed to open video file")
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        probed_fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        duration = total_frames / fps if fps > 0 else 0
         cap.release()
+
+        fps, fps_substituted = normalize_fps(probed_fps)
+        if fps_substituted:
+            await send_log(
+                f"Could not read a valid frame rate (probe returned {probed_fps!r}); "
+                f"assuming {fps:.0f}fps. Rally timings will be off if the source is "
+                "not actually 30fps.",
+                "warning", "processing",
+            )
+        duration = total_frames / fps
 
         await send_log(f"Video loaded: {width}x{height} @ {fps:.1f}fps", "success", "processing")
         await send_log(f"Total frames: {total_frames} ({duration:.1f}s duration)", "info", "processing")
@@ -3904,27 +4103,63 @@ async def _process_video_worker(
                 await send_log(f"Rally detection error: {e}", "warning", "processing")
                 print(f"[MODAL] [phase1] Rally detection error: {e}")
 
-        # Shot-gap detector unioned with the gradient detector. With Phase 1's
-        # detection-only loop, skeleton_frames carries only shuttle_position +
-        # raw badminton detections — sufficient for the shuttle-trajectory
-        # branch of shot detection. The pose fallback inside detect_pose_shots
-        # won't fire (no players/pose data), which is OK: if shuttle shots
-        # alone are below threshold the shot-gap output is empty and the
-        # union degrades to gradient-only.
+        # Shot-gap detector (Python port of the client-side detector in
+        # useAdvancedAnalytics.ts), run on BOTH Phase 1 shuttle tracks:
+        #   - raw per-frame fusion (skeleton_frames): accurate rally bounds,
+        #     but noise fabricates rallies in replay/idle windows and can
+        #     weld adjacent rallies into one;
+        #   - filtered track (shuttle_positions, built above for the
+        #     gradient detector): reliable rally list/splits, trimmed tails.
+        # refine_rallies() keeps the filtered list and widens its bounds
+        # toward the raw ones (capped) — accurate clips right after
+        # Phase 1, no pose data needed. require_players=False throughout:
+        # Phase 1 frames carry no player data.
+        # Two rally sets leave this block:
+        #   - detected_rallies: gradient ∪ raw shot-gap ("combined") — goes
+        #     into results.json, so the web app keeps both timelines.
+        #   - clip_rallies: the confirmed separation — drives the
+        #     rally_clips cut. Falls back to the combined set. Phase 2
+        #     re-cuts from the full skeleton stream with strict browser
+        #     parity (require_players=True) and removes stale extras, so
+        #     clips converge to the web app's client timeline.
+        clip_rallies: List[Dict[str, Any]] = []
         try:
             sys.path.insert(0, "/root")
-            from rally_detection_shot_gap import detect_rallies_from_shots, union_rallies
-            shot_gap_rallies = detect_rallies_from_shots(skeleton_frames, fps)
-            if shot_gap_rallies:
+            from rally_detection_shot_gap import (
+                detect_rallies_from_shots,
+                refine_rallies,
+                union_rallies,
+            )
+            raw_rallies = detect_rallies_from_shots(
+                skeleton_frames, fps, require_players=False
+            )
+            filtered_frames = [
+                {
+                    "frame": f["frame"],
+                    "timestamp": f["timestamp"],
+                    "shuttle_position": (
+                        pos
+                        if (pos := shuttle_positions.get(f["frame"])) and pos.get("visible")
+                        else None
+                    ),
+                }
+                for f in skeleton_frames
+            ]
+            filtered_rallies = detect_rallies_from_shots(
+                filtered_frames, fps, require_players=False
+            )
+            clip_rallies = refine_rallies(filtered_rallies, raw_rallies, fps=fps)
+            if clip_rallies:
                 await send_log(
-                    f"Shot-gap detector found {len(shot_gap_rallies)} additional candidate rallies",
-                    "info", "processing",
+                    f"Using client (shot-gap) rally separation for clips: "
+                    f"{len(clip_rallies)} rallies",
+                    "success", "processing",
                 )
-            union = union_rallies(detected_rallies, shot_gap_rallies, fps=fps)
+            union = union_rallies(detected_rallies, raw_rallies, fps=fps)
             if len(union) > len(detected_rallies):
                 await send_log(
                     f"Combined detection: {len(detected_rallies)} (gradient) + "
-                    f"{len(shot_gap_rallies)} (shot-gap) -> {len(union)} (union)",
+                    f"{len(raw_rallies)} (shot-gap) -> {len(union)} (union)",
                     "success", "processing",
                 )
             detected_rallies = union
@@ -3934,6 +4169,8 @@ async def _process_video_worker(
                 "warning", "processing",
             )
             print(f"[MODAL] [phase1] Shot-gap detector failed: {e}")
+        if not clip_rallies:
+            clip_rallies = detected_rallies
 
         rally_time = time.time() - phase_start
         mem_mb = get_memory_mb()
@@ -4018,22 +4255,22 @@ async def _process_video_worker(
         # ------------------------------------------------------------------
         # 7. Rally clip generation
         # ------------------------------------------------------------------
-        if detected_rallies:
+        if clip_rallies:
             await send_log(
-                f"Cutting {len(detected_rallies)} rally clips...",
+                f"Cutting {len(clip_rallies)} rally clips...",
                 "info", "processing",
             )
             try:
                 await asyncio.to_thread(
                     lambda: cut_and_upload_rally_clips(
                         video_path=str(video_path),
-                        rallies=detected_rallies,
+                        rallies=clip_rallies,
                         video_id=video_id,
                         owner_id=owner_id,
                     )
                 )
                 await send_log(
-                    f"Rally clips uploaded for {len(detected_rallies)} rallies",
+                    f"Rally clips uploaded for {len(clip_rallies)} rallies",
                     "success", "processing",
                 )
             except Exception as e:
@@ -4058,7 +4295,13 @@ async def _process_video_worker(
 
         await send_status_update(
             "phase1_complete",
-            progress=1.0,
+            # PERCENT, not a fraction. `videos.progress` is 0-100 everywhere
+            # else — the in-loop updates above write (frame_count/total)*100 —
+            # and AnalysisProgress.vue renders Math.round(progress) directly.
+            # A 1.0 here made the bar snap from ~99% to 1% at the finish line,
+            # and calculateETA() (which divides by progress/100) print a
+            # ~100x-inflated "remaining" on the same tick.
+            progress=100.0,
             current_frame=total_frames,
             total_frames=total_frames,
         )
@@ -4374,9 +4617,18 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
         cap.release()
 
         # Prefer Phase 1's fps/total_frames (authoritative) but fall back to
-        # the probe if Phase 1 was missing them.
+        # the probe if Phase 1 was missing them. The probe can ALSO return 0 on
+        # the same containers Phase 1 struggled with, so normalize rather than
+        # trusting it: the Phase 2 speed loop divides by fps.
         if not fps or fps <= 0:
             fps = probe_fps
+        fps, fps_substituted = normalize_fps(fps)
+        if fps_substituted:
+            await send_log(
+                f"No valid frame rate from Phase 1 results or the video probe "
+                f"({probe_fps!r}); assuming {fps:.0f}fps for analytics.",
+                "warning", "processing",
+            )
         if not total_frames or total_frames <= 0:
             total_frames = probe_total
 
@@ -4472,7 +4724,7 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
             if chosen_frame is None:
                 await send_log(
                     "No qualifying 2-player frame for player thumbnails; skipping",
-                    "info", "phase2",
+                    "info", "processing",
                 )
             else:
                 thumbs = _capture_player_thumbnails(
@@ -4483,7 +4735,7 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
                 if thumbs is None:
                     await send_log(
                         "Player thumbnail capture failed; skipping",
-                        "warning", "phase2",
+                        "warning", "processing",
                     )
                 else:
                     owner_id = owner_id_holder["owner_id"]
@@ -4516,12 +4768,57 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
                         sb.table("videos").update({"player_labels": labels}).eq("id", video_id).execute()
 
                     await asyncio.to_thread(_merge_labels)
-                    await send_log("Player thumbnails uploaded", "success", "phase2")
+                    await send_log("Player thumbnails uploaded", "success", "processing")
         except Exception as thumb_err:
             print(f"[MODAL] [phase2] Player thumbnail capture error: {thumb_err}")
             await send_log(
                 f"Player thumbnail capture error (non-fatal): {thumb_err}",
-                "warning", "phase2",
+                "warning", "processing",
+            )
+
+        # Re-cut rally clips from the CLIENT separation: the shot-gap
+        # detector on the full skeleton stream with strict browser parity
+        # (require_players=True). This is byte-for-byte the rally set the
+        # web app's client timeline computes in-browser, so after Phase 2
+        # the clips/thumbnails shown on web and mobile match it exactly.
+        # Phase 1's provisional clips (detection-only data, no player gate)
+        # are overwritten in place; extras beyond the new count are removed.
+        try:
+            sys.path.insert(0, "/root")
+            from rally_detection_shot_gap import detect_rallies_from_shots
+            client_rallies = detect_rallies_from_shots(skeleton_frames, fps)
+            if client_rallies:
+                await send_log(
+                    f"Re-cutting clips from client rally separation: "
+                    f"{len(client_rallies)} rallies",
+                    "info", "processing",
+                )
+                await asyncio.to_thread(
+                    cut_and_upload_rally_clips,
+                    str(video_path),
+                    client_rallies,
+                    video_id,
+                    owner_id_holder["owner_id"],
+                )
+                removed = await asyncio.to_thread(
+                    delete_stale_rally_clips, video_id, len(client_rallies)
+                )
+                await send_log(
+                    f"Rally clips updated to client separation: "
+                    f"{len(client_rallies)} clips"
+                    + (f" ({removed} stale removed)" if removed else ""),
+                    "success", "processing",
+                )
+            else:
+                await send_log(
+                    "Client rally separation found no rallies; keeping Phase 1 clips",
+                    "info", "processing",
+                )
+        except Exception as recut_err:
+            print(f"[MODAL] [phase2] Client-separation clip re-cut failed: {recut_err}")
+            await send_log(
+                f"Clip re-cut failed (keeping Phase 1 clips): {recut_err}",
+                "warning", "processing",
             )
 
         # Free large in-memory structures before the upload.
@@ -4571,7 +4868,9 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
         )
         await send_status_update(
             "completed",
-            progress=1.0,
+            # PERCENT, not a fraction — see the note on the phase1_complete
+            # call. `videos.progress` is 0-100 on every other write.
+            progress=100.0,
             current_frame=total_frames,
             total_frames=total_frames,
         )
