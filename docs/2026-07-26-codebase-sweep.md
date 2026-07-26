@@ -57,7 +57,7 @@ local DB to apply it against — the SQL is unverified by execution. Run
 
 ---
 
-## 2. No polling fallback when the realtime socket drops — the progress screen can hang forever
+## 2. No polling fallback when the realtime socket drops — the progress screen can hang forever — ✅ FIXED
 
 `useReactiveRow` fetches once, then relies exclusively on the websocket. There is no
 refetch on reconnect, no `SUBSCRIBED`-callback re-read, and no interval fallback.
@@ -80,11 +80,45 @@ Two concrete ways this strands the user:
 (`RallyReview.vue:150-175`) exists for precisely this reason. `AnalysisProgress` needs the
 same treatment.
 
-**Fix.** Cheapest correct version: in `useReactiveRow`/`useReactiveList`, re-run the
-initial `select` from the `.subscribe((status) => …)` callback whenever status is
-`SUBSCRIBED`. That closes both the mount race and the reconnect gap in one place, for
-every consumer. A 10s low-cost poll in `AnalysisProgress` while status is non-terminal is
-the belt-and-braces version.
+**Fixed** in both composables, so every consumer benefits and no component needed changing.
+Four parts:
+
+1. **Refetch on `SUBSCRIBED`.** The subscribe callback fires on the initial join *and* on
+   every automatic rejoin, so one hook closes both the mount race and the reconnect gap.
+   Verified against the vendored source rather than assumed — `channel.js:296` `rejoin()`
+   → `joinPush.resend()` → `push.js:73` `reset()`, which clears `ref`/`receivedResp`/`sent`
+   but leaves `recHooks` intact, so `matchReceive` (`push.js:88`) re-runs the `'ok'` hook
+   and `RealtimeChannel.js:151/192` re-emits `SUBSCRIBED`. `channel.js:47,52,64,76,84` route
+   socket-open, channel-error and timeout into that same `rejoin()`, so a half-open socket
+   is covered too.
+2. **Refetch on `visibilitychange` → visible.** Background tabs get timers throttled, so
+   the heartbeat can lapse without a prompt rejoin. `AnalysisProgress` explicitly invites
+   the user to leave the tab, so returning to it is now a refresh — covering the case where
+   the rejoin is slow or never comes.
+3. **Monotonic write ordering.** A refetch and a realtime push can be in flight together,
+   and a `SELECT` issued earlier can resolve later — applying it would overwrite newer data
+   with older. Every write now takes a ticket and only the newest wins. Without this, the
+   fix would have introduced a fresh race in the course of removing one.
+4. **The initial read stays eager**, before the handshake. Fetching *only* on `SUBSCRIBED`
+   would have made first paint wait on the websocket and shown nothing at all if realtime
+   were unavailable — i.e. strictly worse than the bug. Background refetches are quiet:
+   they never raise the spinner, and a failed one never replaces good data with an error
+   banner.
+
+Two related defects fixed in passing, both surfaced by the above:
+
+- Both composables were `async` `watchEffect`s registering `onCleanup` **after** an `await`.
+  Vue only reliably attaches a cleanup registered before the first await, so a rapid `id`
+  change could leak a channel. Both effects are now synchronous, with the awaiting moved
+  inside `load()`.
+- `useReactiveList`'s INSERT handler appended blind, and `load()` replaced the array
+  wholesale. A push arriving during an in-flight `SELECT` would be dropped by the replace,
+  and a row delivered by both paths would appear twice. Now: dedupe by id on insert, and
+  `load()` merges rather than replaces.
+
+No deliberate polling. `SUBSCRIBED` + visibility covers the realistic failures without
+adding steady-state query load; `RallyReview`'s own 8s poll stays, since it keys on a
+terminal condition the generic composable cannot know.
 
 ---
 
