@@ -42,6 +42,21 @@ For each file in `supabase/migrations/` in order:
 2. Paste the file contents.
 3. Run.
 
+### Realtime — no dashboard step needed
+
+`0009_realtime_publication.sql` adds `videos` and `processing_logs` to the
+`supabase_realtime` publication, so **do not** toggle Realtime per-table in
+Database → Replication; the migration owns it and is idempotent either way.
+
+This matters because the progress UI is realtime-only — `AnalysisProgress.vue`
+subscribes to `postgres_changes` for both the status row and the log stream. If
+those tables are not in the publication, upload and processing still work but
+the browser sits at "Starting analysis..." with an empty log pane and never
+advances, with no error shown. If you ever see that, check the publication
+first:
+
+    select tablename from pg_publication_tables where pubname = 'supabase_realtime';
+
 ## 4. Configure Auth
 
 In Authentication → Providers:
