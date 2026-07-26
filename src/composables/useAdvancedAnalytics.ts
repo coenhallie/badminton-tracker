@@ -190,8 +190,15 @@ export function useAdvancedAnalytics(
 
     for (let i = 1; i < shots.length; i++) {
       const gap = shots[i]!.timestamp - shots[i - 1]!.timestamp
-      if (gap > RALLY_GAP_SECONDS || i === shots.length - 1) {
-        const rallyShots = shots.slice(rallyStart, i === shots.length - 1 ? i + 1 : i)
+      const isLast = i === shots.length - 1
+      if (gap > RALLY_GAP_SECONDS || isLast) {
+        // Shot i belongs to the current rally ONLY when it is the final shot
+        // AND close enough to its predecessor. When it is both last and beyond
+        // the gap threshold it is an isolated trailing shot starting a new
+        // (1-shot, therefore rejected) rally — including it welded the whole
+        // inter-rally gap onto the previous rally's end. Keep in sync with
+        // backend/rally_detection_shot_gap.detect_rallies_from_shots.
+        const rallyShots = shots.slice(rallyStart, isLast && gap <= RALLY_GAP_SECONDS ? i + 1 : i)
         // A serve + return is a legitimate 2-shot rally lasting ~1.3s; the
         // previous 2.0s/3.0s minimums silently dropped them. 0.8s keeps
         // those while still rejecting single-shot flukes.

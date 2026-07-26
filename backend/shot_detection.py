@@ -133,6 +133,7 @@ def detect_shuttle_shots(
     reject_outliers: bool = True,
     stride_sec: Any = "auto",
     auto_stride_sec: float = 0.3,
+    require_players: bool = True,
 ) -> List[Dict[str, Any]]:
     """Direct port of detectShuttleShots(frames, opts).
 
@@ -224,23 +225,30 @@ def detect_shuttle_shots(
         if not sk:
             continue
         players = sk.get("players") or []
-        if not players:
+        # require_players=True is TS parity: skip shots on frames where pose
+        # lost every player. Pass require_players=False for Phase 1
+        # detection-only frames, which carry NO player data at all — the
+        # strict gate there would drop every shot (and did: the shot-gap
+        # detector always returned empty in Phase 1). Rally grouping
+        # downstream only reads frame/timestamp, so on player-less frames we
+        # emit the shot with placeholder player fields instead.
+        if not players and require_players:
             continue
 
         # (Wrist-proximity gate omitted — rally caller passes
         # wristProximityMeters=null and homography is not available
         # backend-side at this stage anyway.)
 
-        closest = _find_closest_player(players, x1, y1)
-        if not closest:
+        closest = _find_closest_player(players, x1, y1) if players else None
+        if players and not closest:
             continue
 
-        center = closest.get("center") or {"x": 0.0, "y": 0.0}
+        center = (closest.get("center") if closest else None) or {"x": 0.0, "y": 0.0}
 
         shots.append({
             "frame": int(f1),
             "timestamp": float(t1),
-            "player_id": int(closest.get("player_id", 0)),
+            "player_id": int(closest.get("player_id", 0)) if closest else 0,
             "shot_type": "unknown",
             "shuttle_position": {"x": float(x1), "y": float(y1)},
             "player_position": {
@@ -368,7 +376,11 @@ def merge_shots(
 # -----------------------------------------------------------------------------
 # Top-level entry point — mirrors useAdvancedAnalytics.detectAllShots
 # -----------------------------------------------------------------------------
-def detect_all_shots(frames: List[Dict[str, Any]], fps: float) -> List[Dict[str, Any]]:
+def detect_all_shots(
+    frames: List[Dict[str, Any]],
+    fps: float,
+    require_players: bool = True,
+) -> List[Dict[str, Any]]:
     """Mirrors useAdvancedAnalytics.detectAllShots(frames, fps).
 
     Strategy:
@@ -387,6 +399,7 @@ def detect_all_shots(frames: List[Dict[str, Any]], fps: float) -> List[Dict[str,
         fps=fps,
         reject_outliers=True,
         stride_sec="auto",
+        require_players=require_players,
     )
 
     if len(shuttle_shots) >= 4:
