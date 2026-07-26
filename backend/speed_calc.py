@@ -69,15 +69,64 @@ _OPTIONAL_KEYPOINTS: list[tuple[str, int]] = [
 ]
 
 
-# --- Filter thresholds (parity with convex/http.ts) -------------------------
-# Maximum realistic on-court speed. Badminton players rarely exceed 25 km/h.
+# --- Filter thresholds ------------------------------------------------------
+# SINGLE SOURCE OF TRUTH for player speed/distance filtering.
+#
+# The Modal worker's in-loop filter (modal_supabase_processor._run_full_yolo_loop)
+# imports these, so a processing run and a later `recalculate_speeds` cannot
+# disagree about a player's speed or distance. They used to: the loop capped at
+# 8.5 m/s (30.6 km/h) with a resolution-scaled pixel gate while this module
+# capped at 25 km/h with a flat 80px gate — ~1.7x stricter at 1080p — so the
+# numbers persisted in results.json differed from the ones the browser showed.
+# If you change a value here, that is the only place it needs changing.
+
+# Maximum realistic on-court movement speed for a badminton player. Elite
+# players reach ~6-7 m/s pushing off the rear court or lunging; sustained
+# values above that are tracking artifacts, not movement.
 MAX_REALISTIC_SPEED_KMH = 25.0
-# Maximum allowed pixel jump per frame (catches tracking ID swaps).
-MAX_FRAME_JUMP_PIXELS = 80.0
-# Maximum allowed distance per frame in meters (at 30 fps, 7 m/s -> 0.23 m).
-MAX_DISTANCE_PER_FRAME_M = 0.25
+MAX_REALISTIC_SPEED_MPS = MAX_REALISTIC_SPEED_KMH / 3.6
+
 # Sliding window length for the median outlier filter.
 SPEED_MEDIAN_WINDOW = 5
+# A median below this (km/h) is too small to judge spikes against.
+SPEED_MEDIAN_MIN_KMH = 2.0
+# Reject a sample this many times above the running median.
+SPEED_MEDIAN_SPIKE_RATIO = 3.0
+
+# NOTE: there is deliberately no metres-per-frame threshold any more. The old
+# MAX_DISTANCE_PER_FRAME_M = 0.25 was algebraically the same gate as the speed
+# cap — since speed_kmh == (d_metres / frames_elapsed) * fps * 3.6, a
+# per-FRAME distance limit is a per-SECOND speed limit divided by fps. Being
+# expressed per frame while hardcoded for 30fps, it silently became the binding
+# constraint at 25fps (implying a 22.5 km/h ceiling, rejecting legitimate
+# movement) and inert at 60fps (implying 54 km/h). The speed cap above does the
+# same job at every frame rate.
+
+
+def max_frame_jump_pixels(video_width: float, video_height: float, fps: float) -> float:
+    """Per-frame pixel-displacement ceiling that catches tracking ID swaps.
+
+    Scales with BOTH resolution and frame rate: a fixed pixel count means
+    different things at 720p and 4K, and different things again at 60fps where
+    each frame spans half the time. This is a coarse swap detector — the speed
+    cap does the fine filtering — so it stays deliberately permissive.
+    """
+    long_edge = max(video_width, video_height)
+    fps_scale = (30.0 / fps) if fps and fps > 0 else 1.0
+    return max(80.0, 0.07 * long_edge * fps_scale)
+
+
+def median_speed_rejects(window: list[float], speed_kmh: float) -> bool:
+    """Would the running-median outlier filter reject this sample?
+
+    Shared so the two call sites cannot drift apart. Needs at least 3 prior
+    samples before it will judge anything.
+    """
+    if len(window) < 3:
+        return False
+    ordered = sorted(window)
+    median = ordered[len(ordered) // 2]
+    return median > SPEED_MEDIAN_MIN_KMH and speed_kmh > median * SPEED_MEDIAN_SPIKE_RATIO
 
 
 def _coerce_xy(pt: Any) -> tuple[float, float] | None:
@@ -205,6 +254,9 @@ def calculate_speeds_from_skeleton(
     if homography is None:
         fallback_mpp = COURT_LENGTH / (max(video_width, video_height) * 0.8)
 
+    # Resolution- and fps-aware ID-swap gate; see max_frame_jump_pixels().
+    max_frame_jump_px = max_frame_jump_pixels(video_width, video_height, fps)
+
     # Per-player tracking state
     player_stats: dict[str, dict[str, Any]] = {}
     frame_data: list[dict[str, Any]] = []
@@ -244,32 +296,23 @@ def calculate_speeds_from_skeleton(
                 d_pixels = math.hypot(px - prev["px"], py - prev["py"])
                 frames_elapsed = max(1, frame_idx - prev["frame"])
                 dt = frames_elapsed / fps
-                dist_per_frame = d_meters / frames_elapsed
                 px_per_frame = d_pixels / frames_elapsed
 
                 if dt > 0:
                     speed_kmh = (d_meters / dt) * 3.6
 
-                    # 4-step filter pipeline (parity with convex/http.ts)
-                    if px_per_frame > MAX_FRAME_JUMP_PIXELS:
-                        speed_kmh = 0.0
-                        is_valid = False
-                    elif dist_per_frame > MAX_DISTANCE_PER_FRAME_M:
+                    # 3-step filter pipeline. (Was 4 — the metres-per-frame gate
+                    # was algebraically identical to the speed cap; see the note
+                    # by MAX_REALISTIC_SPEED_KMH.)
+                    if px_per_frame > max_frame_jump_px:
                         speed_kmh = 0.0
                         is_valid = False
                     elif speed_kmh > MAX_REALISTIC_SPEED_KMH:
                         speed_kmh = 0.0
                         is_valid = False
-                    else:
-                        # Median outlier filter — reject sudden 3x spikes once
-                        # we have at least 3 prior samples.
-                        win = stats["speed_window"]
-                        if len(win) >= 3:
-                            sorted_win = sorted(win)
-                            median_speed = sorted_win[len(sorted_win) // 2]
-                            if median_speed > 2.0 and speed_kmh > median_speed * 3.0:
-                                speed_kmh = 0.0
-                                is_valid = False
+                    elif median_speed_rejects(stats["speed_window"], speed_kmh):
+                        speed_kmh = 0.0
+                        is_valid = False
 
                     if is_valid and speed_kmh > 0:
                         win = stats["speed_window"]
