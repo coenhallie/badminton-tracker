@@ -1,0 +1,41 @@
+# Netlify build configuration.
+#
+# See docs/VERSIONING.md for why the build command matters here: the app's version
+# comes from `git describe`, which needs the release tags to be present.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  # package.json engines: ^20.19.0 || >=22.12.0. Pinned so the deploy matches
+  # the version the build is developed and tested against.
+  NODE_VERSION = "22"
+
+# NOTE: there is intentionally no `/*` -> `/index.html` catch-all here.
+#
+# The app has no vue-router and does no path-based routing - it keys off query
+# params (`?videoId=`). A SPA catch-all would turn every genuine 404 into a
+# silent 200 serving the app shell, which hides broken links and bad asset paths.
+# Do not add one without a router to justify it.
+
+# ---------------------------------------------------------------------------
+# If this project is switched to git-linked auto-deploy (build runs on Netlify's
+# infrastructure rather than from the CLI), two things change:
+#
+#   1. Netlify clones without tags, so `git describe` finds nothing and the app
+#      reports itself as 0.0.0+g<sha> instead of 2.1.0+<n>.g<sha>. The build info
+#      records `source: "git-untagged"` when this happens. To fix, change the
+#      build command to fetch tags first:
+#
+#        command = "git fetch --tags --force || true && npm run build"
+#
+#      This is unverified - it can only be confirmed by reading a Netlify build
+#      log and checking the version the deployed app reports.
+#
+#   2. VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY must be set in Netlify, since
+#      the build no longer reads the local .env.local.
+#
+# Neither applies to `netlify deploy --build`, which builds on your machine with
+# full history and your local env.
+# ---------------------------------------------------------------------------
