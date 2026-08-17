@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { APP_VERSION_BADGE } from '@/version'
+import { APP_VERSION_BADGE, APP_BUILD_LINE } from '@/version'
 import { useTheme } from '@/composables/useTheme'
 import { useSession, signOut } from '@/composables/useSession'
 import LoginView from '@/views/LoginView.vue'
@@ -1131,7 +1131,7 @@ watch(videoSectionRef, () => {
       <div class="header-content">
         <div class="logo">
           <h1>SHUTTL.</h1>
-          <button class="alpha-badge" @click="showChangelogModal = true">
+          <button class="alpha-badge" :title="APP_BUILD_LINE" @click="showChangelogModal = true">
             {{ APP_VERSION_BADGE }}
           </button>
         </div>
@@ -1863,6 +1863,7 @@ watch(videoSectionRef, () => {
             </svg>
           </button>
         </div>
+        <p class="build-line">{{ APP_BUILD_LINE }}</p>
         <div class="changelog-content">
           <div class="changelog-entry">
             <div class="changelog-version">
@@ -3383,6 +3384,18 @@ a:hover {
 .modal-close-btn svg {
   width: 16px;
   height: 16px;
+}
+
+/* Build provenance: which commit this bundle was built from, and when. */
+.build-line {
+  margin: 0;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--color-border-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
+  overflow-wrap: anywhere;
 }
 
 .changelog-content {

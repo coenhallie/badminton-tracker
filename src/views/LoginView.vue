@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { supabase } from "@/lib/supabase";
-import { APP_VERSION_BADGE } from "@/version";
+import { APP_VERSION_BADGE, APP_BUILD_LINE } from "@/version";
 import { useTheme } from "@/composables/useTheme";
 
 const emit = defineEmits<{
@@ -60,6 +60,7 @@ async function signInEmail() {
         <button
           class="alpha-badge"
           type="button"
+          :title="APP_BUILD_LINE"
           @click="emit('show-changelog')"
         >
           {{ APP_VERSION_BADGE }}
