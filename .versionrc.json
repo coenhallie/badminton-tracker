@@ -1,0 +1,18 @@
+{
+  "tagPrefix": "v",
+  "header": "# Changelog\n\nGenerated from Conventional Commit messages by `npm run release`. Do not edit by\nhand - your changes will be overwritten on the next release.\n\nThis is the developer-facing log. The user-facing changelog is the one rendered\nin the app (`src/App.vue`), which is written as prose and maintained separately.\nSee `docs/VERSIONING.md`.\n",
+  "types": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "refactor", "section": "Refactoring" },
+    { "type": "revert", "section": "Reverts" },
+    { "type": "build", "section": "Build System" },
+    { "type": "tool", "section": "Tooling" },
+    { "type": "docs", "hidden": true },
+    { "type": "chore", "hidden": true },
+    { "type": "style", "hidden": true },
+    { "type": "test", "hidden": true },
+    { "type": "ci", "hidden": true }
+  ]
+}

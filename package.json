@@ -10,7 +10,9 @@
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
     "type-check:src": "vue-tsc --build tsconfig.app.json",
-    "format": "prettier --write --experimental-cli src/"
+    "format": "prettier --write --experimental-cli src/",
+    "release": "commit-and-tag-version",
+    "release:dry": "commit-and-tag-version --dry-run"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.1",
@@ -26,6 +28,7 @@
     "@types/node": "^24.10.9",
     "@vitejs/plugin-vue": "^6.0.3",
     "@vue/tsconfig": "^0.8.1",
+    "commit-and-tag-version": "^13.1.2",
     "npm-run-all2": "^8.0.4",
     "prettier": "3.8.1",
     "typescript": "~5.9.3",
