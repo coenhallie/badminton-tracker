@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { supabase } from "@/lib/supabase";
+import { APP_VERSION_BADGE } from "@/version";
 import { useTheme } from "@/composables/useTheme";
 
 const emit = defineEmits<{
@@ -61,7 +62,7 @@ async function signInEmail() {
           type="button"
           @click="emit('show-changelog')"
         >
-          beta v2.0
+          {{ APP_VERSION_BADGE }}
         </button>
       </div>
       <p class="subtitle">Sign in to continue</p>

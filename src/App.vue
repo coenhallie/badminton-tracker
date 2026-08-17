@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { APP_VERSION_BADGE } from '@/version'
 import { useTheme } from '@/composables/useTheme'
 import { useSession, signOut } from '@/composables/useSession'
 import LoginView from '@/views/LoginView.vue'
@@ -1131,7 +1132,7 @@ watch(videoSectionRef, () => {
         <div class="logo">
           <h1>SHUTTL.</h1>
           <button class="alpha-badge" @click="showChangelogModal = true">
-            beta v2.1
+            {{ APP_VERSION_BADGE }}
           </button>
         </div>
 
@@ -1865,7 +1866,7 @@ watch(videoSectionRef, () => {
         <div class="changelog-content">
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v2.1-beta</span>
+              <span class="version-tag">v2.1.0</span>
               <span class="version-date">May 18, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -1880,7 +1881,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v2.0-beta</span>
+              <span class="version-tag">v2.0.0</span>
               <span class="version-date">May 2, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -1897,7 +1898,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.9-alpha</span>
+              <span class="version-tag">v1.9.0</span>
               <span class="version-date">April 23, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -1916,7 +1917,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.8-alpha</span>
+              <span class="version-tag">v1.8.0</span>
               <span class="version-date">April 21, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -1934,7 +1935,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.7-alpha</span>
+              <span class="version-tag">v1.7.0</span>
               <span class="version-date">March 26, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -1952,7 +1953,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.6-alpha</span>
+              <span class="version-tag">v1.6.0</span>
               <span class="version-date">March 10, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -1968,7 +1969,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.5-alpha</span>
+              <span class="version-tag">v1.5.0</span>
               <span class="version-date">March 3, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -1987,7 +1988,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.4-alpha</span>
+              <span class="version-tag">v1.4.0</span>
               <span class="version-date">March 3, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -2002,7 +2003,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.3-alpha</span>
+              <span class="version-tag">v1.3.0</span>
               <span class="version-date">March 2, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -2016,7 +2017,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.2-alpha</span>
+              <span class="version-tag">v1.2.0</span>
               <span class="version-date">February 7, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -2031,7 +2032,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.1-alpha</span>
+              <span class="version-tag">v1.1.0</span>
               <span class="version-date">February 1, 2026</span>
             </div>
             <ul class="changelog-list">
@@ -2044,7 +2045,7 @@ watch(videoSectionRef, () => {
           </div>
           <div class="changelog-entry">
             <div class="changelog-version">
-              <span class="version-tag">v1.0-alpha</span>
+              <span class="version-tag">v1.0.0</span>
               <span class="version-date">January 31, 2026</span>
             </div>
             <h3>🎉 Initial Alpha Launch</h3>
