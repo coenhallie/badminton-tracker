@@ -225,6 +225,29 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
 
     padded = pad_rally_windows(rallies, video_duration=probe_video_duration(video_path))
 
+    # The bounds this re-cut is about to overwrite, read BEFORE the upsert.
+    # rally_clips.id survives an upsert on (video_id, rally_index), so the
+    # notes hanging off these rows outlive the footage they describe unless
+    # their offsets move with it. See shift_annotation_offsets.
+    previous_bounds: Dict[int, float] = {}
+    try:
+        existing = (
+            sb.table("rally_clips")
+            .select("rally_index,start_timestamp")
+            .eq("video_id", video_id)
+            .execute()
+        ).data or []
+        previous_bounds = {
+            int(row["rally_index"]): float(row["start_timestamp"])
+            for row in existing
+            if row.get("start_timestamp") is not None
+        }
+    except Exception as e:
+        # An unreadable previous cut is not a reason to abandon the re-cut,
+        # but it IS a reason to say so: with no previous bounds every note on
+        # this video keeps an offset nobody checked.
+        print(f"[MODAL] previous clip bounds unreadable, notes will not be re-anchored: {e}")
+
     for rally in padded:
         rally_id = rally.get("id")
         if rally_id is None:
@@ -357,6 +380,43 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
                 "thumbnail_storage_path": thumb_storage_path,
             }, on_conflict="video_id,rally_index").execute()
 
+            # Re-anchor this clip's notes against its new bounds.
+            old_start = previous_bounds.get(rally_id)
+            if old_start is not None:
+                try:
+                    existing_notes = (
+                        sb.table("rally_annotations")
+                        .select("id,timestamp_seconds")
+                        .eq("clip_id", clip_row_id_for(sb, video_id, rally_id))
+                        .execute()
+                    ).data or []
+                    shifts = shift_annotation_offsets(
+                        existing_notes,
+                        old_clip_start=old_start,
+                        new_clip_start=clip_start,
+                        new_clip_end=clip_end,
+                    )
+                    clamped = 0
+                    for row in shifts:
+                        sb.table("rally_annotations").update(
+                            {"timestamp_seconds": row["timestamp_seconds"]}
+                        ).eq("id", row["id"]).execute()
+                        clamped += 1 if row["clamped"] else 0
+                    if shifts:
+                        sb.table("processing_logs").insert({
+                            "video_id": video_id,
+                            "owner_id": owner_id,
+                            "message": (
+                                f"rally {rally_id}: re-anchored {len(shifts)} note(s) "
+                                f"across a {old_start - clip_start:+.2f}s boundary move"
+                                + (f", {clamped} clamped to the clip window" if clamped else "")
+                            ),
+                            "level": "warning" if clamped else "info",
+                            "category": "processing",
+                        }).execute()
+                except Exception as e:
+                    print(f"[MODAL] annotation re-anchor failed for rally {rally_id}: {e}")
+
             # Stamp the match name, but only where the user hasn't set one.
             # 0004 grants authenticated UPDATE on rally_clips.title, so a clip
             # may have been renamed from the phone; putting title in the upsert
@@ -416,6 +476,16 @@ def delete_stale_rally_clips(video_id: str, keep_count: int):
 
     clip_ids = [r["id"] for r in stale]
     try:
+        doomed = (
+            sb.table("rally_annotations").select("id").in_("clip_id", clip_ids).execute()
+        ).data or []
+        if doomed:
+            # Said out loud rather than swallowed. These notes are a coach's
+            # own writing and this is the only record that they existed.
+            print(
+                f"[MODAL] deleting {len(doomed)} annotation(s) with "
+                f"{len(clip_ids)} stale clip(s) for video {video_id}"
+            )
         sb.table("rally_annotations").delete().in_("clip_id", clip_ids).execute()
     except Exception as e:
         print(f"[MODAL] stale clip annotation cleanup failed: {e}")
