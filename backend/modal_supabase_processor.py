@@ -384,36 +384,49 @@ def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, ow
             old_start = previous_bounds.get(rally_id)
             if old_start is not None:
                 try:
-                    existing_notes = (
-                        sb.table("rally_annotations")
-                        .select("id,timestamp_seconds")
-                        .eq("clip_id", clip_row_id_for(sb, video_id, rally_id))
-                        .execute()
-                    ).data or []
-                    shifts = shift_annotation_offsets(
-                        existing_notes,
-                        old_clip_start=old_start,
-                        new_clip_start=clip_start,
-                        new_clip_end=clip_end,
-                    )
-                    clamped = 0
-                    for row in shifts:
-                        sb.table("rally_annotations").update(
-                            {"timestamp_seconds": row["timestamp_seconds"]}
-                        ).eq("id", row["id"]).execute()
-                        clamped += 1 if row["clamped"] else 0
-                    if shifts:
+                    clip_row_id = clip_row_id_for(sb, video_id, rally_id)
+                    if clip_row_id is None:
                         sb.table("processing_logs").insert({
                             "video_id": video_id,
                             "owner_id": owner_id,
                             "message": (
-                                f"rally {rally_id}: re-anchored {len(shifts)} note(s) "
-                                f"across a {old_start - clip_start:+.2f}s boundary move"
-                                + (f", {clamped} clamped to the clip window" if clamped else "")
+                                f"rally {rally_id}: could not resolve its clip row, "
+                                f"notes were not re-anchored"
                             ),
-                            "level": "warning" if clamped else "info",
+                            "level": "warning",
                             "category": "processing",
                         }).execute()
+                    else:
+                        existing_notes = (
+                            sb.table("rally_annotations")
+                            .select("id,timestamp_seconds")
+                            .eq("clip_id", clip_row_id)
+                            .execute()
+                        ).data or []
+                        shifts = shift_annotation_offsets(
+                            existing_notes,
+                            old_clip_start=old_start,
+                            new_clip_start=clip_start,
+                            new_clip_end=clip_end,
+                        )
+                        clamped = 0
+                        for row in shifts:
+                            sb.table("rally_annotations").update(
+                                {"timestamp_seconds": row["timestamp_seconds"]}
+                            ).eq("id", row["id"]).execute()
+                            clamped += 1 if row["clamped"] else 0
+                        if shifts:
+                            sb.table("processing_logs").insert({
+                                "video_id": video_id,
+                                "owner_id": owner_id,
+                                "message": (
+                                    f"rally {rally_id}: re-anchored {len(shifts)} note(s) "
+                                    f"across a {old_start - clip_start:+.2f}s boundary move"
+                                    + (f", {clamped} clamped to the clip window" if clamped else "")
+                                ),
+                                "level": "warning" if clamped else "info",
+                                "category": "processing",
+                            }).execute()
                 except Exception as e:
                     print(f"[MODAL] annotation re-anchor failed for rally {rally_id}: {e}")
 
