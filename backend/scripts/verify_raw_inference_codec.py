@@ -138,6 +138,118 @@ empty = encode(HEADER, [])
 check("frame count zero", struct.unpack_from("<i", empty, 32 + model_len)[0] == 0)
 check("nothing after it", len(empty) == header_bytes)
 
+print("skeleton frames project onto RawFrames without losing a player")
+from modal_supabase_processor import raw_inference_from_skeleton_frames  # noqa: E402
+
+SKELETON_FRAMES = [
+    {
+        "frame": 1,
+        "timestamp": 0.0333,
+        "players": [
+            # The real shape Phase 2 builds at modal_supabase_processor.py:3272.
+            # No bbox key: the box is derived, not stored.
+            {
+                "player_id": 0,
+                "keypoints": [
+                    {"name": f"k{i}", "x": float(i) + 1, "y": float(i) * 2 + 1, "confidence": 0.5}
+                    for i in range(17)
+                ],
+                "center": {"x": 8.0, "y": 16.0},
+                "current_speed": 12.4,
+            },
+            {
+                "player_id": 1,
+                "keypoints": [
+                    {"name": f"k{i}", "x": float(i) + 100, "y": float(i) + 1, "confidence": 0.25}
+                    for i in range(17)
+                ],
+                "center": {"x": 108.0, "y": 8.0},
+                "current_speed": 3.1,
+            },
+        ],
+    },
+    # A frame the pose model produced nothing for. It must still appear, with
+    # zero persons: selectPlayers counts framesWithPose from a non-empty
+    # persons list, so dropping the frame and emitting an empty one are
+    # different facts about coverage.
+    {"frame": 2, "timestamp": 0.0667, "players": []},
+]
+
+hdr, frames = raw_inference_from_skeleton_frames(
+    SKELETON_FRAMES,
+    fps=30.0,
+    total_frames=2,
+    video_width=1920,
+    video_height=1080,
+    model_version="cloud:test",
+)
+check("every frame kept", len(frames) == 2, f"got {len(frames)}")
+check("both players on the first frame", len(frames[0].persons) == 2)
+check("frame index carried", frames[0].frame == 1)
+check("presentation timestamp carried, not frame/fps", frames[0].timestamp == 0.0333)
+check("17 keypoints", len(frames[0].persons[0].keypoints) == 17)
+check("keypoint values carried", frames[0].persons[0].keypoints[3].x == 4.0)
+check("keypoint confidence carried", frames[0].persons[0].keypoints[3].confidence == 0.5)
+
+print("the box is derived from the keypoints, because Phase 2 stores none")
+# player_data (modal_supabase_processor.py:3272) has no bbox key. The corners
+# come from _bbox_from_player_keypoints, the same helper the thumbnail capture
+# uses, so there is one derivation rather than two.
+check("box spans the keypoint extent", frames[0].persons[0].box.x1 == 1.0)
+check("box spans the keypoint extent", frames[0].persons[0].box.x2 == 17.0)
+
+print("the box confidence RANKS candidates, so it must vary between them")
+# NearPlayerSelector picks within one side with a strict `>` from negative
+# infinity. Equal confidences would make the FIRST passing candidate win
+# rather than the best, and a player and a line judge on the same side would
+# resolve arbitrarily. The mean of the person's own keypoint confidences is
+# model output, which is what is allowed to cross this boundary.
+check("mean keypoint confidence", abs(frames[0].persons[0].box.confidence - 0.5) < 1e-6)
+check("and it differs per person", abs(frames[0].persons[1].box.confidence - 0.25) < 1e-6)
+check("an empty frame survives as an empty frame", frames[1].persons == [])
+
+print("the artifact carries no shuttle and no boxes beyond the players")
+# Spec 3: rally_clips is the rally truth for a cloud video. An artifact with a
+# shuttle track is an artifact something could derive rallies from, and the
+# invariant is structural rather than remembered.
+check("no shuttle", all(f.shuttle is None for f in frames))
+check("no loose boxes", all(f.boxes == [] for f in frames))
+
+print("a player with the wrong keypoint count is dropped, not written short")
+# A short keypoint list would decode into a PlayerPose that
+# NearPlayerSelector.groundPoint rejects by size, silently costing coverage
+# with nothing saying why. Dropped here, where it can be counted.
+partial = [{"frame": 1, "timestamp": 0.0,
+            "players": [{"player_id": 0,
+                         "keypoints": [{"name": "k", "x": 1.0, "y": 2.0, "confidence": 0.5}],
+                         "bbox": {"x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0, "confidence": 0.5}}]}]
+_, short_frames = raw_inference_from_skeleton_frames(
+    partial, fps=30.0, total_frames=1, video_width=100, video_height=100,
+    model_version="cloud:test",
+)
+check("dropped", short_frames[0].persons == [], str(short_frames[0].persons))
+
+print("a player whose keypoints are too sparse to bound still contributes them")
+# _bbox_from_player_keypoints needs five keypoints at positive coordinates and
+# returns None below that. A player it cannot bound is still a player: the
+# gates on the phone stand on the ankles, not on the box, so dropping it would
+# cost coverage for a reason that has nothing to do with the player.
+sparse = [{"frame": 1, "timestamp": 0.0,
+           "players": [{"player_id": 0,
+                        "keypoints": [
+                            {"name": f"k{i}", "x": float(i) if i < 3 else 0.0,
+                             "y": float(i) if i < 3 else 0.0, "confidence": 0.9}
+                            for i in range(17)
+                        ],
+                        "center": {"x": 1.0, "y": 1.0}, "current_speed": 0.0}]}]
+_, boxless = raw_inference_from_skeleton_frames(
+    sparse, fps=30.0, total_frames=1, video_width=100, video_height=100,
+    model_version="cloud:test",
+)
+check("kept", len(boxless[0].persons) == 1)
+check("zero-extent box", boxless[0].persons[0].box.x1 == 0.0)
+check("but a real confidence, so ranking still works", boxless[0].persons[0].box.confidence == 0.9)
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--fixture", help="write the two-person sample to this path for the Kotlin test")
 args = parser.parse_args()

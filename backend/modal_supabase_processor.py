@@ -34,6 +34,21 @@ except ImportError:  # pragma: no cover - only happens outside the Modal image
 # Mounted into the Modal image below as /root/supabase_helpers.py.
 from supabase_helpers import supabase_client, verify_hmac  # noqa: F401  (used in HMAC-protected endpoints)
 
+# The RAWI pose artifact this worker writes for Phase 2. Shared with
+# badminton-rally-mobile's RawInferenceCodec.kt reader; see
+# backend/raw_inference_codec.py's module docstring for the format. Mounted
+# into the Modal image below as /root/raw_inference_codec.py, the same way
+# supabase_helpers.py is.
+from raw_inference_codec import (  # noqa: E402
+    RawBox,
+    RawFrame,
+    RawHeader,
+    RawKeypoint,
+    RawPerson,
+    VERSION as VERSION_RAW_INFERENCE,
+    encode as encode_raw_inference,
+)
+
 
 # Path where the Modal "badminton-tracker-models" volume is mounted inside
 # worker containers (see `models_vol`/`app`/`image` config further down).
@@ -42,6 +57,24 @@ from supabase_helpers import supabase_client, verify_hmac  # noqa: F401  (used i
 # import time in file order — unlike the in-function uses of MODELS_PATH,
 # which resolve lazily and would tolerate a later definition.
 MODELS_PATH = "/models"
+
+# The pose weights filename and a deployment stamp, folded into every pose
+# artifact's model_version string (see raw_inference_from_skeleton_frames)
+# so a cloud-written RAWI file can always be told apart from an on-device one
+# and traced back to the worker that wrote it. POSE_MODEL_NAME mirrors the
+# literal loaded in _run_full_yolo_loop's `pose_model = YOLO(...)` call; kept
+# as a separate constant rather than imported from there because that call is
+# inside a function loaded once per container boot, not a module-level name.
+# No deployment-revision constant existed before this; MODAL_IMAGE_ID is set
+# by Modal's own runtime, one per built image.
+POSE_MODEL_NAME = "yolo26m-pose.pt"
+WORKER_REVISION = os.environ.get("MODAL_IMAGE_ID", "unknown")
+
+# The Phase 2 pose artifact, in the results bucket beside results.json. Small
+# enough for a phone to fetch, and in the format the phone's own pipeline
+# already reads, so no analysis code has to exist twice.
+POSES_ARTIFACT_NAME = "poses.raw"
+COCO_KEYPOINT_COUNT = 17
 
 
 # --- Rally clip generation ----------------------------------------------------
@@ -176,6 +209,107 @@ def shift_annotation_offsets(
             "clamped": clamped_offset != moved,
         })
     return rows
+
+
+def raw_inference_from_skeleton_frames(
+    skeleton_frames: List[Dict[str, Any]],
+    fps: float,
+    total_frames: int,
+    video_width: int,
+    video_height: int,
+    model_version: str,
+) -> Tuple[RawHeader, List[RawFrame]]:
+    """Project Phase 2's skeleton frames onto the RawInference wire shape.
+
+    A projection, not a computation. Nothing here decides which player is
+    which, which side of the net anyone is on, or whether a detection is
+    plausible; all of that is :analysis's on the phone, and putting any of it
+    here would be the second implementation this whole design exists to avoid
+    (see LocalInferenceEngine.kt:9-11).
+
+    What it does decide is what crosses the wire. Two things, both about size
+    or soundness rather than meaning:
+
+      * only the players the identity tracker retained, which is what keeps a
+        30-minute match at tens of megabytes rather than a hundred-odd with
+        the crowd included;
+      * no shuttle and no boxes, because rally_clips is the rally truth for a
+        cloud video and an artifact carrying a shuttle track is an artifact
+        something could derive a fourth rally list from.
+
+    A player whose keypoint list is not COCO-17 is dropped rather than written
+    short: the phone's ground-point gate rejects a short list by size, so a
+    truncated player would cost coverage with nothing able to say why.
+
+    The box is DERIVED here, because Phase 2's player dict does not carry one
+    (built around :3272) - and its confidence is the mean of the person's own
+    keypoint confidences, because that number is what ranks candidates within
+    a side on the phone. A constant would turn that ranking into "whichever
+    the model listed first".
+
+    The timestamp is the frame's container presentation time as the Phase 2
+    loop recorded it (CAP_PROP_POS_MSEC), never frame / fps. PlayerPose's own
+    KDoc is explicit that playback matches on the former and that the two
+    disagree on variable-frame-rate footage.
+    """
+    frames: List[RawFrame] = []
+    for entry in skeleton_frames:
+        persons: List[RawPerson] = []
+        for player in entry.get("players") or []:
+            keypoints = player.get("keypoints") or []
+            if len(keypoints) != COCO_KEYPOINT_COUNT:
+                continue
+            # Phase 2's player dict has no bbox (see :3272); the box is
+            # derived, by the same helper the thumbnail capture uses.
+            bbox = _bbox_from_player_keypoints(player) or {}
+            # The ranking score. NearPlayerSelector picks the highest
+            # boxConfidence among the candidates that pass its gates on one
+            # side, with a strict `>`, so a constant here would silently make
+            # the first passing candidate win instead of the best one.
+            confidences = [float(k.get("confidence") or 0.0) for k in keypoints]
+            # math.fsum, not sum(): plain float summation of 17 terms drifts
+            # off the true mean by an ULP or two. Immaterial once this narrows
+            # to the float32 the wire format stores, but fsum is the actual
+            # mean of the inputs and sum()/len() is only an approximation of
+            # it, so there is no reason to keep the sloppier one.
+            mean_confidence = math.fsum(confidences) / len(confidences) if confidences else 0.0
+            persons.append(
+                RawPerson(
+                    box=RawBox(
+                        class_id=0,
+                        confidence=mean_confidence,
+                        x1=float(bbox.get("x1") or 0.0),
+                        y1=float(bbox.get("y1") or 0.0),
+                        x2=float(bbox.get("x2") or 0.0),
+                        y2=float(bbox.get("y2") or 0.0),
+                    ),
+                    keypoints=[
+                        RawKeypoint(
+                            x=float(k.get("x") or 0.0),
+                            y=float(k.get("y") or 0.0),
+                            confidence=float(k.get("confidence") or 0.0),
+                        )
+                        for k in keypoints
+                    ],
+                )
+            )
+        frames.append(
+            RawFrame(
+                frame=int(entry.get("frame") or 0),
+                timestamp=float(entry.get("timestamp") or 0.0),
+                shuttle=None,
+                boxes=[],
+                persons=persons,
+            )
+        )
+    header = RawHeader(
+        fps=fps,
+        total_frames=total_frames,
+        video_width=video_width,
+        video_height=video_height,
+        model_version=model_version,
+    )
+    return header, frames
 
 
 def clip_row_id_for(sb, video_id: str, rally_index: int) -> Optional[str]:
@@ -3791,6 +3925,7 @@ image = (
     .add_local_file(str(_backend_dir / "rally_detection_shot_gap.py"), remote_path="/root/rally_detection_shot_gap.py")
     .add_local_file(str(_backend_dir / "speed_calc.py"), remote_path="/root/speed_calc.py")
     .add_local_file(str(_backend_dir / "supabase_helpers.py"), remote_path="/root/supabase_helpers.py")
+    .add_local_file(str(_backend_dir / "raw_inference_codec.py"), remote_path="/root/raw_inference_codec.py")
 )
 
 
@@ -4970,6 +5105,52 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
                 "warning", "processing",
             )
 
+        # The pose artifact: the same frames the merged JSON carries, in the
+        # format the phones read. Written before `del skeleton_frames` because
+        # it is projected from them, and non-fatal because a video with clips
+        # and no heatmap is a worse result than a video with neither.
+        poses_path = None
+        poses_frame_count = 0
+        try:
+            pose_header, pose_frames = raw_inference_from_skeleton_frames(
+                skeleton_frames,
+                fps=fps,
+                total_frames=total_frames,
+                video_width=width,
+                video_height=height,
+                model_version=f"cloud:{POSE_MODEL_NAME}:{WORKER_REVISION}",
+            )
+            pose_blob = encode_raw_inference(pose_header, pose_frames)
+            poses_frame_count = len(pose_frames)
+            pose_blob_mb = len(pose_blob) / (1024 * 1024)
+            pose_candidate = f"{owner_id_holder['owner_id']}/{video_id}/{POSES_ARTIFACT_NAME}"
+            await asyncio.to_thread(
+                lambda: supabase_client()
+                .storage
+                .from_("results")
+                .upload(
+                    path=pose_candidate,
+                    file=pose_blob,
+                    file_options={
+                        "content-type": "application/octet-stream",
+                        "upsert": "true",
+                    },
+                )
+            )
+            poses_path = pose_candidate
+            del pose_blob  # tens of MB; free before the merged-JSON upload below
+            await send_log(
+                f"Pose artifact uploaded: {poses_frame_count} frames, "
+                f"{pose_blob_mb:.1f} MB",
+                "success", "processing",
+            )
+        except Exception as pose_err:
+            print(f"[MODAL] [phase2] Pose artifact upload failed: {pose_err}")
+            await send_log(
+                f"Pose artifact upload failed (non-fatal): {pose_err}",
+                "warning", "processing",
+            )
+
         # Free large in-memory structures before the upload.
         del skeleton_frames
         del merged_results
@@ -5000,6 +5181,9 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
             "has_court_detection": False,
             "has_rally_detection": len(rallies) > 0,
             "rally_count": len(rallies),
+            "poses_artifact_path": poses_path,
+            "poses_frame_count": poses_frame_count,
+            "poses_codec_version": VERSION_RAW_INFERENCE,
         }
         await asyncio.to_thread(
             lambda: supabase_client()
