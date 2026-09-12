@@ -129,6 +129,72 @@ def pad_rally_windows(
     return padded
 
 
+# How far a clip boundary must move before its notes are re-anchored, in
+# seconds. Below this a re-cut that agreed with the previous cut would write a
+# row per note on every Phase 2 run, churning updated_at on data nobody
+# touched. Above it, a note is pointing at footage it was not written against.
+ANNOTATION_SHIFT_EPSILON_S = 0.05
+
+
+def shift_annotation_offsets(
+    annotations: List[Dict[str, Any]],
+    old_clip_start: float,
+    new_clip_start: float,
+    new_clip_end: float,
+) -> List[Dict[str, Any]]:
+    """Re-anchor a clip's notes when the re-cut moves the clip's boundaries.
+
+    `rally_annotations.timestamp_seconds` is an OFFSET INTO THE CLIP FILE, not
+    a position in the source video: both apps seek straight to it (see
+    ClipDetailViewModel.seekTo). The re-cut upserts on
+    (video_id, rally_index), so the row id survives while the footage beneath
+    it moves, and the offset has to move with it:
+
+        new_offset = old_offset + (old_clip_start - new_clip_start)
+
+    A note whose re-anchored offset falls outside the new window is clamped to
+    the window and flagged rather than moved silently. A note pointing a second
+    off is recoverable by a coach who watches it; a note pointing at footage
+    that no longer exists is not, and the flag is what lets a caller say so.
+
+    Returns one row per note whose offset ACTUALLY CHANGES, so a re-cut that
+    reproduced the previous boundaries writes nothing.
+    """
+    delta = old_clip_start - new_clip_start
+    if abs(delta) < ANNOTATION_SHIFT_EPSILON_S:
+        return []
+
+    window = max(0.0, new_clip_end - new_clip_start)
+    rows: List[Dict[str, Any]] = []
+    for annotation in annotations:
+        old_offset = float(annotation.get("timestamp_seconds") or 0.0)
+        moved = old_offset + delta
+        clamped_offset = min(max(moved, 0.0), window)
+        rows.append({
+            "id": annotation["id"],
+            "timestamp_seconds": clamped_offset,
+            "clamped": clamped_offset != moved,
+        })
+    return rows
+
+
+def clip_row_id_for(sb, video_id: str, rally_index: int) -> Optional[str]:
+    """The rally_clips.id for one rally of one video, or None.
+
+    Separate from the upsert because the upsert's response shape has changed
+    between supabase-py versions and this needs exactly one field.
+    """
+    rows = (
+        sb.table("rally_clips")
+        .select("id")
+        .eq("video_id", video_id)
+        .eq("rally_index", rally_index)
+        .limit(1)
+        .execute()
+    ).data or []
+    return rows[0]["id"] if rows else None
+
+
 def cut_and_upload_rally_clips(video_path: str, rallies: list, video_id: str, owner_id: str):
     """
     For each detected rally, cut the source video with a frame-accurate
