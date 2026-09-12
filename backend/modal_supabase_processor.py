@@ -5111,6 +5111,12 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
         # and no heatmap is a worse result than a video with neither.
         poses_path = None
         poses_frame_count = 0
+        # Pre-bound so the `finally` below can always `del` them, even when
+        # the projection itself raises before either name is assigned a real
+        # value - an unconditional `del` on a name that was never bound would
+        # raise NameError inside `finally` and mask the original exception.
+        pose_frames = None
+        pose_blob = None
         try:
             pose_header, pose_frames = raw_inference_from_skeleton_frames(
                 skeleton_frames,
@@ -5138,7 +5144,6 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
                 )
             )
             poses_path = pose_candidate
-            del pose_blob  # tens of MB; free before the merged-JSON upload below
             await send_log(
                 f"Pose artifact uploaded: {poses_frame_count} frames, "
                 f"{pose_blob_mb:.1f} MB",
@@ -5150,6 +5155,16 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
                 f"Pose artifact upload failed (non-fatal): {pose_err}",
                 "warning", "processing",
             )
+        finally:
+            # Both are potentially hundreds of MB on a 30-minute match -
+            # `pose_frames` is a list of dataclass objects with Python's
+            # per-object overhead, plausibly larger in memory than the
+            # encoded `pose_blob` itself. Freed here rather than only on the
+            # success path, so a transient upload failure doesn't leave both
+            # alive alongside `skeleton_frames` and `merged_results` for the
+            # rest of Phase 2.
+            del pose_frames
+            del pose_blob
 
         # Free large in-memory structures before the upload.
         del skeleton_frames
