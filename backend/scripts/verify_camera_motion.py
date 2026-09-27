@@ -58,6 +58,7 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 from camera_motion import (  # noqa: E402
+    MAX_PENDING_SAMPLES,
     CameraMotion,
     CameraMotionTracker,
     marking_time_from,
@@ -426,6 +427,32 @@ if late_motion is not None:
             f"buffered frame at t={probe_t} recovered within 2 px",
             m is not None and worst_corner_distance(pan(probe_t - LATE_T), m, WIDTH, HEIGHT) <= 2.0,
         )
+
+print("  frames before a marking time 10 s in: only the last 5 s are kept")
+# Mirrors Kotlin's frames_before_a_marking_time_ten_seconds_in_keep_only_the_last_five_seconds.
+# Each pending frame is a tracker-size image; 10 s at 10 Hz would hold 100.
+# The cap keeps the 50 nearest the marking frame and drops the oldest.
+check("the pending cap is Kotlin's 50", MAX_PENDING_SAMPLES == 50, f"got {MAX_PENDING_SAMPLES}")
+cap_tracker = CameraMotionTracker(10.0, WIDTH, HEIGHT)
+for i in range(101):
+    t = i / 10.0
+    if cap_tracker.wants(t):
+        cap_tracker.offer(t, base)
+cap_motion = cap_tracker.finish()
+check("a marking time 10 s in still tracks", cap_motion is not None)
+if cap_motion is not None:
+    check(
+        "the first sample kept is the one at 5.0 s",
+        cap_motion.samples[0][0] == 5.0,
+        f"first sample at {cap_motion.samples[0][0]}",
+    )
+    check(
+        "50 pending samples plus the marking frame",
+        len(cap_motion.samples) == MAX_PENDING_SAMPLES + 1,
+        f"{len(cap_motion.samples)} samples",
+    )
+    check("a dropped frame has no camera", cap_motion.at(4.8) is None)
+    check("the oldest kept frame has one", cap_motion.at(5.0) is not None)
 
 print("  a video that ends before the marking time has no camera")
 early_end_tracker = CameraMotionTracker(5.0, WIDTH, HEIGHT)

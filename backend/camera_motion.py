@@ -22,6 +22,7 @@ and end to end on a real video by backend/scripts/run_phase2_locally.py.
 from __future__ import annotations
 
 import math
+from collections import deque
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -55,6 +56,13 @@ RANSAC_MAX_ITERS = 300
 # Design doc section 4.3 step 5: acceptance.
 MIN_INLIERS = 40
 MAX_CORNER_SHIFT = 0.25
+
+# Design doc section 4.2: frames before the marking frame. At most this many
+# are held for the backward pass, 5 s at 10 Hz; when full the OLDEST is
+# dropped, so the frames kept are the ones nearest the marking frame, and a
+# dropped frame has no sample, so at() returns None there.
+# Mirrors CameraMotionTracker.MAX_PENDING_SAMPLES in Kotlin, name and value.
+MAX_PENDING_SAMPLES = 50
 
 # Design doc section 4.4: reading M at a frame.
 EXACT_S = 1e-6
@@ -284,7 +292,7 @@ class CameraMotionTracker:
         self._reference_points = None
         self._reference_timestamp = 0.0
         self._gave_up = False
-        self._pending: list = []
+        self._pending: deque = deque()  # oldest first, at most MAX_PENDING_SAMPLES
         self._samples: list = []
         self._guess = None  # tracker-space homography: LK's initial-flow anchor.
         self._latest = None  # source-space M, for the causal in-loop use (section 6).
@@ -334,6 +342,8 @@ class CameraMotionTracker:
             return
         if self._reference_grey is None:
             if timestamp < self._marking_time_s - EXACT_S:
+                if len(self._pending) == MAX_PENDING_SAMPLES:
+                    self._pending.popleft()
                 self._pending.append((timestamp, grey))
                 return
             corners = _reference_corners(grey)
