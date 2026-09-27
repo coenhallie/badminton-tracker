@@ -3111,6 +3111,7 @@ with_reid: False
 
     camera_tracker = None
     camera_tracking = bool(manual_court_keypoints)
+    camera_stopped_at: Optional[int] = None
     marking_time_s = marking_time_from(manual_court_keypoints)
     if camera_tracking:
         await send_log(
@@ -3189,6 +3190,11 @@ with_reid: False
             return True
         if frame_to_marking is not None:
             sx, sy = _to_marking_frame(frame_to_marking, [(sx, sy)])[0]
+            # The polygon says "unbounded upward" with vertices at y = 0, the
+            # top of the marking frame. Under an upward tilt a real high
+            # shuttle maps above that edge (negative y, up to 49 px on
+            # IMG_5892), so it is held at the edge rather than rejected.
+            sy = max(sy, 0.0)
         result = cv2.pointPolygonTest(shuttle_court_polygon, (float(sx), float(sy)), measureDist=False)
         return result >= 0
 
@@ -3301,6 +3307,7 @@ with_reid: False
                     camera_tracker.offer(frame_pts, frame)
             except Exception as camera_err:
                 camera_tracking = False
+                camera_stopped_at = frame_count
                 print(f"[MODAL] [phase2] Camera tracker failed at frame {frame_count}: {camera_err!r}")
                 await send_log(
                     f"Camera tracking stopped at frame {frame_count} ({camera_err}); "
@@ -3967,7 +3974,14 @@ with_reid: False
             camera_motion = camera_tracker.finish()
         except Exception as camera_err:
             print(f"[MODAL] [phase2] Camera tracker finish failed: {camera_err!r}")
-        if camera_motion is not None:
+        if camera_stopped_at is not None:
+            kept = len(camera_motion.samples) if camera_motion is not None else 0
+            await send_log(
+                f"Camera tracking stopped at frame {camera_stopped_at} after an error; "
+                f"{kept} samples kept; the pose file has no camera after it",
+                "warning", "court",
+            )
+        elif camera_motion is not None:
             await send_log(
                 f"Camera followed: {camera_tracker.accepted} samples accepted, "
                 f"{camera_tracker.dropped} dropped",

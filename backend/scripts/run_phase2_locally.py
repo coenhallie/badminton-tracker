@@ -66,6 +66,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--pose-weights", type=Path, default=WEIGHTS / "yolo26m-pose.pt")
     parser.add_argument("--detector-weights", type=Path, default=WEIGHTS / "badminton.pt")
     parser.add_argument("--out", type=Path, default=CORPUS / "cloud-local" / "poses.raw")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="stop after this many decoded frames (a long video's first stretch)")
     return parser.parse_args()
 
 
@@ -82,6 +84,32 @@ def _probe(video: Path):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
     return fps, total, width, height
+
+
+def _limit_decoding(max_frames: int) -> None:
+    """Make every VideoCapture opened from here on end after `max_frames`
+    reads. The loop opens its own capture and reads until `read()` fails,
+    so this is the one place a run can be cut short without touching it.
+    """
+    import cv2
+
+    real_capture = cv2.VideoCapture
+
+    class LimitedCapture:
+        def __init__(self, *args):
+            self._capture = real_capture(*args)
+            self._left = max_frames
+
+        def read(self):
+            if self._left <= 0:
+                return False, None
+            self._left -= 1
+            return self._capture.read()
+
+        def __getattr__(self, name):
+            return getattr(self._capture, name)
+
+    cv2.VideoCapture = LimitedCapture
 
 
 def main() -> int:
@@ -138,9 +166,13 @@ def main() -> int:
         pass
 
     probe_fps, total_frames, width, height = _probe(args.video)
+    if args.max_frames is not None:
+        total_frames = min(total_frames, args.max_frames)
+        _limit_decoding(args.max_frames)
     fps, substituted = proc.normalize_fps(probe_fps)
     print(f"video: {args.video} {width}x{height}, fps {fps:.3f}"
-          f"{' (substituted)' if substituted else ''}, {total_frames} frames")
+          f"{' (substituted)' if substituted else ''}, {total_frames} frames"
+          f"{' (limited by --max-frames)' if args.max_frames is not None else ''}")
     print("device: cpu (the loop takes no device; ultralytics uses CUDA only when present)")
 
     os.chdir(scratch / "work")
@@ -178,9 +210,14 @@ def main() -> int:
 
     stats = tracking_state.get("tracker_stats") or {}
     near_ids = [pid for pid in (0, 1) if stats.get(f"player_{pid}_side") == "bottom"]
+    far_ids = [pid for pid in (0, 1) if stats.get(f"player_{pid}_side") == "top"]
     near_frames = sum(
         1 for entry in skeleton_frames
         if any(p.get("player_id") in near_ids for p in entry.get("players") or [])
+    )
+    far_frames = sum(
+        1 for entry in skeleton_frames
+        if any(p.get("player_id") in far_ids for p in entry.get("players") or [])
     )
 
     print()
@@ -191,6 +228,7 @@ def main() -> int:
         print(f"camera in the pose file: {len(camera.samples)} samples, "
               f"reference {camera.reference_timestamp:.3f} s")
     print(f"frames with a near-side player (player {near_ids}): {near_frames} of {len(skeleton_frames)}")
+    print(f"frames with a far-side player (player {far_ids}): {far_frames} of {len(skeleton_frames)}")
     print(f"wrote {args.out} ({len(blob) / (1024 * 1024):.1f} MB, {len(frames)} frames)")
     scratch_dir.cleanup()
     return 0
