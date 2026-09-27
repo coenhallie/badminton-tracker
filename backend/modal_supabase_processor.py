@@ -16,7 +16,7 @@ import json
 import tempfile
 import math
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
+from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple, List
 import time
 
 import modal
@@ -48,6 +48,9 @@ from raw_inference_codec import (  # noqa: E402
     VERSION as VERSION_RAW_INFERENCE,
     encode as encode_raw_inference,
 )
+
+if TYPE_CHECKING:
+    from camera_motion import CameraMotion
 
 
 # Path where the Modal "badminton-tracker-models" volume is mounted inside
@@ -218,7 +221,8 @@ def raw_inference_from_skeleton_frames(
     video_width: int,
     video_height: int,
     model_version: str,
-) -> Tuple[RawHeader, List[RawFrame]]:
+    camera: Optional["CameraMotion"] = None,
+) -> Tuple[RawHeader, List[RawFrame], Optional["CameraMotion"]]:
     """Project Phase 2's skeleton frames onto the RawInference wire shape.
 
     A projection, not a computation. Nothing here decides which player is
@@ -251,6 +255,13 @@ def raw_inference_from_skeleton_frames(
     loop recorded it (CAP_PROP_POS_MSEC), never frame / fps. PlayerPose's own
     KDoc is explicit that playback matches on the former and that the two
     disagree on variable-frame-rate footage.
+
+    `camera` is passed through unchanged into the returned tuple, for the
+    caller to hand to `encode_raw_inference`. This function does not track
+    the camera itself (that is `CameraMotionTracker`, Task 12, driven by the
+    Phase 2 loop in Task 14); it only carries the result along so this
+    projection stays the single place a caller builds a RawInference from
+    Phase 2's output.
     """
     frames: List[RawFrame] = []
     for entry in skeleton_frames:
@@ -309,7 +320,7 @@ def raw_inference_from_skeleton_frames(
         video_height=video_height,
         model_version=model_version,
     )
-    return header, frames
+    return header, frames, camera
 
 
 def clip_row_id_for(sb, video_id: str, rally_index: int) -> Optional[str]:
@@ -5118,7 +5129,7 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
         pose_frames = None
         pose_blob = None
         try:
-            pose_header, pose_frames = raw_inference_from_skeleton_frames(
+            pose_header, pose_frames, pose_camera = raw_inference_from_skeleton_frames(
                 skeleton_frames,
                 fps=fps,
                 total_frames=total_frames,
@@ -5126,7 +5137,7 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
                 video_height=height,
                 model_version=f"cloud:{POSE_MODEL_NAME}:{WORKER_REVISION}",
             )
-            pose_blob = encode_raw_inference(pose_header, pose_frames)
+            pose_blob = encode_raw_inference(pose_header, pose_frames, camera=pose_camera)
             poses_frame_count = len(pose_frames)
             pose_blob_mb = len(pose_blob) / (1024 * 1024)
             pose_candidate = f"{owner_id_holder['owner_id']}/{video_id}/{POSES_ARTIFACT_NAME}"
