@@ -2877,6 +2877,112 @@ def stabilised_skeleton(skeleton: Dict, frame_to_marking) -> Dict:
     return shadow
 
 
+def distinct_people(kpts_data, boxes) -> List[int]:
+    """Indices of the tracked results that are distinct people.
+
+    In track mode ultralytics can report one detection twice: two track ids
+    carry bit-identical keypoints, and one of the two boxes is a stale track's
+    box somewhere else in the frame (IMG_5892 frame 1730: the near player's
+    keypoints under her own box and again under a box by the left-hand
+    stands, the second track having "moved" 200,000 px in 58 s). The copy
+    counts as a second candidate, and after the movement warm-up the two
+    copies of one player can outrank the real player on the other side and
+    push her out of the top two.
+
+    Only exact keypoint equality groups results, so two real people are
+    never merged. Within a group the copy kept is the one whose box agrees
+    best with its keypoints (intersection over union with the keypoints'
+    own bounds), ties and a missing box going to the first: the copies
+    differ only in their box, the box feeds the court test, the area
+    ranking and the emitted player box, and nothing orders the real one
+    first. In every double report inspected on the corpus (IMG_5892,
+    2eabfc01) the real one came first, so this and "keep the first" chose
+    alike there.
+
+    Not gated on the camera: the double report is ultralytics', whatever
+    the camera did.
+    """
+    import numpy as np
+
+    groups: Dict[bytes, List[int]] = {}
+    for index in range(len(kpts_data)):
+        key = np.ascontiguousarray(kpts_data[index], dtype=np.float32).tobytes()
+        groups.setdefault(key, []).append(index)
+
+    kept: List[int] = []
+    for members in groups.values():
+        if len(members) == 1 or boxes is None:
+            kept.append(members[0])
+            continue
+        extent = skeleton_bbox_from_keypoints(kpts_data[members[0]])
+
+        def agreement(index: int) -> float:
+            if extent is None or index >= len(boxes):
+                return 0.0
+            box = boxes[index]
+            return calculate_iou(
+                {"x1": float(box[0]), "y1": float(box[1]), "x2": float(box[2]), "y2": float(box[3])},
+                extent,
+            )
+
+        kept.append(max(members, key=lambda index: (agreement(index), -index)))
+    return sorted(kept)
+
+
+# The phone's ground-point confidence (NearPlayer.kt, MIN_KEYPOINT_CONFIDENCE):
+# both ankles at least this sure, or there is no ground point.
+GROUND_ANKLE_MIN_CONFIDENCE = 0.5
+
+
+def court_area_admits(skeleton: Dict, court_polygon, camera_following: bool) -> bool:
+    """Whether Phase 2's court area filter keeps this skeleton.
+
+    Kept when EITHER the box bottom below the centre (the test this filter
+    always made) OR, while the camera is being followed, the ankle midpoint
+    lies inside `court_polygon`, both in the same pixel space (a shadow's:
+    the marking frame's). The box bottom sits below the ankles, often by far
+    more than the polygon's 2% margin: a player at the near baseline can
+    have her ankles inside and her box bottom 0.25 to 1.3 m further back in
+    court terms, so the box bottom alone dropped her before the pose file
+    was ever written (IMG_5892, 2026-09-27). The phone's own on-court gate
+    stands on the ankles (NearPlayer.kt `groundPoint`), so this lets through
+    whoever the phone would judge, and it only ever adds: everyone the box
+    bottom admits is still admitted.
+
+    The ankle point counts only when both ankles are at least
+    GROUND_ANKLE_MIN_CONFIDENCE sure, the phone's rule, so a guessed ankle
+    cannot pull a spectator onto the court, and only when
+    `camera_following` (the tracker accepted its most recent sample,
+    `CameraMotionTracker.following`). On a broadcast's close-ups and
+    replays the tracker has lost the camera and the marked court is not in
+    view; the polygon then lies over whatever that shot shows, and ankles
+    admitted a seated official and a photographer (743d7fb1 frames 1988 to
+    2016 and 5230) where the box bottom admitted neither. With no camera
+    tracker at all the ankle clause is off, which is the filter as it was.
+    """
+    import cv2
+
+    bbox = skeleton.get("bbox")
+    feet_y = bbox["y2"] if bbox else skeleton["center"][1]
+    box_point = (float(skeleton["center"][0]), float(feet_y))
+    if cv2.pointPolygonTest(court_polygon, box_point, measureDist=False) >= 0:
+        return True
+    if not camera_following:
+        return False
+
+    kpts = skeleton.get("kpts")
+    conf = skeleton.get("conf")
+    if kpts is None or conf is None or len(kpts) <= 16 or len(conf) <= 16:
+        return False
+    if conf[15] < GROUND_ANKLE_MIN_CONFIDENCE or conf[16] < GROUND_ANKLE_MIN_CONFIDENCE:
+        return False
+    ankle_point = (
+        (float(kpts[15][0]) + float(kpts[16][0])) / 2.0,
+        (float(kpts[15][1]) + float(kpts[16][1])) / 2.0,
+    )
+    return cv2.pointPolygonTest(court_polygon, ankle_point, measureDist=False) >= 0
+
+
 # =============================================================================
 # PHASE 2 HELPERS — STUBS FOR TASK 5
 # =============================================================================
@@ -3321,6 +3427,10 @@ with_reid: False
         # shuttle point exactly as detected: the fixed marks, as before. An
         # accepted M is never singular (its gate holds the 2x2 determinant to
         # 0.5..2), but a camera must not be able to fail the run.
+        # Whether the tracker accepted its most recent sample, so this frame's
+        # camera is a live estimate rather than the last one held through a
+        # cut; court_area_admits trusts ankles only then.
+        camera_following = camera_tracking and camera_tracker is not None and camera_tracker.following
         frame_to_marking = None
         if camera_now is not None:
             try:
@@ -3498,7 +3608,9 @@ with_reid: False
 
                 skeleton_data = []
 
-                for person_idx in range(len(kpts_data)):
+                # One detection reported under two track ids is one person;
+                # see distinct_people.
+                for person_idx in distinct_people(kpts_data, boxes):
                     kpts = kpts_data[person_idx]
                     conf = kpts_conf[person_idx] if kpts_conf is not None else None
 
@@ -3607,11 +3719,9 @@ with_reid: False
                     in_court_skeletons = []
                     for s in skeleton_data:
                         bbox = s["bbox"]
-                        feet_y = bbox["y2"] if bbox else s["center"][1]
-                        check_point = (float(s["center"][0]), float(feet_y))
-
-                        result_pt = cv2.pointPolygonTest(court_polygon, check_point, measureDist=False)
-                        if result_pt >= 0:
+                        # Box bottom, or ankles while the camera is followed:
+                        # see court_area_admits for why each half is there.
+                        if court_area_admits(s, court_polygon, camera_following):
                             if is_sitting_pose(s["kpts"], bbox, s.get("conf")):
                                 s["is_sitting"] = True
                             else:

@@ -33,6 +33,11 @@ Sections:
      frames, a video that ends before T, a textureless marking frame, a
      mid-track scene change, and a marking time that falls off a 0.1 s
      sampling boundary.
+  7. Phase 2's court area filter on the shadows the camera produces: box
+     bottom, or ankles while the camera is followed, and never fewer people
+     than the box bottom alone.
+  8. Phase 2 counts one detection reported under two track ids once.
+  9. CameraMotionTracker.following, which gates section 7's ankle clause.
 
 cv2 and numpy are imported here at module level: this script IS the OpenCV
 test, unlike camera_motion.py itself, which the processor may be imported
@@ -485,6 +490,156 @@ if off_boundary_motion is not None:
         "the marking frame's own M is the identity",
         identity_m is not None and np.allclose(identity_m, np.eye(3)),
     )
+
+
+# ---------------------------------------------------------------------------
+print("7. Phase 2's court area filter: box bottom, or ankles while the camera is followed")
+# ---------------------------------------------------------------------------
+# The filter runs on shadows (marking-frame pixels) in
+# modal_supabase_processor._run_full_yolo_loop. Its box-bottom test dropped a
+# player standing on the near baseline on IMG_5892 (her box bottom lands
+# behind the line while her ankles are on it); the ankle point is the
+# phone's own ground point, at the phone's confidence. The ankles count only
+# while the camera is followed: on 743d7fb1's cut shots, where the tracker
+# had lost the camera, they admitted an official and a photographer. The
+# union may only add: whoever the box bottom admits must stay admitted.
+from modal_supabase_processor import court_area_admits, stabilised_skeleton  # noqa: E402
+
+COURT = np.array([[100, 100], [500, 100], [500, 400], [100, 400]], dtype=np.int32)
+
+
+def person(ankle_y: float, box_bottom: float, ankle_conf: tuple = (0.9, 0.9), x: float = 300.0) -> dict:
+    kpts = np.zeros((17, 2), dtype=np.float32)
+    kpts[:15] = (x, ankle_y - 100.0)
+    kpts[15] = (x - 10.0, ankle_y)
+    kpts[16] = (x + 10.0, ankle_y)
+    conf = np.full(17, 0.9, dtype=np.float32)
+    conf[15], conf[16] = ankle_conf
+    return {
+        "track_id": 1,
+        "center": (x, ankle_y),
+        "kpts": kpts,
+        "conf": conf,
+        "bbox": {"x1": x - 40.0, "y1": ankle_y - 200.0, "x2": x + 40.0, "y2": box_bottom},
+        "area": 80.0 * (box_bottom - ankle_y + 200.0),
+    }
+
+
+check("box bottom inside is admitted", court_area_admits(person(380.0, 395.0), COURT, True))
+check(
+    "box bottom inside is admitted whatever the ankles say",
+    court_area_admits(person(380.0, 395.0, ankle_conf=(0.1, 0.1)), COURT, True),
+)
+check(
+    "box bottom behind the baseline, ankles on the court: admitted",
+    court_area_admits(person(390.0, 440.0), COURT, True),
+)
+check(
+    "the same, with one ankle under the phone's 0.5 confidence: not admitted",
+    not court_area_admits(person(390.0, 440.0, ankle_conf=(0.9, 0.4)), COURT, True),
+)
+check(
+    "an ankle confidence of exactly 0.5 counts, as on the phone",
+    court_area_admits(person(390.0, 440.0, ankle_conf=(0.5, 0.5)), COURT, True),
+)
+check("box bottom and ankles both off the court: not admitted", not court_area_admits(person(430.0, 460.0), COURT, True))
+check(
+    "no confidences at all falls back to the box bottom alone",
+    not court_area_admits(dict(person(390.0, 440.0), conf=None), COURT, True),
+)
+# A pan of 60 px down: in frame pixels the ankles are off the marked court;
+# the shadow, mapped back by M^-1, stands on it.
+panned_m = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 60.0], [0.0, 0.0, 1.0]])
+panned = person(450.0, 500.0)
+check("in frame pixels the panned player is off the court", not court_area_admits(panned, COURT, True))
+check(
+    "her shadow in the marking frame is on it",
+    court_area_admits(stabilised_skeleton(panned, np.linalg.inv(panned_m)), COURT, True),
+)
+rng = np.random.default_rng(7)
+lost = 0
+for _ in range(2000):
+    ankle_y = float(rng.uniform(50.0, 480.0))
+    candidate = person(
+        ankle_y,
+        ankle_y + float(rng.uniform(0.0, 80.0)),
+        ankle_conf=(float(rng.uniform(0.0, 1.0)), float(rng.uniform(0.0, 1.0))),
+        x=float(rng.uniform(50.0, 550.0)),
+    )
+    box_point = (candidate["center"][0], candidate["bbox"]["y2"])
+    if cv2.pointPolygonTest(COURT, box_point, measureDist=False) >= 0 and not court_area_admits(candidate, COURT, True):
+        lost += 1
+check("nobody the box bottom admits is dropped (2000 random people)", lost == 0, f"{lost} dropped")
+check(
+    "ankles on the court while the camera is not followed: not admitted",
+    not court_area_admits(person(390.0, 440.0), COURT, False),
+)
+check(
+    "box bottom inside while the camera is not followed: still admitted",
+    court_area_admits(person(380.0, 395.0), COURT, False),
+)
+rng = np.random.default_rng(11)
+differ = 0
+for _ in range(2000):
+    ankle_y = float(rng.uniform(50.0, 480.0))
+    candidate = person(ankle_y, ankle_y + float(rng.uniform(0.0, 80.0)), x=float(rng.uniform(50.0, 550.0)))
+    box_in = cv2.pointPolygonTest(COURT, (candidate["center"][0], candidate["bbox"]["y2"]), measureDist=False) >= 0
+    if court_area_admits(candidate, COURT, False) != box_in:
+        differ += 1
+check("with the camera not followed the filter is the box bottom exactly (2000 random people)", differ == 0, f"{differ} differ")
+
+
+# ---------------------------------------------------------------------------
+print("8. one detection reported under two track ids is one person")
+# ---------------------------------------------------------------------------
+# Measured on IMG_5892 and 2eabfc01: in track mode ultralytics can report
+# bit-identical keypoints under two track ids, one with a stale box elsewhere.
+# Admitting her by her ankles made both copies candidates, and they could
+# push the far player out of the top two.
+from modal_supabase_processor import distinct_people  # noqa: E402
+
+player = person(390.0, 400.0)["kpts"]
+other = person(200.0, 210.0, x=250.0)["kpts"]
+own_box = [290.0, 190.0, 310.0, 392.0]
+stale_box = [20.0, 50.0, 90.0, 180.0]
+check(
+    "a copy under a stale box collapses to the copy under her own box",
+    distinct_people([player, other, player.copy()], np.array([stale_box, [240.0, 0.0, 260.0, 202.0], own_box])) == [1, 2],
+)
+check(
+    "the same when her own box comes first",
+    distinct_people([player, player.copy()], np.array([own_box, stale_box])) == [0],
+)
+nudged = player.copy()
+nudged[3] += 0.5
+check(
+    "two people whose keypoints differ at all both stay",
+    distinct_people([player, nudged], np.array([own_box, own_box])) == [0, 1],
+)
+check("with no boxes the first copy is kept", distinct_people([player, player.copy(), other], None) == [0, 2])
+
+
+# ---------------------------------------------------------------------------
+print("9. following: whether the most recent offered sample was accepted")
+# ---------------------------------------------------------------------------
+follow_base = make_texture(WIDTH, HEIGHT, seed=91)
+follow_other = make_texture(WIDTH, HEIGHT, seed=92)
+follow = CameraMotionTracker(0.1, WIDTH, HEIGHT)
+check("not following before any frame", not follow.following)
+follow.offer(0.0, follow_base)
+check("not following on a frame buffered before the marking time", not follow.following)
+follow.offer(0.1, follow_base)
+check("following once the marking frame is taken", follow.following)
+follow.offer(0.2, follow_base)
+check("following after an accepted sample", follow.following and follow.accepted == 3)
+follow.offer(0.3, follow_other)
+check("not following after a dropped sample (a cut to another scene)", not follow.following and follow.dropped == 1)
+check("latest() still holds the last accepted camera meanwhile", follow.latest() is not None)
+follow.offer(0.4, follow_base)
+check("following again once a sample is accepted", follow.following)
+blank = CameraMotionTracker(0.1, WIDTH, HEIGHT)
+blank.offer(0.1, np.full((HEIGHT, WIDTH, 3), 128, dtype=np.uint8))
+check("not following after the tracker gives up", not blank.following)
 
 
 if FAILURES:

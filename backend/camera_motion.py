@@ -288,6 +288,7 @@ class CameraMotionTracker:
         self._samples: list = []
         self._guess = None  # tracker-space homography: LK's initial-flow anchor.
         self._latest = None  # source-space M, for the causal in-loop use (section 6).
+        self._following = False
 
     def _bucket(self, timestamp: float) -> int:
         return math.floor(timestamp / SAMPLE_INTERVAL_S + 1e-9)
@@ -338,6 +339,7 @@ class CameraMotionTracker:
             corners = _reference_corners(grey)
             if corners.shape[0] < MIN_CORNERS:
                 self._gave_up = True
+                self._following = False
                 self._pending.clear()
                 return
             self._reference_grey = grey
@@ -357,8 +359,11 @@ class CameraMotionTracker:
                 backward_guess = self._track(pending_t, pending_grey, backward_guess, update_latest=False)
             self._pending.clear()
             self._guess = np.eye(3, dtype=np.float64)
+            self._following = True
             return
+        accepted_before = self.accepted
         self._guess = self._track(timestamp, grey, self._guess, update_latest=True)
+        self._following = self.accepted > accepted_before
 
     def _track(self, timestamp: float, grey, guess, update_latest: bool):
         """One anchored LK sample, started from `guess` (tracker space).
@@ -428,6 +433,19 @@ class CameraMotionTracker:
         marking time never does (see `_track`'s `update_latest`).
         """
         return None if self._latest is None else self._latest.copy()
+
+    @property
+    def following(self) -> bool:
+        """Whether the most recent sample offered was accepted: the camera is
+        being followed right now, rather than `latest()` holding the last
+        known M through a cut to another camera or a fast pan. False before
+        the marking frame, after a give-up, and after any dropped sample
+        until the next accepted one. Frames that are not offered (between
+        0.1 s samples) leave it as it was. Only the forward pass sets it; the
+        backward pass over frames buffered before a late marking time never
+        does.
+        """
+        return self._following
 
     def finish(self):
         """The camera over the whole pass, or None when the marking frame was
