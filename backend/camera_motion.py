@@ -15,8 +15,9 @@ modal_supabase_processor.py's own lazy imports of both, so any offline script
 that imports this module (directly, or through the processor) still loads
 without OpenCV or numpy installed.
 
-This module does not yet run inside the Phase 2 loop; that is a later task.
-It is exercised offline by backend/scripts/verify_camera_motion.py.
+The Phase 2 loop (`_run_full_yolo_loop` in modal_supabase_processor.py)
+drives it. It is exercised offline by backend/scripts/verify_camera_motion.py,
+and end to end on a real video by backend/scripts/run_phase2_locally.py.
 """
 from __future__ import annotations
 
