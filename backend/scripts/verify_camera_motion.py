@@ -21,10 +21,18 @@ Sections:
   2. Sampling matches Kotlin's variable_frame_rate_samples_by_time_not_by_count.
   3. CameraMotion.at()'s seven rules, same cases as Kotlin's CameraMotionTest.
   4. marking_time_from's defaulting.
-  5. The corpus comparison against opencv_motion.json, when it exists.
+  5. The painted-line gate on the real cloud decode path (VideoCapture BGR ->
+     grey -> INTER_AREA), plus parity against opencv_motion.json at the same
+     paint points, when that file exists. Fix round 1 (plan-mandated):
+     replaces an earlier version of this section that compared against
+     opencv_motion.json at the four IMAGE CORNERS, which fails by
+     construction (corner distances extrapolate far past where either
+     tracker has anything to track, and blew past the gate on a genuine,
+     if imprecise, port).
   6. Extra tracker coverage: a late marking time with a chain of buffered
-     frames, a video that ends before T, a textureless marking frame, and a
-     mid-track scene change.
+     frames, a video that ends before T, a textureless marking frame, a
+     mid-track scene change, and a marking time that falls off a 0.1 s
+     sampling boundary.
 
 cv2 and numpy are imported here at module level: this script IS the OpenCV
 test, unlike camera_motion.py itself, which the processor may be imported
@@ -196,72 +204,194 @@ check("a bool gives 0.1, not 1.0 or 0.0", marking_time_from({"marked_at_s": True
 check("1.0 gives 1.0", marking_time_from({"marked_at_s": 1.0}) == 1.0)
 
 # ---------------------------------------------------------------------------
-print("5. the painted corpus comparison, when opencv_motion.json exists")
+print("5. the painted-line gate on the real cloud decode path")
 # ---------------------------------------------------------------------------
+# Controller ruling, Task 12 fix round 1: the corner-based version of this
+# gate failed by construction (corner distances extrapolate past where
+# either tracker has texture to hold on to, and the tracker's own
+# reproducibility floor is well under a pixel at the paint points but not at
+# the corners). The primary gate is now the painted lines themselves, on this
+# script's own VideoCapture BGR decode; parity against opencv_motion.json (a
+# separate implementation's measurement, when that file exists) is checked
+# at the same paint points, not at the corners.
 CORPUS_DIR = Path.home() / "shuttl-corpus" / "IMG_5892"
-OPENCV_MOTION_PATH = CORPUS_DIR / "opencv_motion.json"
 SOURCE_MOV = CORPUS_DIR / "source.mov"
+H_IDEAL_PATH = CORPUS_DIR / "H_ideal.json"
+OPENCV_MOTION_PATH = CORPUS_DIR / "opencv_motion.json"
 
-if not OPENCV_MOTION_PATH.exists():
-    print(f"  SKIPPED: {OPENCV_MOTION_PATH} does not exist yet (another task writes it).")
+# Design doc's painted-line points (near short service line, near baseline,
+# near long service line), in court metres. Matches the plan's Task 5 probe
+# and /tmp/hm/cost/acc.py's LINES exactly.
+COURT_LENGTH_M = 13.4
+SERVICE_LINE_M = 1.98
+DOUBLES_LONG_SERVICE_M = 0.76
+PAINT_COURT_POINTS = (
+    [(x, COURT_LENGTH_M / 2 + SERVICE_LINE_M) for x in np.linspace(0.8, 5.3, 8)]
+    + [(x, COURT_LENGTH_M) for x in np.linspace(0.8, 5.3, 8)]
+    + [(x, COURT_LENGTH_M - DOUBLES_LONG_SERVICE_M) for x in np.linspace(0.8, 5.3, 8)]
+)
+
+
+def paint_line_vertical_error(grey_float, x_px: float, y_px: float):
+    """The vertical distance from (x_px, y_px) to the painted line's centre
+    nearby in `grey_float` (a full-resolution grey frame, float dtype), or
+    None if there is no line to find there.
+
+    A faithful port of /tmp/hm/cost/acc.py's `line_err`, which the
+    controller ruling names as the method for this gate: a grey-weighted
+    centroid of the brightest pixels in a +-12 px vertical window, only
+    counted when that window's peak is clearly brighter than its wider
+    surroundings (the local column's own median, in a +-40 px window, plus
+    40). A point with no such peak contributes NOTHING to the aggregate
+    (not a fixed penalty); a point outside the image, or too close to the
+    top or bottom edge for a full window, is penalised at 99 px so it
+    cannot silently vanish from the gate; a window with a peak but no clear
+    line shape (degenerate weights) is penalised at 12 px, the edge of the
+    search window.
+    """
+    height, width = grey_float.shape
+    if not (0 <= x_px < width and 12 <= y_px < height - 13):
+        return 99.0
+    x = int(round(x_px))
+    offsets = np.arange(-12, 13)
+    rows = np.clip((y_px + offsets).astype(int), 0, height - 1)
+    column = grey_float[rows, x]
+    wide_lo = max(0, int(y_px) - 40)
+    wide_hi = int(y_px) + 40
+    wide_median = np.median(grey_float[wide_lo:wide_hi, x])
+    if column.max() < wide_median + 40:
+        return None
+    weights = np.clip(column - np.median(column), 0.0, None)
+    if weights.max() <= 0:
+        return 12.0
+    weights = np.where(weights < 0.5 * weights.max(), 0.0, weights)
+    return abs(float((weights * offsets).sum() / weights.sum()))
+
+
+def project_court_point(m, h_ideal_inv, cx: float, cy: float):
+    """A court point (metres) into the frame `m` maps to: court -> marking
+    frame pixels via `h_ideal_inv` (H_ideal is pixel -> court, per the
+    ruling), then marking frame -> this frame's pixels via `m`.
+    """
+    v = m @ (h_ideal_inv @ np.array([cx, cy, 1.0]))
+    return v[0] / v[2], v[1] / v[2]
+
+
+if not (SOURCE_MOV.exists() and H_IDEAL_PATH.exists()):
+    print(f"  SKIPPED: {SOURCE_MOV} and/or {H_IDEAL_PATH} do not exist on this machine.")
 else:
-    # Assumed schema, since the writer (a separate task) had not run at the
-    # time this script was written: a JSON object with a "samples" list of
-    # {"timestamp": float, "M": [[3 floats], [3 floats], [3 floats]]}, in
-    # source pixels. A file that exists but does not match this shape is a
-    # FAILURE (a schema mismatch to fix), not something to skip past.
-    raw = json.loads(OPENCV_MOTION_PATH.read_text())
-    reference_samples = None
-    if isinstance(raw, dict) and isinstance(raw.get("samples"), list):
-        reference_samples = raw["samples"]
-    elif isinstance(raw, list):
-        reference_samples = raw
-    check(
-        "opencv_motion.json parses as a list of {timestamp, M} samples",
-        reference_samples is not None,
-        f"top-level type {type(raw).__name__}",
-    )
-    if reference_samples is not None and not SOURCE_MOV.exists():
-        check("source.mov is present next to opencv_motion.json", False, str(SOURCE_MOV))
-    elif reference_samples is not None:
-        reference = [(float(s["timestamp"]), np.array(s["M"], dtype=np.float64)) for s in reference_samples]
-        reference.sort(key=lambda s: s[0])
-        ref_times = [t for t, _ in reference]
+    h_ideal = np.array(json.loads(H_IDEAL_PATH.read_text())["H"], dtype=np.float64)
+    h_ideal_inv = np.linalg.inv(h_ideal)
 
+    cap = cv2.VideoCapture(str(SOURCE_MOV))
+    check("source.mov opens", cap.isOpened())
+    source_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    source_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    paint_tracker = CameraMotionTracker(0.1, source_width, source_height)
+    while cap.isOpened():
+        ok, frame = cap.read()
+        if not ok:
+            break
+        # Per the controller ruling: read AFTER read(), to match the phone's
+        # clock for this comparison (the production loop's own per-frame
+        # numbering reads it before read(), one frame earlier; see design
+        # doc section 2.4 and section 3).
+        t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+        if paint_tracker.wants(t):
+            paint_tracker.offer(t, frame)
+    cap.release()
+    paint_motion = paint_tracker.finish()
+    check("the corpus video tracked", paint_motion is not None)
+
+    if paint_motion is not None:
+        # A second, separate decode pass to fetch each accepted sample's own
+        # full-resolution frame. Necessary (not just simpler) because a
+        # single pass cannot: a marking time that is not the video's first
+        # frame accepts several samples in the SAME offer() call (the
+        # marking frame itself, plus every frame buffered before it,
+        # tracked backwards), so "the frame just read" is not the frame
+        # every newly accepted sample belongs to. Re-reading by exact
+        # timestamp match sidesteps that: it is the same deterministic
+        # decode, so timestamps agree bit for bit between passes.
+        remaining = {t: m for t, m in paint_motion.samples}
+        errors: list[float] = []
         cap = cv2.VideoCapture(str(SOURCE_MOV))
-        check("source.mov opens", cap.isOpened())
-        corpus_tracker = CameraMotionTracker(0.1, WIDTH, HEIGHT)
-        own_samples: list[tuple[float, "np.ndarray"]] = []
-        while cap.isOpened():
+        while cap.isOpened() and remaining:
             ok, frame = cap.read()
             if not ok:
                 break
-            # Per this task's brief: read AFTER read(), to match the phone's
-            # clock for this comparison (the production loop's own frame
-            # numbering reads it before read(), one frame earlier; see
-            # design doc section 2.4 and section 3).
             t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-            if corpus_tracker.wants(t):
-                corpus_tracker.offer(t, frame)
+            m = remaining.pop(t, None)
+            if m is None:
+                continue
+            grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float64)
+            for cx, cy in PAINT_COURT_POINTS:
+                px, py = project_court_point(m, h_ideal_inv, cx, cy)
+                error = paint_line_vertical_error(grey, px, py)
+                if error is not None:
+                    errors.append(error)
         cap.release()
-        corpus_motion = corpus_tracker.finish()
-        check("the corpus video tracked", corpus_motion is not None)
-
-        if corpus_motion is not None:
-            HALF_FRAME_S = 0.5 / 30.0
-            worst = []
-            for t, m in corpus_motion.samples:
-                idx = min(range(len(ref_times)), key=lambda i: abs(ref_times[i] - t))
-                if abs(ref_times[idx] - t) <= HALF_FRAME_S:
-                    worst.append(worst_corner_distance(reference[idx][1], m, WIDTH, HEIGHT))
+        check("every accepted sample's own frame was found again", not remaining, f"{len(remaining)} missing")
+        check("the painted lines were found somewhere", len(errors) > 0)
+        if errors:
+            median = float(np.median(errors))
+            p95 = float(np.percentile(errors, 95))
             check(
-                "at least 95% of samples paired with a reference timestamp",
-                len(worst) >= 0.95 * len(corpus_motion.samples),
-                f"{len(worst)}/{len(corpus_motion.samples)}",
+                "painted-line vertical error median <= 1.0 px",
+                median <= 1.0,
+                f"median {median:.3f} px over {len(errors)} (sample, point) pairs",
             )
-            if worst:
-                median = float(np.median(worst))
-                check("median worst-corner distance to opencv_motion.json <= 1 px", median <= 1.0, f"median {median:.3f} px")
+            check("painted-line vertical error p95 <= 2.0 px", p95 <= 2.0, f"p95 {p95:.3f} px")
+
+        if not OPENCV_MOTION_PATH.exists():
+            print(f"  parity SKIPPED: {OPENCV_MOTION_PATH} does not exist yet (another task writes it).")
+        else:
+            # Task 5 writes exactly this schema (controller ruling): a JSON
+            # object with a "samples" list of {"timestamp": float, "M": [[3
+            # floats], [3 floats], [3 floats]]}, in source pixels, h22 = 1.
+            raw = json.loads(OPENCV_MOTION_PATH.read_text())
+            reference_samples = raw.get("samples") if isinstance(raw, dict) else None
+            check(
+                "opencv_motion.json parses as {'samples': [{timestamp, M}, ...]}",
+                isinstance(reference_samples, list),
+                f"top-level type {type(raw).__name__}",
+            )
+            if isinstance(reference_samples, list):
+                reference = sorted(
+                    (float(s["timestamp"]), np.array(s["M"], dtype=np.float64)) for s in reference_samples
+                )
+                ref_times = [t for t, _ in reference]
+                HALF_FRAME_S = 0.5 / 30.0
+                worst_per_sample = []
+                for t, m in paint_motion.samples:
+                    idx = min(range(len(ref_times)), key=lambda i: abs(ref_times[i] - t))
+                    if abs(ref_times[idx] - t) > HALF_FRAME_S:
+                        continue
+                    ref_m = reference[idx][1]
+                    worst = 0.0
+                    for cx, cy in PAINT_COURT_POINTS:
+                        ox, oy = project_court_point(m, h_ideal_inv, cx, cy)
+                        rx, ry = project_court_point(ref_m, h_ideal_inv, cx, cy)
+                        worst = max(worst, math.hypot(ox - rx, oy - ry))
+                    worst_per_sample.append(worst)
+                check(
+                    "at least 95% of samples paired with a reference timestamp",
+                    len(worst_per_sample) >= 0.95 * len(paint_motion.samples),
+                    f"{len(worst_per_sample)}/{len(paint_motion.samples)}",
+                )
+                if worst_per_sample:
+                    parity_median = float(np.median(worst_per_sample))
+                    parity_p95 = float(np.percentile(worst_per_sample, 95))
+                    check(
+                        "parity with opencv_motion.json at the paint points: median <= 1.0 px",
+                        parity_median <= 1.0,
+                        f"median {parity_median:.3f} px",
+                    )
+                    check(
+                        "parity with opencv_motion.json at the paint points: p95 <= 3.0 px",
+                        parity_p95 <= 3.0,
+                        f"p95 {parity_p95:.3f} px",
+                    )
 
 # ---------------------------------------------------------------------------
 print("6. extra tracker coverage")
@@ -327,6 +457,34 @@ check("exactly one sample dropped", scene_tracker.dropped == 1, f"dropped={scene
 
 print("  a portrait source uses a portrait tracker")
 check("1080x1920 trackers at 270x480", tracker_size(1080, 1920) == (270, 480))
+
+print("  a marking time off a 0.1 s boundary is still sampled as the marking frame")
+# Mirrors Kotlin's the_marking_frame_is_the_identity_and_is_sampled_even_off_a_boundary.
+OFF_BOUNDARY_T = 0.1234
+off_boundary_base = make_texture(WIDTH, HEIGHT, seed=246)
+off_boundary_tracker = CameraMotionTracker(OFF_BOUNDARY_T, WIDTH, HEIGHT)
+OFF_BOUNDARY_N_FRAMES = 12
+marking_index = None
+for i in range(OFF_BOUNDARY_N_FRAMES):
+    t = i / FPS
+    if off_boundary_tracker.wants(t):
+        off_boundary_tracker.offer(t, off_boundary_base)
+        if marking_index is None and t >= OFF_BOUNDARY_T:
+            marking_index = i
+off_boundary_motion = off_boundary_tracker.finish()
+check("a marking time off the 0.1 s grid still tracks", off_boundary_motion is not None)
+if off_boundary_motion is not None:
+    expected_marking_t = marking_index / FPS
+    check(
+        "the reference timestamp is the first frame at or after T, not T itself",
+        off_boundary_motion.reference_timestamp == expected_marking_t,
+        f"got {off_boundary_motion.reference_timestamp}, expected {expected_marking_t}",
+    )
+    identity_m = off_boundary_motion.at(expected_marking_t)
+    check(
+        "the marking frame's own M is the identity",
+        identity_m is not None and np.allclose(identity_m, np.eye(3)),
+    )
 
 
 if FAILURES:

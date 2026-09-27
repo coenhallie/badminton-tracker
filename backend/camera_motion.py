@@ -232,9 +232,9 @@ class CameraMotion:
             before = self.samples[lo - 1] if lo - 1 >= 0 else None
 
         if after is not None and abs(after[0] - timestamp) <= EXACT_S:
-            return after[1]
+            return after[1].copy()
         if before is not None and abs(before[0] - timestamp) <= EXACT_S:
-            return before[1]
+            return before[1].copy()
         if before is not None and after is not None and after[0] - before[0] <= MAX_BLEND_GAP_S:
             weight = (timestamp - before[0]) / (after[0] - before[0])
             return _blend(before[1], after[1], weight)
@@ -244,7 +244,7 @@ class CameraMotion:
             return None
         nearest = min(candidates, key=lambda c: abs(c[0] - timestamp))
         if abs(nearest[0] - timestamp) <= MAX_HOLD_S:
-            return nearest[1]
+            return nearest[1].copy()
         return None
 
 
@@ -382,6 +382,18 @@ class CameraMotionTracker:
             minEigThreshold=LK_MIN_EIGEN,
         )
         ok = status.reshape(-1) == 1
+        # Design doc section 4.3 step 3: "A corner fails if ... it ends
+        # outside the image." calcOpticalFlowPyrLK's own status flag does not
+        # cover this, so it is checked here explicitly, at tracker scale,
+        # before RANSAC ever sees the point.
+        tracked = next_points.reshape(-1, 2)
+        inside = (
+            (tracked[:, 0] >= 0)
+            & (tracked[:, 0] <= self.tracker_width - 1)
+            & (tracked[:, 1] >= 0)
+            & (tracked[:, 1] <= self.tracker_height - 1)
+        )
+        ok = ok & inside
         if int(ok.sum()) < MIN_INLIERS:
             self.dropped += 1
             return guess
