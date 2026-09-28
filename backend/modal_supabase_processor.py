@@ -1888,6 +1888,22 @@ class PlayerIdentityTracker:
         which prevents frame-to-frame flicker when players are at similar heights.
         """
         if len(skeletons) < 2:
+            # One skeleton. Without a net line its side is unknowable, so it
+            # waits for a frame with two. With the net line from the marks,
+            # its side IS its identity (the fixed-sides invariant), and waiting
+            # would be wrong: on a recording whose far player is never
+            # detected, no frame ever holds two, calibration never ended and
+            # the whole video emitted no player (IMG_4795, 2026-09-28).
+            if self.net_line is not None and skeletons:
+                skel = skeletons[0]
+                cx, cy = skel["center"]
+                pid = 0 if self._get_court_side(cy, cx) == "top" else 1
+                self.calibration_observations[pid].append(skel["center"])
+                self._add_position(pid, cx, cy, self.frames_processed)
+                self._update_area(pid, skel.get("area", 0))
+                if skel.get("track_id", -1) >= 0:
+                    self.last_track_ids[pid] = skel["track_id"]
+                self._complete_calibration_from_net_line()
             return
 
         if not self.calibration_initial_locked:
@@ -1936,8 +1952,10 @@ class PlayerIdentityTracker:
         if self.frames_processed >= self.CALIBRATION_FRAMES:
             obs = {pid: self.calibration_observations[pid] for pid in (0, 1)}
             if not (obs[0] and obs[1]):
-                # A side can only be locked once both players have been seen.
-                # Keep collecting rather than half-calibrating.
+                # Without a net line a side can only be locked once both
+                # players have been seen: keep collecting rather than
+                # half-calibrating. With one, the net decides.
+                self._complete_calibration_from_net_line()
                 return
 
             avg_y = {pid: sum(o[1] for o in obs[pid]) / len(obs[pid]) for pid in (0, 1)}
@@ -1981,7 +1999,26 @@ class PlayerIdentityTracker:
                 self.calibrated[pid] = True
 
             self.calibration_complete = True
-    
+
+    def _complete_calibration_from_net_line(self) -> None:
+        """End calibration on the net line's word, once the window has passed.
+
+        Only when a net line exists and only one side has been seen: the net
+        fixes the sides (player 0 above it, player 1 below, this class's
+        convention), so the side-constrained matching can run from here on and
+        a second player arriving later is claimed by the other side. With both
+        sides seen, _run_calibration's own two-player path decides as before.
+        """
+        if self.net_line is None or self.frames_processed < self.CALIBRATION_FRAMES:
+            return
+        seen = [pid for pid in (0, 1) if self.calibration_observations[pid]]
+        if len(seen) != 1:
+            return
+        for pid in (0, 1):
+            self.court_sides[pid] = "top" if pid == 0 else "bottom"
+            self.calibrated[pid] = True
+        self.calibration_complete = True
+
     def match_skeletons(
         self,
         active_skeletons: List[Dict],

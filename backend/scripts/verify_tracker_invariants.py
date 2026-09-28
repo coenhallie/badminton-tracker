@@ -331,6 +331,51 @@ def test_superseded_mechanisms_are_gone() -> None:
     )
 
 
+def test_one_visible_player() -> None:
+    print()
+    print("=" * 74)
+    print("§4  A lone player is tracked when the net line says which side they are on")
+    print("=" * 74)
+    # A club recording where the far player is never detected (the far half is
+    # small and behind the net; IMG_4795, 2026-09-28): every frame has one
+    # skeleton. Calibration waited for a frame with two, never got one, and
+    # the whole video emitted no player at all, so a cloud run produced clips
+    # and no heatmap, base or skeleton.
+    W, H = 1920.0, 1080.0
+    net_left, net_right = (560.0, 659.0), (1190.0, 647.0)
+
+    def run(skeleton: dict, frames: int = 60) -> tuple[PlayerIdentityTracker, list]:
+        t = PlayerIdentityTracker(video_height=H, fps=30.0, video_width=W,
+                                  net_left=net_left, net_right=net_right)
+        got = [t.match_skeletons([skeleton], f) for f in range(1, frames + 1)]
+        return t, got
+
+    t, got = run(skel(860.0, 700.0, "NEAR", 3))
+    near_ids = [m[0][0] for m in got if m]
+    check("a lone near-side player is assigned in every frame",
+          len(near_ids) == len(got), f"assigned in {len(near_ids)} of {len(got)} frames")
+    check("the lone near-side player is player 1 (bottom)",
+          set(near_ids) == {1}, f"ids {sorted(set(near_ids))}")
+    check("calibration completes with the net line alone",
+          t.calibration_complete, f"calibrated={t.calibrated}")
+    check("sides follow the net convention", t.court_sides == {0: "top", 1: "bottom"},
+          f"court_sides={t.court_sides}")
+
+    t, got = run(skel(900.0, 610.0, "FAR", 4))
+    far_ids = [m[0][0] for m in got if m]
+    check("a lone far-side player is player 0 (top) in every frame",
+          len(far_ids) == len(got) and set(far_ids) == {0},
+          f"assigned in {len(far_ids)} of {len(got)} frames, ids {sorted(set(far_ids))}")
+
+    # The second player turning up after the lone-player calibration takes the
+    # other side, and the first keeps theirs.
+    t, _ = run(skel(860.0, 700.0, "NEAR", 3), frames=30)
+    later = t.match_skeletons([skel(870.0, 705.0, "NEAR", 3), skel(900.0, 612.0, "FAR", 4)], 31)
+    by_id = {pid: k for pid, k, _ in later}
+    check("a second player arriving later takes the other side",
+          by_id.get(1) == "NEAR" and by_id.get(0) == "FAR", f"assignments {by_id}")
+
+
 def main() -> None:
     global DOCUMENT_ONLY
     ap = argparse.ArgumentParser()
@@ -345,6 +390,7 @@ def main() -> None:
     test_hard_side_constraint()
     test_net_band_hysteresis()
     test_superseded_mechanisms_are_gone()
+    test_one_visible_player()
 
     print()
     print("=" * 74)
