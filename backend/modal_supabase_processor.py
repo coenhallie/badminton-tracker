@@ -16,7 +16,7 @@ import json
 import tempfile
 import math
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
+from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple, List
 import time
 
 import modal
@@ -48,6 +48,9 @@ from raw_inference_codec import (  # noqa: E402
     VERSION as VERSION_RAW_INFERENCE,
     encode as encode_raw_inference,
 )
+
+if TYPE_CHECKING:
+    from camera_motion import CameraMotion
 
 
 # Path where the Modal "badminton-tracker-models" volume is mounted inside
@@ -218,7 +221,8 @@ def raw_inference_from_skeleton_frames(
     video_width: int,
     video_height: int,
     model_version: str,
-) -> Tuple[RawHeader, List[RawFrame]]:
+    camera: Optional["CameraMotion"] = None,
+) -> Tuple[RawHeader, List[RawFrame], Optional["CameraMotion"]]:
     """Project Phase 2's skeleton frames onto the RawInference wire shape.
 
     A projection, not a computation. Nothing here decides which player is
@@ -251,6 +255,13 @@ def raw_inference_from_skeleton_frames(
     loop recorded it (CAP_PROP_POS_MSEC), never frame / fps. PlayerPose's own
     KDoc is explicit that playback matches on the former and that the two
     disagree on variable-frame-rate footage.
+
+    `camera` is passed through unchanged into the returned tuple, for the
+    caller to hand to `encode_raw_inference`. This function does not track
+    the camera itself (that is `CameraMotionTracker`, Task 12, driven by the
+    Phase 2 loop in Task 14); it only carries the result along so this
+    projection stays the single place a caller builds a RawInference from
+    Phase 2's output.
     """
     frames: List[RawFrame] = []
     for entry in skeleton_frames:
@@ -309,7 +320,7 @@ def raw_inference_from_skeleton_frames(
         video_height=video_height,
         model_version=model_version,
     )
-    return header, frames
+    return header, frames, camera
 
 
 def clip_row_id_for(sb, video_id: str, rally_index: int) -> Optional[str]:
@@ -2799,6 +2810,179 @@ def _compute_court_polygon(
         return None
 
 
+def _to_marking_frame(frame_to_marking, points):
+    """Map (N, 2) frame pixels into marking-frame pixels.
+
+    `frame_to_marking` is the inverse of the camera's M for this frame (M
+    maps the marking frame's pixels to this frame's; badminton-rally-mobile
+    docs/plans/2026-09-27-camera-motion-design.md section 3). Float64
+    throughout, so an identity M returns every coordinate bit for bit.
+    """
+    import numpy as np
+
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    homogeneous = np.hstack([pts, np.ones((pts.shape[0], 1))]) @ frame_to_marking.T
+    return homogeneous[:, :2] / homogeneous[:, 2:3]
+
+
+def stabilised_skeleton(skeleton: Dict, frame_to_marking) -> Dict:
+    """The shadow of one detected skeleton, in the marking frame's pixels.
+
+    "Stabilise early, emit late" (the camera-motion design doc, section 6):
+    everything Phase 2 decides (the court area filter, the sitting filter,
+    cumulative movement, candidate ranking, the identity tracker, speed) runs
+    on shadows, against the court geometry exactly as it was marked, so every
+    pixel threshold and the identity tracker's own net-line calibration mean
+    what they meant on a still camera. What is emitted is `shadow["_orig"]`,
+    the skeleton as detected, in the frame's own pixels: the phone maps
+    those itself, through the camera written into the pose file.
+
+    A shallow copy with `center`, `bbox`, `kpts` and `area` replaced; the
+    confidences and track id are shared. `kpts` is always a new array when
+    the camera is known, so matching a shadow back by `is` never finds
+    another skeleton's keypoints. A keypoint at the (0, 0) "not detected"
+    sentinel stays there rather than being mapped to a plausible-looking
+    point. `frame_to_marking` None means no camera is known here (before
+    the marking frame, or no tracker): the shadow carries the original
+    values unchanged, which is today's behaviour.
+    """
+    import numpy as np
+
+    shadow = dict(skeleton)
+    shadow["_orig"] = skeleton
+    if frame_to_marking is None:
+        return shadow
+
+    cx, cy = skeleton["center"]
+    mapped_center = _to_marking_frame(frame_to_marking, [(cx, cy)])[0]
+    shadow["center"] = (float(mapped_center[0]), float(mapped_center[1]))
+
+    kpts = np.asarray(skeleton["kpts"])
+    mapped_kpts = kpts.copy()
+    present = (kpts[:, 0] > 0) & (kpts[:, 1] > 0)
+    if present.any():
+        mapped_kpts[present, :2] = _to_marking_frame(frame_to_marking, kpts[present, :2])
+    shadow["kpts"] = mapped_kpts
+
+    bbox = skeleton.get("bbox")
+    if bbox is not None:
+        corners = _to_marking_frame(frame_to_marking, [
+            (bbox["x1"], bbox["y1"]), (bbox["x2"], bbox["y1"]),
+            (bbox["x2"], bbox["y2"]), (bbox["x1"], bbox["y2"]),
+        ])
+        x1, y1 = corners.min(axis=0)
+        x2, y2 = corners.max(axis=0)
+        shadow["bbox"] = {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
+        shadow["area"] = float((x2 - x1) * (y2 - y1))
+    return shadow
+
+
+def distinct_people(kpts_data, boxes) -> List[int]:
+    """Indices of the tracked results that are distinct people.
+
+    In track mode ultralytics can report one detection twice: two track ids
+    carry bit-identical keypoints, and one of the two boxes is a stale track's
+    box somewhere else in the frame (IMG_5892 frame 1730: the near player's
+    keypoints under her own box and again under a box by the left-hand
+    stands, the second track having "moved" 200,000 px in 58 s). The copy
+    counts as a second candidate, and after the movement warm-up the two
+    copies of one player can outrank the real player on the other side and
+    push her out of the top two.
+
+    Only exact keypoint equality groups results, so two real people are
+    never merged. Within a group the copy kept is the one whose box agrees
+    best with its keypoints (intersection over union with the keypoints'
+    own bounds), ties and a missing box going to the first: the copies
+    differ only in their box, the box feeds the court test, the area
+    ranking and the emitted player box, and nothing orders the real one
+    first. In every double report inspected on the corpus (IMG_5892,
+    2eabfc01) the real one came first, so this and "keep the first" chose
+    alike there.
+
+    Not gated on the camera: the double report is ultralytics', whatever
+    the camera did.
+    """
+    import numpy as np
+
+    groups: Dict[bytes, List[int]] = {}
+    for index in range(len(kpts_data)):
+        key = np.ascontiguousarray(kpts_data[index], dtype=np.float32).tobytes()
+        groups.setdefault(key, []).append(index)
+
+    kept: List[int] = []
+    for members in groups.values():
+        if len(members) == 1 or boxes is None:
+            kept.append(members[0])
+            continue
+        extent = skeleton_bbox_from_keypoints(kpts_data[members[0]])
+
+        def agreement(index: int) -> float:
+            if extent is None or index >= len(boxes):
+                return 0.0
+            box = boxes[index]
+            return calculate_iou(
+                {"x1": float(box[0]), "y1": float(box[1]), "x2": float(box[2]), "y2": float(box[3])},
+                extent,
+            )
+
+        kept.append(max(members, key=lambda index: (agreement(index), -index)))
+    return sorted(kept)
+
+
+# The phone's ground-point confidence (NearPlayer.kt, MIN_KEYPOINT_CONFIDENCE):
+# both ankles at least this sure, or there is no ground point.
+GROUND_ANKLE_MIN_CONFIDENCE = 0.5
+
+
+def court_area_admits(skeleton: Dict, court_polygon, camera_following: bool) -> bool:
+    """Whether Phase 2's court area filter keeps this skeleton.
+
+    Kept when EITHER the box bottom below the centre (the test this filter
+    always made) OR, while the camera is being followed, the ankle midpoint
+    lies inside `court_polygon`, both in the same pixel space (a shadow's:
+    the marking frame's). The box bottom sits below the ankles, often by far
+    more than the polygon's 2% margin: a player at the near baseline can
+    have her ankles inside and her box bottom 0.25 to 1.3 m further back in
+    court terms, so the box bottom alone dropped her before the pose file
+    was ever written (IMG_5892, 2026-09-27). The phone's own on-court gate
+    stands on the ankles (NearPlayer.kt `groundPoint`), so this lets through
+    whoever the phone would judge, and it only ever adds: everyone the box
+    bottom admits is still admitted.
+
+    The ankle point counts only when both ankles are at least
+    GROUND_ANKLE_MIN_CONFIDENCE sure, the phone's rule, so a guessed ankle
+    cannot pull a spectator onto the court, and only when
+    `camera_following` (the tracker accepted its most recent sample,
+    `CameraMotionTracker.following`). On a broadcast's close-ups and
+    replays the tracker has lost the camera and the marked court is not in
+    view; the polygon then lies over whatever that shot shows, and ankles
+    admitted a seated official and a photographer (743d7fb1 frames 1988 to
+    2016 and 5230) where the box bottom admitted neither. With no camera
+    tracker at all the ankle clause is off, which is the filter as it was.
+    """
+    import cv2
+
+    bbox = skeleton.get("bbox")
+    feet_y = bbox["y2"] if bbox else skeleton["center"][1]
+    box_point = (float(skeleton["center"][0]), float(feet_y))
+    if cv2.pointPolygonTest(court_polygon, box_point, measureDist=False) >= 0:
+        return True
+    if not camera_following:
+        return False
+
+    kpts = skeleton.get("kpts")
+    conf = skeleton.get("conf")
+    if kpts is None or conf is None or len(kpts) <= 16 or len(conf) <= 16:
+        return False
+    if conf[15] < GROUND_ANKLE_MIN_CONFIDENCE or conf[16] < GROUND_ANKLE_MIN_CONFIDENCE:
+        return False
+    ankle_point = (
+        (float(kpts[15][0]) + float(kpts[16][0])) / 2.0,
+        (float(kpts[15][1]) + float(kpts[16][1])) / 2.0,
+    )
+    return cv2.pointPolygonTest(court_polygon, ankle_point, measureDist=False) >= 0
+
+
 # =============================================================================
 # PHASE 2 HELPERS — STUBS FOR TASK 5
 # =============================================================================
@@ -2836,7 +3020,21 @@ async def _run_full_yolo_loop(
     Returns `(skeleton_frames, tracking_state)` where `tracking_state` carries
     aggregated per-player state needed by `_compute_analytics` (positions,
     distances, speeds, identity-tracker stats, plus the in-memory
-    `tracker_metrics` accumulator).
+    `tracker_metrics` accumulator), and `camera_motion`: where the camera
+    was over the pass (a `CameraMotion`), or None when it was not followed.
+
+    The camera (badminton-rally-mobile
+    docs/plans/2026-09-27-camera-motion-design.md sections 3 and 6): the
+    phone that filmed may pan and tilt, while the marks come from one still.
+    A `CameraMotionTracker` is fed the sampled frames as they are processed,
+    and each frame uses the latest accepted camera (causal: a later sample
+    may sit in a batch not read yet). Detected skeletons are mapped by that
+    camera's inverse into the marking frame's pixels as shadows
+    (`stabilised_skeleton`), every decision below runs on the shadows
+    against the geometry as marked, and what is emitted (skeleton_frames,
+    results.json, the pose file) is the skeletons as detected, in frame
+    pixels. The Phase 2 shuttle court area maps each candidate point the
+    same way.
 
     Body lifted from the pre-refactor `_process_video_worker` (commit 9a46170)
     — the per-frame YOLO loop + identity tracking. The TrackNet pass itself
@@ -3010,6 +3208,23 @@ with_reid: False
         median_speed_rejects,
     )
 
+    # The camera tracker, mounted at /root like speed_calc. Imported here, not
+    # at module level, so run_phase2_locally.py can observe the instance the
+    # loop builds. It is built from the first decoded frame's own shape (not
+    # the probed width and height, which a container can misreport), and only
+    # when there are marks to follow the camera from (design doc section 4.2).
+    from camera_motion import CameraMotionTracker, marking_time_from
+
+    camera_tracker = None
+    camera_tracking = bool(manual_court_keypoints)
+    camera_stopped_at: Optional[int] = None
+    marking_time_s = marking_time_from(manual_court_keypoints)
+    if camera_tracking:
+        await send_log(
+            f"Camera tracking armed (marking frame at {marking_time_s:.2f}s)",
+            "info", "court",
+        )
+
     # Hoisted out of the per-frame path — depends only on video geometry.
     MAX_PX_PER_FRAME = max_frame_jump_pixels(float(width), float(height), fps)
     frame_count = 0
@@ -3073,9 +3288,19 @@ with_reid: False
         shuttle_court_polygon = expanded.astype(np.int32)
         await send_log("Shuttle court ROI filter active (40% horizontal, full vertical upward)", "success", "court")
 
-    def _shuttle_in_court(sx, sy):
+    def _shuttle_in_court(sx, sy, frame_to_marking):
+        # The polygon is in the marking frame's pixels, so the candidate is
+        # taken there too, by this frame's inverse camera (None: the camera
+        # is not known here and the point is used as detected).
         if shuttle_court_polygon is None:
             return True
+        if frame_to_marking is not None:
+            sx, sy = _to_marking_frame(frame_to_marking, [(sx, sy)])[0]
+            # The polygon says "unbounded upward" with vertices at y = 0, the
+            # top of the marking frame. Under an upward tilt a real high
+            # shuttle maps above that edge (negative y, up to 49 px on
+            # IMG_5892), so it is held at the edge rather than rejected.
+            sy = max(sy, 0.0)
         result = cv2.pointPolygonTest(shuttle_court_polygon, (float(sx), float(sy)), measureDist=False)
         return result >= 0
 
@@ -3168,6 +3393,51 @@ with_reid: False
 
         frame_count += 1
 
+        # Follow the camera. Offered here, frame by frame in decode order, so
+        # the camera this frame uses was accepted at or before its own
+        # timestamp whatever the batch boundaries; the timestamp is the one
+        # the frame record carries, so the pose file's frames and camera
+        # samples share one clock (design doc section 3). A tracker failure
+        # never fails the run (section 5.5): it is logged once and no more
+        # frames are offered. The frames after it keep the last accepted
+        # camera, the nearest thing to where the camera still is; the pose
+        # file then has no samples past the failure, and the phone treats
+        # those frames as camera-lost.
+        if camera_tracking:
+            try:
+                if camera_tracker is None:
+                    camera_tracker = CameraMotionTracker(
+                        marking_time_s, frame.shape[1], frame.shape[0],
+                    )
+                if camera_tracker.wants(frame_pts):
+                    camera_tracker.offer(frame_pts, frame)
+            except Exception as camera_err:
+                camera_tracking = False
+                camera_stopped_at = frame_count
+                print(f"[MODAL] [phase2] Camera tracker failed at frame {frame_count}: {camera_err!r}")
+                await send_log(
+                    f"Camera tracking stopped at frame {frame_count} ({camera_err}); "
+                    "later frames keep the last known camera",
+                    "warning", "court",
+                )
+        camera_now = camera_tracker.latest() if camera_tracker is not None else None
+        # Inverse of M (marking frame -> this frame): frame pixels -> marking
+        # frame pixels. None while no camera is known (before the marking
+        # frame, or a tracker that gave up), which leaves every shadow and
+        # shuttle point exactly as detected: the fixed marks, as before. An
+        # accepted M is never singular (its gate holds the 2x2 determinant to
+        # 0.5..2), but a camera must not be able to fail the run.
+        # Whether the tracker accepted its most recent sample, so this frame's
+        # camera is a live estimate rather than the last one held through a
+        # cut; court_area_admits trusts ankles only then.
+        camera_following = camera_tracking and camera_tracker is not None and camera_tracker.following
+        frame_to_marking = None
+        if camera_now is not None:
+            try:
+                frame_to_marking = np.linalg.inv(camera_now)
+            except np.linalg.LinAlgError:
+                frame_to_marking = None
+
         if frame_count % sample_rate != 0:
             # Note: with sample_rate > 1 we'd be wasting GPU work on frames
             # we then skip. sample_rate=1 in this codebase, so it's moot.
@@ -3225,7 +3495,7 @@ with_reid: False
             tn_pos = tracknet_positions[frame_count]
             if tn_pos.get("visible"):
                 tx, ty = tn_pos["x"], tn_pos["y"]
-                if not _shuttle_in_court(tx, ty):
+                if not _shuttle_in_court(tx, ty, frame_to_marking):
                     pass
                 elif _is_static_cluster(tx, ty):
                     pass
@@ -3244,7 +3514,7 @@ with_reid: False
             for candidate in candidates:
                 cx, cy = candidate["x"], candidate["y"]
 
-                if not _shuttle_in_court(cx, cy):
+                if not _shuttle_in_court(cx, cy, frame_to_marking):
                     continue
 
                 is_static = False
@@ -3290,7 +3560,7 @@ with_reid: False
             filtered_shuttles = []
             for det in badminton_detections["shuttlecocks"]:
                 dx, dy = det["x"], det["y"]
-                if not _shuttle_in_court(dx, dy):
+                if not _shuttle_in_court(dx, dy, frame_to_marking):
                     continue
                 is_known_static = False
                 for cluster in shuttle_static_clusters:
@@ -3338,7 +3608,9 @@ with_reid: False
 
                 skeleton_data = []
 
-                for person_idx in range(len(kpts_data)):
+                # One detection reported under two track ids is one person;
+                # see distinct_people.
+                for person_idx in distinct_people(kpts_data, boxes):
                     kpts = kpts_data[person_idx]
                     conf = kpts_conf[person_idx] if kpts_conf is not None else None
 
@@ -3362,6 +3634,20 @@ with_reid: False
                     if bbox is None:
                         continue
 
+                    # From here on the loop decides on the shadow (marking
+                    # frame pixels) and emits shadow["_orig"] (frame pixels).
+                    # Cumulative movement is measured on the shadow so a pan
+                    # does not count as a spectator walking.
+                    skeleton = stabilised_skeleton({
+                        "track_id": track_id,
+                        "center": center,
+                        "kpts": kpts,
+                        "conf": conf,
+                        "bbox": bbox,
+                        "area": area,
+                    }, frame_to_marking)
+                    center = skeleton["center"]
+
                     if track_id >= 0:
                         if track_id in track_positions:
                             prev = track_positions[track_id]
@@ -3372,15 +3658,10 @@ with_reid: False
 
                         track_positions[track_id] = {"x": center[0], "y": center[1], "frame": frame_count}
 
-                    skeleton_data.append({
-                        "track_id": track_id,
-                        "center": center,
-                        "kpts": kpts,
-                        "conf": conf,
-                        "bbox": bbox,
-                        "area": area,
-                        "cumulative_movement": track_cumulative_movement.get(track_id, 0.0) if track_id >= 0 else 0.0
-                    })
+                    skeleton["cumulative_movement"] = (
+                        track_cumulative_movement.get(track_id, 0.0) if track_id >= 0 else 0.0
+                    )
+                    skeleton_data.append(skeleton)
 
                 # Helper: detect sitting/crouching pose (likely a judge)
                 def is_sitting_pose(kpts, bbox, conf=None, min_conf=0.2) -> bool:
@@ -3438,11 +3719,9 @@ with_reid: False
                     in_court_skeletons = []
                     for s in skeleton_data:
                         bbox = s["bbox"]
-                        feet_y = bbox["y2"] if bbox else s["center"][1]
-                        check_point = (float(s["center"][0]), float(feet_y))
-
-                        result_pt = cv2.pointPolygonTest(court_polygon, check_point, measureDist=False)
-                        if result_pt >= 0:
+                        # Box bottom, or ankles while the camera is followed:
+                        # see court_area_admits for why each half is there.
+                        if court_area_admits(s, court_polygon, camera_following):
                             if is_sitting_pose(s["kpts"], bbox, s.get("conf")):
                                 s["is_sitting"] = True
                             else:
@@ -3501,7 +3780,7 @@ with_reid: False
                     )[:2]
 
                 for skel in active_skeletons:
-                    bbox = skel["bbox"]
+                    bbox = skel["_orig"]["bbox"]
                     badminton_detections["players"].append({
                         "class": "player",
                         "confidence": 0.9,
@@ -3551,7 +3830,13 @@ with_reid: False
                         "info", "processing"
                     )
 
-                for player_id, kpts, conf in matched_players:
+                # The identity tracker matched shadows; each is found again
+                # by its own keypoint array, and its original is what is
+                # emitted below.
+                shadow_by_kpts = {id(s["kpts"]): s for s in active_skeletons}
+                for player_id, shadow_kpts, conf in matched_players:
+                    matched_shadow = shadow_by_kpts[id(shadow_kpts)]
+                    kpts = matched_shadow["_orig"]["kpts"]
                     player_data = {
                         "player_id": player_id,
                         "keypoints": [],
@@ -3587,12 +3872,25 @@ with_reid: False
                         player_data["position"] = {"x": center_x, "y": center_y}
                         player_data["center"] = {"x": center_x, "y": center_y}
 
+                        # Emitted: results.json's players[].positions, in
+                        # frame pixels like every other emitted coordinate.
                         if player_id in player_positions:
                             player_positions[player_id].append({
                                 "frame": frame_count,
                                 "x": center_x,
                                 "y": center_y,
                             })
+
+                        # Decided: speed and distance read the same point in
+                        # the marking frame's pixels, where the jump gate's
+                        # pixels mean what they say and the court homography
+                        # (fitted on the marking frame) maps it to metres.
+                        if frame_to_marking is not None:
+                            speed_x, speed_y = (
+                                float(v) for v in _to_marking_frame(frame_to_marking, [(center_x, center_y)])[0]
+                            )
+                        else:
+                            speed_x, speed_y = center_x, center_y
 
                         track_id = player_id
                         current_speed = 0.0
@@ -3603,8 +3901,8 @@ with_reid: False
                             dt = (frame_count - prev["frame"]) / fps
 
                             if dt > 0:
-                                    dx = center_x - prev["x"]
-                                    dy = center_y - prev["y"]
+                                    dx = speed_x - prev["x"]
+                                    dy = speed_y - prev["y"]
                                     distance_px = np.sqrt(dx**2 + dy**2)
 
                                     frames_elapsed = max(1, frame_count - prev["frame"])
@@ -3616,7 +3914,7 @@ with_reid: False
                                     else:
                                         if homography_matrix is not None:
                                             pt_cur = cv2.perspectiveTransform(
-                                                np.array([[[center_x, center_y]]], dtype=np.float32),
+                                                np.array([[[speed_x, speed_y]]], dtype=np.float32),
                                                 homography_matrix
                                             )
                                             pt_prev = cv2.perspectiveTransform(
@@ -3675,8 +3973,8 @@ with_reid: False
 
                         if is_valid_tracking:
                             player_tracks[track_id] = {
-                                "x": center_x,
-                                "y": center_y,
+                                "x": speed_x,
+                                "y": speed_y,
                                 "frame": frame_count,
                             }
 
@@ -3776,6 +4074,36 @@ with_reid: False
     except Exception as _mex:
         print(f"[tracker-metrics] finalize failed: {_mex}")
 
+    # Where the camera was over the pass, for the pose file. None when there
+    # were no marks, the video ended before the marking frame, or the marking
+    # frame had too little texture to follow: the phone then selects with the
+    # fixed marks, as for a file that never had a camera section.
+    camera_motion = None
+    if camera_tracker is not None:
+        try:
+            camera_motion = camera_tracker.finish()
+        except Exception as camera_err:
+            print(f"[MODAL] [phase2] Camera tracker finish failed: {camera_err!r}")
+        if camera_stopped_at is not None:
+            kept = len(camera_motion.samples) if camera_motion is not None else 0
+            await send_log(
+                f"Camera tracking stopped at frame {camera_stopped_at} after an error; "
+                f"{kept} samples kept; the pose file has no camera after it",
+                "warning", "court",
+            )
+        elif camera_motion is not None:
+            await send_log(
+                f"Camera followed: {camera_tracker.accepted} samples accepted, "
+                f"{camera_tracker.dropped} dropped",
+                "success" if camera_tracker.dropped == 0 else "info", "court",
+            )
+        else:
+            await send_log(
+                "Camera not followed; the pose file carries no camera and "
+                "the phone selects with the fixed marks",
+                "warning", "court",
+            )
+
     tracking_state: Dict[str, Any] = {
         "player_positions": player_positions,
         "player_distances": player_distances,
@@ -3783,6 +4111,7 @@ with_reid: False
         "processed_count": processed_count,
         "skeleton_frame_count": skeleton_frame_count,
         "tracker_stats": tracker_stats,
+        "camera_motion": camera_motion,
     }
 
     return skeleton_frames, tracking_state
@@ -3926,6 +4255,7 @@ image = (
     .add_local_file(str(_backend_dir / "speed_calc.py"), remote_path="/root/speed_calc.py")
     .add_local_file(str(_backend_dir / "supabase_helpers.py"), remote_path="/root/supabase_helpers.py")
     .add_local_file(str(_backend_dir / "raw_inference_codec.py"), remote_path="/root/raw_inference_codec.py")
+    .add_local_file(str(_backend_dir / "camera_motion.py"), remote_path="/root/camera_motion.py")
 )
 
 
@@ -5118,15 +5448,16 @@ async def _process_analytics_worker(video_id: str) -> Dict[str, Any]:
         pose_frames = None
         pose_blob = None
         try:
-            pose_header, pose_frames = raw_inference_from_skeleton_frames(
+            pose_header, pose_frames, pose_camera = raw_inference_from_skeleton_frames(
                 skeleton_frames,
                 fps=fps,
                 total_frames=total_frames,
                 video_width=width,
                 video_height=height,
                 model_version=f"cloud:{POSE_MODEL_NAME}:{WORKER_REVISION}",
+                camera=tracking_state.get("camera_motion"),
             )
-            pose_blob = encode_raw_inference(pose_header, pose_frames)
+            pose_blob = encode_raw_inference(pose_header, pose_frames, camera=pose_camera)
             poses_frame_count = len(pose_frames)
             pose_blob_mb = len(pose_blob) / (1024 * 1024)
             pose_candidate = f"{owner_id_holder['owner_id']}/{video_id}/{POSES_ARTIFACT_NAME}"
