@@ -2966,6 +2966,94 @@ def distinct_people(kpts_data, boxes) -> List[int]:
     return sorted(kept)
 
 
+def is_sitting_pose(kpts, bbox, conf=None, min_conf=0.2) -> bool:
+    """Whether a skeleton reads as seated or crouched: most often a line judge.
+
+    Lifted unchanged from Phase 2's per-frame loop so it can be tested on its
+    own (scripts/verify_phase2_filters.py). Two kinds of evidence: a box less
+    than 1.2 times as tall as it is wide, or hips close to the knees or ankles
+    in the vertical. The shadows the loop passes carry (x, y) keypoints only,
+    so `conf` and `min_conf` never apply there; a keypoint at the (0, 0)
+    "not detected" sentinel is skipped.
+    """
+    if bbox is None:
+        return False
+
+    bbox_height = bbox["y2"] - bbox["y1"]
+    bbox_width = bbox["x2"] - bbox["x1"]
+    if bbox_width > 0:
+        aspect_ratio = bbox_height / bbox_width
+        if aspect_ratio < 1.2:
+            return True
+
+    if len(kpts) >= 15:
+        def _valid(idx):
+            if idx >= len(kpts):
+                return None
+            pt = kpts[idx]
+            if pt[0] <= 0:
+                return None
+            if len(pt) > 2 and pt[2] <= min_conf:
+                return None
+            return pt
+
+        left_hip = _valid(11)
+        right_hip = _valid(12)
+        left_knee = _valid(13)
+        right_knee = _valid(14)
+        left_ankle = _valid(15)
+        right_ankle = _valid(16)
+
+        if left_hip is not None and left_knee is not None:
+            hip_knee_diff = left_knee[1] - left_hip[1]
+            if hip_knee_diff < bbox_height * 0.15:
+                return True
+
+        if right_hip is not None and right_knee is not None:
+            hip_knee_diff = right_knee[1] - right_hip[1]
+            if hip_knee_diff < bbox_height * 0.15:
+                return True
+
+        if left_hip is not None and left_ankle is not None:
+            hip_ankle_diff = left_ankle[1] - left_hip[1]
+            if hip_ankle_diff < bbox_height * 0.3:
+                return True
+
+        if right_hip is not None and right_ankle is not None:
+            hip_ankle_diff = right_ankle[1] - right_hip[1]
+            if hip_ankle_diff < bbox_height * 0.3:
+                return True
+
+    return False
+
+
+def merge_zoom_picks(kpts_xy, kpts_conf, boxes, track_ids, picks):
+    """The full-frame pass's people, de-duplicated, with the zoom pass's picks merged in.
+
+    Order matters. `distinct_people` finds ultralytics' double reports by
+    their bit-identical keypoints; a zoom pick merged first replaces the
+    keypoints of one copy (player_zoom.merge), the two stop matching, and the
+    stale copy survives as a second candidate with a box elsewhere and a
+    cumulative movement in the thousands of pixels. On aSASa that stale copy
+    of the near player outranked the far player in the top-two movement cut
+    for most of a rally (2026-09-29, a trigger-120 run). So the copies go
+    first, and the picks are merged into what is left.
+    """
+    import numpy as np
+    from player_zoom import merge
+
+    if kpts_xy is not None and len(kpts_xy):
+        n = len(kpts_xy)
+        box_rows = boxes if boxes is not None and len(boxes) == n else None
+        keep = distinct_people(kpts_xy, box_rows)
+        kpts_xy = np.asarray(kpts_xy)[keep]
+        kpts_conf = None if kpts_conf is None else np.asarray(kpts_conf)[keep]
+        boxes = None if box_rows is None else np.asarray(box_rows)[keep]
+        if track_ids is not None:
+            track_ids = [track_ids[i] if i < len(track_ids) else -1 for i in keep]
+    return merge(kpts_xy, kpts_conf, boxes, track_ids, picks)
+
+
 # The phone's ground-point confidence (NearPlayer.kt, MIN_KEYPOINT_CONFIDENCE):
 # both ankles at least this sure, or there is no ground point.
 GROUND_ANKLE_MIN_CONFIDENCE = 0.5
@@ -3216,6 +3304,68 @@ with_reid: False
         "info", "processing",
     )
 
+    # The zoom pass (player_zoom.py; badminton-rally-mobile
+    # docs/plans/2026-09-29-two-player-tracking-design.md section 4.1): a
+    # player too small for the 960 px pass is followed with a window around
+    # them, and a lost one is searched for in their half of the court. None
+    # without marks, which leaves this loop exactly as it was.
+    from player_zoom import CourtFrame, Detection as ZoomDetection, PlayerZoom, ZoomSwitch, zoom_enabled_from_env
+
+    # SHUTTL_ZOOM_PASS=0 turns the pass off without a code change; an error
+    # inside it turns it off for the rest of the run (ZoomSwitch), never the run.
+    zoom_switch = ZoomSwitch(zoom_enabled_from_env(os.environ))
+    _zoom_court = CourtFrame.from_marks(manual_court_keypoints) if zoom_switch.on else None
+    player_zoom = PlayerZoom(_zoom_court, int(width), int(height), float(effective_fps)) if _zoom_court else None
+    zoom_stats = {"follow_calls": 0, "follow_picks": 0, "search_calls": 0, "search_picks": 0}
+    zoom_failure_logged = False
+    if not zoom_switch.on:
+        await send_log("Zoom pass off (SHUTTL_ZOOM_PASS)", "info", "processing")
+    elif manual_court_keypoints and player_zoom is None:
+        await send_log("Zoom pass off: the marks give no usable court or net line", "warning", "processing")
+    # The zoom pass's own instance of the same weights, loaded only when the
+    # pass will run: predict() on it never touches the BoT-SORT state
+    # pose_model.track(persist=True) keeps.
+    zoom_model = YOLO(POSE_MODEL_NAME) if player_zoom is not None else None
+
+    def _zoom_detections(result, dx: int, dy: int):
+        """One zoom result's people, in frame pixels."""
+        if result.keypoints is None or result.keypoints.xy is None or result.boxes is None or len(result.boxes) == 0:
+            return []
+        xy = result.keypoints.xy.cpu().numpy()
+        kc = (result.keypoints.conf.cpu().numpy() if result.keypoints.conf is not None
+              else np.full(xy.shape[:2], 0.5))
+        bx = result.boxes.xyxy.cpu().numpy()
+        people = []
+        for n in range(len(bx)):
+            k = xy[n].astype(np.float64).copy()
+            k[:, 0] += dx
+            k[:, 1] += dy
+            b = bx[n]
+            people.append(ZoomDetection(
+                box=(float(b[0]) + dx, float(b[1]) + dy, float(b[2]) + dx, float(b[3]) + dy),
+                kpts=k, conf=kc[n].astype(np.float64),
+            ))
+        return people
+
+    def _zoom_pass(frame, frame_to_marking, camera_now, marks_describe_frame):
+        """This frame's zoom picks, each with the track id it is appended under."""
+        requests = player_zoom.plan(identity_tracker.court_sides, camera_now, marks_describe_frame)
+        follows = [q for q in requests if q.kind == "follow"]
+        # Follow windows share one call; each search runs at its own size.
+        batches = ([follows] if follows else []) + [[q] for q in requests if q.kind == "search"]
+        picks = []
+        for batch in batches:
+            crops = [frame[q.rect.y0:q.rect.y1, q.rect.x0:q.rect.x1] for q in batch]
+            results = zoom_model.predict(crops, conf=0.15, iou=0.5, imgsz=batch[0].imgsz,
+                                         half=yolo_half, verbose=False)
+            for q, r in zip(batch, results):
+                zoom_stats[f"{q.kind}_calls"] += 1
+                found = player_zoom.pick(q, _zoom_detections(r, q.rect.x0, q.rect.y0), frame_to_marking)
+                if found is not None:
+                    zoom_stats[f"{q.kind}_picks"] += 1
+                    picks.append((found, player_zoom.track_id(q.pid)))
+        return picks
+
     # Write skeleton frames incrementally to a temp file
     skeleton_frames_path = Path(f"/cache/{video_id}_skeleton.jsonl")
     skeleton_frames_file = open(skeleton_frames_path, "w")
@@ -3254,6 +3404,10 @@ with_reid: False
 
     camera_tracker = None
     camera_tracking = bool(manual_court_keypoints)
+    # Whether a camera tracker was armed at all. `camera_tracking` itself flips
+    # off when the tracker fails, and a frame after that failure is exactly one
+    # the marks may no longer describe: the zoom's Find search needs this one.
+    camera_armed = camera_tracking
     camera_stopped_at: Optional[int] = None
     marking_time_s = marking_time_from(manual_court_keypoints)
     if camera_tracking:
@@ -3617,6 +3771,7 @@ with_reid: False
             "shuttle_position": shuttle_position,
         }
 
+        _zoom_observed = False
         if pose_results and len(pose_results) > 0:
             result = pose_results[0]
 
@@ -3639,9 +3794,33 @@ with_reid: False
                 kpts_conf=_mx_kp_conf,
             )
 
-            if result.keypoints is not None and result.keypoints.xy is not None:
-                kpts_data = result.keypoints.xy.cpu().numpy()
-                kpts_conf = result.keypoints.conf.cpu().numpy() if result.keypoints.conf is not None else None
+            # The zoom's picks join the full-frame pass's people here, before
+            # every filter below: the court area, sitting and movement filters
+            # and the identity tracker still decide who is who.
+            _full_xy = (result.keypoints.xy.cpu().numpy()
+                        if result.keypoints is not None and result.keypoints.xy is not None else None)
+            _full_conf = (result.keypoints.conf.cpu().numpy()
+                          if result.keypoints is not None and result.keypoints.conf is not None else None)
+            if player_zoom is not None and zoom_switch.on:
+                def _zoomed():
+                    picks = _zoom_pass(frame, frame_to_marking, camera_now,
+                                       camera_following if camera_armed else True)
+                    return merge_zoom_picks(_full_xy, _full_conf, boxes, track_ids, picks) if picks else None
+
+                _merged = zoom_switch.run(_zoomed, None)
+                if _merged is not None:
+                    _full_xy, _full_conf, boxes, track_ids = _merged
+                if not zoom_switch.on and not zoom_failure_logged:
+                    zoom_failure_logged = True
+                    await send_log(
+                        f"Zoom pass stopped at frame {frame_count} ({zoom_switch.failure}); "
+                        "later frames use the full-frame pass alone",
+                        "warning", "processing",
+                    )
+
+            if _full_xy is not None:
+                kpts_data = _full_xy
+                kpts_conf = _full_conf
 
                 skeleton_data = []
 
@@ -3699,58 +3878,6 @@ with_reid: False
                         track_cumulative_movement.get(track_id, 0.0) if track_id >= 0 else 0.0
                     )
                     skeleton_data.append(skeleton)
-
-                # Helper: detect sitting/crouching pose (likely a judge)
-                def is_sitting_pose(kpts, bbox, conf=None, min_conf=0.2) -> bool:
-                    if bbox is None:
-                        return False
-
-                    bbox_height = bbox["y2"] - bbox["y1"]
-                    bbox_width = bbox["x2"] - bbox["x1"]
-                    if bbox_width > 0:
-                        aspect_ratio = bbox_height / bbox_width
-                        if aspect_ratio < 1.2:
-                            return True
-
-                    if len(kpts) >= 15:
-                        def _valid(idx):
-                            if idx >= len(kpts):
-                                return None
-                            pt = kpts[idx]
-                            if pt[0] <= 0:
-                                return None
-                            if len(pt) > 2 and pt[2] <= min_conf:
-                                return None
-                            return pt
-
-                        left_hip = _valid(11)
-                        right_hip = _valid(12)
-                        left_knee = _valid(13)
-                        right_knee = _valid(14)
-                        left_ankle = _valid(15)
-                        right_ankle = _valid(16)
-
-                        if left_hip is not None and left_knee is not None:
-                            hip_knee_diff = left_knee[1] - left_hip[1]
-                            if hip_knee_diff < bbox_height * 0.15:
-                                return True
-
-                        if right_hip is not None and right_knee is not None:
-                            hip_knee_diff = right_knee[1] - right_hip[1]
-                            if hip_knee_diff < bbox_height * 0.15:
-                                return True
-
-                        if left_hip is not None and left_ankle is not None:
-                            hip_ankle_diff = left_ankle[1] - left_hip[1]
-                            if hip_ankle_diff < bbox_height * 0.3:
-                                return True
-
-                        if right_hip is not None and right_ankle is not None:
-                            hip_ankle_diff = right_ankle[1] - right_hip[1]
-                            if hip_ankle_diff < bbox_height * 0.3:
-                                return True
-
-                    return False
 
                 if court_roi_active and court_polygon is not None:
                     in_court_skeletons = []
@@ -3871,6 +3998,14 @@ with_reid: False
                 # by its own keypoint array, and its original is what is
                 # emitted below.
                 shadow_by_kpts = {id(s["kpts"]): s for s in active_skeletons}
+                if player_zoom is not None and zoom_switch.on:
+                    _emitted = {}
+                    for _pid, _shadow_kpts, _ in matched_players:
+                        _ob = shadow_by_kpts[id(_shadow_kpts)]["_orig"].get("bbox")
+                        if _ob:
+                            _emitted[_pid] = (_ob["x1"], _ob["y1"], _ob["x2"], _ob["y2"])
+                    zoom_switch.run(lambda: player_zoom.observe(_emitted), None)
+                    _zoom_observed = True
                 for player_id, shadow_kpts, conf in matched_players:
                     matched_shadow = shadow_by_kpts[id(shadow_kpts)]
                     kpts = matched_shadow["_orig"]["kpts"]
@@ -4031,6 +4166,8 @@ with_reid: False
 
                     frame_data["players"].append(player_data)
 
+        if player_zoom is not None and zoom_switch.on and not _zoom_observed:
+            zoom_switch.run(lambda: player_zoom.observe({}), None)
         frame_data["players"].sort(key=lambda p: p["player_id"])
 
         skeleton_frames_file.write(json.dumps(frame_data) + "\n")
@@ -4062,6 +4199,12 @@ with_reid: False
     await send_log(f"Processed {processed_count} frames", "success", "processing")
 
     # Identity tracker summary
+    if player_zoom is not None:
+        await send_log(
+            f"Zoom pass: {zoom_stats['follow_calls']} follow windows ({zoom_stats['follow_picks']} kept), "
+            f"{zoom_stats['search_calls']} half-court searches ({zoom_stats['search_picks']} found)",
+            "info", "processing",
+        )
     tracker_stats = identity_tracker.get_stats()
     await send_log(
         f"Identity tracker: calibrated={tracker_stats['calibration_complete']}, "
@@ -4146,6 +4289,9 @@ with_reid: False
         "player_distances": player_distances,
         "player_speeds": player_speeds,
         "processed_count": processed_count,
+        "player_zoom": (
+            dict(zoom_stats, failure=zoom_switch.failure) if player_zoom is not None else None
+        ),
         "skeleton_frame_count": skeleton_frame_count,
         "tracker_stats": tracker_stats,
         "camera_motion": camera_motion,
@@ -4293,6 +4439,7 @@ image = (
     .add_local_file(str(_backend_dir / "supabase_helpers.py"), remote_path="/root/supabase_helpers.py")
     .add_local_file(str(_backend_dir / "raw_inference_codec.py"), remote_path="/root/raw_inference_codec.py")
     .add_local_file(str(_backend_dir / "camera_motion.py"), remote_path="/root/camera_motion.py")
+    .add_local_file(str(_backend_dir / "player_zoom.py"), remote_path="/root/player_zoom.py")
 )
 
 
