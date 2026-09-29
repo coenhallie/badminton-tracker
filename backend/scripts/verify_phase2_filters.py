@@ -8,6 +8,8 @@ Usage:
 No GPU, no network. Sections:
   1. is_sitting_pose, as it has always behaved (characterization: these
      cases pin the rule the loop used before it was lifted to module level).
+  2. merge_zoom_picks: ultralytics' double reports are removed BEFORE the
+     zoom's picks are merged, so a replaced row cannot hide its stale twin.
 """
 from __future__ import annotations
 
@@ -20,7 +22,8 @@ BACKEND_DIR = str(Path(__file__).resolve().parents[1])
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from modal_supabase_processor import is_sitting_pose  # noqa: E402
+from modal_supabase_processor import is_sitting_pose, merge_zoom_picks  # noqa: E402
+from player_zoom import Detection  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -62,6 +65,22 @@ missing = standing.copy()
 missing[11:17] = 0.0
 check("legs not detected (the (0, 0) sentinel) fall back to the box alone",
       not is_sitting_pose(missing, box(80, 300, 120, 505)) and is_sitting_pose(missing, box(20, 300, 220, 505)))
+
+print("2. merge_zoom_picks")
+near_k = standing.copy()
+near_conf = np.full(17, 0.9)
+# Row 0: the near player. Row 1: ultralytics reporting the same keypoints
+# again under a stale track (its box somewhere else, by the umpire).
+xy = np.stack([near_k, near_k.copy()])
+cf = np.stack([near_conf, near_conf.copy()])
+bx = np.array([[80, 300, 120, 505], [1260, 476, 1311, 648]], dtype=float)
+zoomed = Detection(box=(81.0, 301.0, 121.0, 506.0), kpts=near_k + 1.0, conf=np.full(17, 0.95))
+out_xy, out_cf, out_bx, out_ids = merge_zoom_picks(xy, cf, bx, [1, 3], [(zoomed, 1_000_001)])
+check("the stale twin is gone: one row for the near player", len(out_ids) == 1, str(out_ids))
+check("and it carries the zoomed keypoints and the real track id",
+      out_ids == [1] and np.allclose(out_xy[0], zoomed.kpts))
+out_xy, out_cf, out_bx, out_ids = merge_zoom_picks(None, None, None, None, [(zoomed, 1_000_001)])
+check("nobody in the full frame: the pick alone", out_ids == [1_000_001])
 
 print()
 if FAILURES:

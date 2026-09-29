@@ -3027,6 +3027,33 @@ def is_sitting_pose(kpts, bbox, conf=None, min_conf=0.2) -> bool:
     return False
 
 
+def merge_zoom_picks(kpts_xy, kpts_conf, boxes, track_ids, picks):
+    """The full-frame pass's people, de-duplicated, with the zoom pass's picks merged in.
+
+    Order matters. `distinct_people` finds ultralytics' double reports by
+    their bit-identical keypoints; a zoom pick merged first replaces the
+    keypoints of one copy (player_zoom.merge), the two stop matching, and the
+    stale copy survives as a second candidate with a box elsewhere and a
+    cumulative movement in the thousands of pixels. On aSASa that stale copy
+    of the near player outranked the far player in the top-two movement cut
+    for most of a rally (2026-09-29, a trigger-120 run). So the copies go
+    first, and the picks are merged into what is left.
+    """
+    import numpy as np
+    from player_zoom import merge
+
+    if kpts_xy is not None and len(kpts_xy):
+        n = len(kpts_xy)
+        box_rows = boxes if boxes is not None and len(boxes) == n else None
+        keep = distinct_people(kpts_xy, box_rows)
+        kpts_xy = np.asarray(kpts_xy)[keep]
+        kpts_conf = None if kpts_conf is None else np.asarray(kpts_conf)[keep]
+        boxes = None if box_rows is None else np.asarray(box_rows)[keep]
+        if track_ids is not None:
+            track_ids = [track_ids[i] if i < len(track_ids) else -1 for i in keep]
+    return merge(kpts_xy, kpts_conf, boxes, track_ids, picks)
+
+
 # The phone's ground-point confidence (NearPlayer.kt, MIN_KEYPOINT_CONFIDENCE):
 # both ankles at least this sure, or there is no ground point.
 GROUND_ANKLE_MIN_CONFIDENCE = 0.5
@@ -3285,7 +3312,7 @@ with_reid: False
     # player too small for the 960 px pass is followed with a window around
     # them, and a lost one is searched for in their half of the court. None
     # without marks, which leaves this loop exactly as it was.
-    from player_zoom import CourtFrame, Detection as ZoomDetection, PlayerZoom, merge as zoom_merge
+    from player_zoom import CourtFrame, Detection as ZoomDetection, PlayerZoom
 
     _zoom_court = CourtFrame.from_marks(manual_court_keypoints)
     player_zoom = PlayerZoom(_zoom_court, int(width), int(height), float(effective_fps)) if _zoom_court else None
@@ -3765,7 +3792,7 @@ with_reid: False
                 _zoom_picks = _zoom_pass(frame, frame_to_marking, camera_now,
                                          (not camera_tracking) or camera_following)
                 if _zoom_picks:
-                    _full_xy, _full_conf, boxes, track_ids = zoom_merge(
+                    _full_xy, _full_conf, boxes, track_ids = merge_zoom_picks(
                         _full_xy, _full_conf, boxes, track_ids, _zoom_picks)
 
             if _full_xy is not None:
