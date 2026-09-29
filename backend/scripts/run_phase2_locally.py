@@ -2,8 +2,13 @@
 Run the Phase 2 pose loop on a local video, on this machine, without Modal.
 
 Usage:
-    python backend/scripts/run_phase2_locally.py
+    python backend/scripts/run_phase2_locally.py                      # IMG_5892
+    python backend/scripts/run_phase2_locally.py --video-id <corpus dir name>
     python backend/scripts/run_phase2_locally.py --video PATH --marks PATH --out PATH
+
+Writes the pose file and, beside it, <stem>-run.json: frames, wall seconds,
+seconds per frame and badminton-tracker's commit, so a run's cost is recorded
+with the file it made.
 
 The cloud's own evidence for the camera-motion design
 (badminton-rally-mobile docs/plans/2026-09-27-camera-motion-design.md
@@ -54,21 +59,50 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND_DIR))
 
-CORPUS = Path.home() / "shuttl-corpus" / "IMG_5892"
+CORPUS_ROOT = Path.home() / "shuttl-corpus"
 WEIGHTS = Path("/Users/coenhallie/Desktop/projects/badminton-rally-mobile/tools/models/weights")
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--video", type=Path, default=CORPUS / "source.mov")
-    parser.add_argument("--marks", type=Path, default=CORPUS / "marks_ideal.json",
-                        help="JSON with the marks under 'manual_court_keypoints'")
+    parser.add_argument("--video-id", default="IMG_5892",
+                        help="a directory under ~/shuttl-corpus; sets the defaults below")
+    parser.add_argument("--video", type=Path, default=None,
+                        help="default: the corpus directory's source.mov, else source.mp4")
+    parser.add_argument("--marks", type=Path, default=None,
+                        help="JSON with the marks under 'manual_court_keypoints'; "
+                             "default: marks_ideal.json, else video.json")
     parser.add_argument("--pose-weights", type=Path, default=WEIGHTS / "yolo26m-pose.pt")
     parser.add_argument("--detector-weights", type=Path, default=WEIGHTS / "badminton.pt")
-    parser.add_argument("--out", type=Path, default=CORPUS / "cloud-local" / "poses.raw")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="default: <corpus dir>/cloud-local/poses.raw")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="stop after this many decoded frames (a long video's first stretch)")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    corpus = CORPUS_ROOT / args.video_id
+    if args.video is None:
+        args.video = next((p for p in (corpus / "source.mov", corpus / "source.mp4") if p.exists()),
+                          corpus / "source.mov")
+    if args.marks is None:
+        ideal = corpus / "marks_ideal.json"
+        args.marks = ideal if ideal.exists() else corpus / "video.json"
+    if args.out is None:
+        args.out = corpus / "cloud-local" / "poses.raw"
+    return args
+
+
+def _git_sha() -> str:
+    """badminton-tracker's commit, so a run's numbers name the code that made them."""
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=BACKEND_DIR, capture_output=True,
+            text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 
 
 def _probe(video: Path):
@@ -183,7 +217,7 @@ def main() -> int:
         fps=fps,
         width=width,
         height=height,
-        video_id="IMG_5892-local",
+        video_id=f"{args.video_id}-local",
         manual_court_keypoints=manual_court_keypoints,
         tracknet_positions={},
         tracknet_available=False,
@@ -207,6 +241,16 @@ def main() -> int:
     blob = proc.encode_raw_inference(header, frames, camera=camera)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(blob)
+    run_record = {
+        "video_id": args.video_id,
+        "frames": tracking_state.get("processed_count"),
+        "seconds": round(elapsed, 1),
+        "seconds_per_frame": round(elapsed / max(1, tracking_state.get("processed_count") or 0), 4),
+        "git_sha": _git_sha(),
+        "max_frames": args.max_frames,
+    }
+    # Beside the pose file, so a run's cost travels with the file it made.
+    (args.out.parent / (args.out.stem + "-run.json")).write_text(json.dumps(run_record, indent=1))
 
     stats = tracking_state.get("tracker_stats") or {}
     near_ids = [pid for pid in (0, 1) if stats.get(f"player_{pid}_side") == "bottom"]
