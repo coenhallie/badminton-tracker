@@ -23,6 +23,8 @@ Sections:
   5. merge: replacement keeps the tracker's id, an append gets the zoom id,
      empty and None inputs stay well formed.
   6. PlayerZoom: what it asks for, when, and how it backs off.
+  7. ZoomSwitch: an error in the zoom never fails a run; SHUTTL_ZOOM_PASS
+     turns it off without a code change.
 """
 from __future__ import annotations
 
@@ -42,6 +44,8 @@ from player_zoom import (  # noqa: E402
     ZOOM_IMGSZ,
     ZOOM_TRACK_ID_BASE,
     CourtFrame,
+    ZoomSwitch,
+    zoom_enabled_from_env,
     Detection,
     PlayerZoom,
     follow_window,
@@ -176,6 +180,13 @@ out_xy, out_cf, out_bx, out_ids = merge(xy, None, bx, None, [])
 check("no picks and no confidences or ids: rows unchanged, confidences 0.5, ids -1",
       out_xy.shape == (2, 17, 2) and np.allclose(out_cf, 0.5) and out_ids == [-1, -1])
 
+other = person(930.0, 700.0, height=200.0)  # boxes overlap (IoU 0.42), joints do not
+far_pick = person(935.0, 600.0, height=115.0)
+out_xy, out_cf, out_bx, out_ids = merge(other.kpts[None], other.conf[None], np.array([other.box]), [4],
+                                        [(far_pick, ZOOM_TRACK_ID_BASE + 1)])
+check("an overlapping box of a DIFFERENT person is not replaced: the pick is appended",
+      out_ids == [4, ZOOM_TRACK_ID_BASE + 1] and np.allclose(out_xy[0], other.kpts), str(out_ids))
+
 print("6. PlayerZoom")
 zoom = PlayerZoom(COURT, FW, FH, fps=30.0)
 sides = {0: "top", 1: "bottom"}
@@ -217,6 +228,25 @@ found = zoom.pick(search, [player], IDENTITY)
 check("a search pick is the player", found is player)
 check("and starts a new zoom session (a new track id)", zoom.track_id(0) != before, f"{before} -> {zoom.track_id(0)}")
 check("zoom track ids sit above the tracker's", zoom.track_id(0) >= ZOOM_TRACK_ID_BASE)
+
+print("7. ZoomSwitch")
+calls = []
+
+
+def boom():
+    calls.append(1)
+    raise RuntimeError("CUDA out of memory")
+
+
+switch = ZoomSwitch(True)
+check("a step that raises returns the fallback", switch.run(boom, "full-frame") == "full-frame")
+check("and switches the zoom off, keeping why", not switch.on and "CUDA" in (switch.failure or ""))
+check("later steps are not attempted", switch.run(boom, "full-frame") == "full-frame" and len(calls) == 1)
+check("a working step returns its value", ZoomSwitch(True).run(lambda: 7, None) == 7)
+check("off from the start never runs a step", ZoomSwitch(False).run(boom, "x") == "x" and len(calls) == 1)
+check("SHUTTL_ZOOM_PASS unset: on", zoom_enabled_from_env({}))
+check("SHUTTL_ZOOM_PASS=0 / false / off: off",
+      not any(zoom_enabled_from_env({"SHUTTL_ZOOM_PASS": v}) for v in ("0", "false", "off", "OFF")))
 
 print()
 if FAILURES:

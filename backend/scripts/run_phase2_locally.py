@@ -93,12 +93,13 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _git_sha() -> str:
-    """badminton-tracker's commit, so a run's numbers name the code that made them."""
+    """badminton-tracker's commit (with "-dirty" for uncommitted changes), so a run's numbers name the code that made them."""
     import subprocess
 
     try:
         return subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"], cwd=BACKEND_DIR, capture_output=True,
+            # --dirty, so a run made with uncommitted changes says so.
+            ["git", "describe", "--always", "--dirty", "--abbrev=7"], cwd=BACKEND_DIR, capture_output=True,
             text=True, check=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
@@ -248,6 +249,8 @@ def main() -> int:
         "seconds_per_frame": round(elapsed / max(1, tracking_state.get("processed_count") or 0), 4),
         "git_sha": _git_sha(),
         "max_frames": args.max_frames,
+        # What the zoom pass cost and found, so a run's time can be put down to it.
+        "player_zoom": tracking_state.get("player_zoom"),
     }
     # Beside the pose file, so a run's cost travels with the file it made.
     (args.out.parent / (args.out.stem + "-run.json")).write_text(json.dumps(run_record, indent=1))

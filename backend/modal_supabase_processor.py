@@ -3182,9 +3182,6 @@ async def _run_full_yolo_loop(
     # Load YOLO26 pose model (latest version)
     await send_log("Loading YOLO26m pose model (medium)...", "info", "model")
     pose_model = YOLO("yolo26m-pose.pt")
-    # The zoom pass's own instance of the same weights: predict() on it never
-    # touches the BoT-SORT state pose_model.track(persist=True) keeps.
-    zoom_model = YOLO(POSE_MODEL_NAME)
 
     # Load badminton detection model (for shuttlecock, racket detection)
     await send_log("Loading badminton detection model...", "info", "model")
@@ -3312,11 +3309,23 @@ with_reid: False
     # player too small for the 960 px pass is followed with a window around
     # them, and a lost one is searched for in their half of the court. None
     # without marks, which leaves this loop exactly as it was.
-    from player_zoom import CourtFrame, Detection as ZoomDetection, PlayerZoom
+    from player_zoom import CourtFrame, Detection as ZoomDetection, PlayerZoom, ZoomSwitch, zoom_enabled_from_env
 
-    _zoom_court = CourtFrame.from_marks(manual_court_keypoints)
+    # SHUTTL_ZOOM_PASS=0 turns the pass off without a code change; an error
+    # inside it turns it off for the rest of the run (ZoomSwitch), never the run.
+    zoom_switch = ZoomSwitch(zoom_enabled_from_env(os.environ))
+    _zoom_court = CourtFrame.from_marks(manual_court_keypoints) if zoom_switch.on else None
     player_zoom = PlayerZoom(_zoom_court, int(width), int(height), float(effective_fps)) if _zoom_court else None
     zoom_stats = {"follow_calls": 0, "follow_picks": 0, "search_calls": 0, "search_picks": 0}
+    zoom_failure_logged = False
+    if not zoom_switch.on:
+        await send_log("Zoom pass off (SHUTTL_ZOOM_PASS)", "info", "processing")
+    elif manual_court_keypoints and player_zoom is None:
+        await send_log("Zoom pass off: the marks give no usable court or net line", "warning", "processing")
+    # The zoom pass's own instance of the same weights, loaded only when the
+    # pass will run: predict() on it never touches the BoT-SORT state
+    # pose_model.track(persist=True) keeps.
+    zoom_model = YOLO(POSE_MODEL_NAME) if player_zoom is not None else None
 
     def _zoom_detections(result, dx: int, dy: int):
         """One zoom result's people, in frame pixels."""
@@ -3395,6 +3404,10 @@ with_reid: False
 
     camera_tracker = None
     camera_tracking = bool(manual_court_keypoints)
+    # Whether a camera tracker was armed at all. `camera_tracking` itself flips
+    # off when the tracker fails, and a frame after that failure is exactly one
+    # the marks may no longer describe: the zoom's Find search needs this one.
+    camera_armed = camera_tracking
     camera_stopped_at: Optional[int] = None
     marking_time_s = marking_time_from(manual_court_keypoints)
     if camera_tracking:
@@ -3788,12 +3801,22 @@ with_reid: False
                         if result.keypoints is not None and result.keypoints.xy is not None else None)
             _full_conf = (result.keypoints.conf.cpu().numpy()
                           if result.keypoints is not None and result.keypoints.conf is not None else None)
-            if player_zoom is not None:
-                _zoom_picks = _zoom_pass(frame, frame_to_marking, camera_now,
-                                         (not camera_tracking) or camera_following)
-                if _zoom_picks:
-                    _full_xy, _full_conf, boxes, track_ids = merge_zoom_picks(
-                        _full_xy, _full_conf, boxes, track_ids, _zoom_picks)
+            if player_zoom is not None and zoom_switch.on:
+                def _zoomed():
+                    picks = _zoom_pass(frame, frame_to_marking, camera_now,
+                                       camera_following if camera_armed else True)
+                    return merge_zoom_picks(_full_xy, _full_conf, boxes, track_ids, picks) if picks else None
+
+                _merged = zoom_switch.run(_zoomed, None)
+                if _merged is not None:
+                    _full_xy, _full_conf, boxes, track_ids = _merged
+                if not zoom_switch.on and not zoom_failure_logged:
+                    zoom_failure_logged = True
+                    await send_log(
+                        f"Zoom pass stopped at frame {frame_count} ({zoom_switch.failure}); "
+                        "later frames use the full-frame pass alone",
+                        "warning", "processing",
+                    )
 
             if _full_xy is not None:
                 kpts_data = _full_xy
@@ -3975,13 +3998,13 @@ with_reid: False
                 # by its own keypoint array, and its original is what is
                 # emitted below.
                 shadow_by_kpts = {id(s["kpts"]): s for s in active_skeletons}
-                if player_zoom is not None:
+                if player_zoom is not None and zoom_switch.on:
                     _emitted = {}
                     for _pid, _shadow_kpts, _ in matched_players:
                         _ob = shadow_by_kpts[id(_shadow_kpts)]["_orig"].get("bbox")
                         if _ob:
                             _emitted[_pid] = (_ob["x1"], _ob["y1"], _ob["x2"], _ob["y2"])
-                    player_zoom.observe(_emitted)
+                    zoom_switch.run(lambda: player_zoom.observe(_emitted), None)
                     _zoom_observed = True
                 for player_id, shadow_kpts, conf in matched_players:
                     matched_shadow = shadow_by_kpts[id(shadow_kpts)]
@@ -4143,8 +4166,8 @@ with_reid: False
 
                     frame_data["players"].append(player_data)
 
-        if player_zoom is not None and not _zoom_observed:
-            player_zoom.observe({})
+        if player_zoom is not None and zoom_switch.on and not _zoom_observed:
+            zoom_switch.run(lambda: player_zoom.observe({}), None)
         frame_data["players"].sort(key=lambda p: p["player_id"])
 
         skeleton_frames_file.write(json.dumps(frame_data) + "\n")
@@ -4266,7 +4289,9 @@ with_reid: False
         "player_distances": player_distances,
         "player_speeds": player_speeds,
         "processed_count": processed_count,
-        "player_zoom": dict(zoom_stats) if player_zoom is not None else None,
+        "player_zoom": (
+            dict(zoom_stats, failure=zoom_switch.failure) if player_zoom is not None else None
+        ),
         "skeleton_frame_count": skeleton_frame_count,
         "tracker_stats": tracker_stats,
         "camera_motion": camera_motion,

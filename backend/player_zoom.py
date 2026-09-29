@@ -86,6 +86,9 @@ SEARCH_BACKOFF_S = 1.0
 SEARCH_BACKOFF_EVERY = 5
 
 MERGE_IOU = 0.3
+SAME_PERSON_MIN_JOINTS = 3
+SAME_PERSON_REACH_H = 0.35
+SAME_PERSON_IOU = 0.5
 ZOOM_TRACK_ID_BASE = 1_000_000
 ZOOM_SESSION_STRIDE = 100_000
 # The phone's ground-point confidence (NearPlayer.kt MIN_KEYPOINT_CONFIDENCE).
@@ -306,10 +309,11 @@ def _iou(a: Sequence[float], b: Sequence[float]) -> float:
 def merge(kpts_xy, kpts_conf, boxes, track_ids, picks: Sequence[Tuple[Detection, int]]):
     """The frame's detections with the zoom's picks folded in.
 
-    A pick overlapping a full-frame detection (IoU over MERGE_IOU) replaces its
-    keypoints, confidences and box, keeping the tracker's id: the zoomed
-    keypoints are the better measurement of the same person. Otherwise it is
-    appended with its zoom track id. Missing confidences read 0.5 and missing
+    A pick overlapping a full-frame detection of the same person (IoU over
+    MERGE_IOU, and `_same_person`) replaces its keypoints, confidences and
+    box, keeping the tracker's id: the zoomed keypoints are the better
+    measurement of that person. Otherwise it is appended with its zoom track
+    id. Missing confidences read 0.5 and missing
     ids -1, the loop's own defaults, so the arrays always line up.
     """
     xy = np.zeros((0, 17, 2)) if kpts_xy is None else np.asarray(kpts_xy, float).reshape(-1, 17, 2).copy()
@@ -322,7 +326,7 @@ def merge(kpts_xy, kpts_conf, boxes, track_ids, picks: Sequence[Tuple[Detection,
     for det, zoom_id in picks:
         overlaps = [(_iou(bx[i], det.box), i) for i in range(bx.shape[0])]
         best = max(overlaps, default=(0.0, -1))
-        if best[0] > MERGE_IOU:
+        if best[0] > MERGE_IOU and _same_person(xy[best[1]], conf[best[1]], det, best[0]):
             i = best[1]
             xy[i] = det.kpts
             conf[i] = det.conf
@@ -333,6 +337,53 @@ def merge(kpts_xy, kpts_conf, boxes, track_ids, picks: Sequence[Tuple[Detection,
             bx = np.concatenate([bx, np.asarray(det.box, float)[None]], axis=0)
             ids.append(zoom_id)
     return xy, conf, bx, ids
+
+
+def _same_person(row_xy, row_conf, det: Detection, iou: float) -> bool:
+    """Whether an overlapping full-frame row is the pick's own person.
+
+    Overlap alone is not enough at the net, where the two players are about
+    the same size and one stands in front of the other: a far pick replacing
+    the near player's row would drop her for that frame and hand her track id
+    his position. With at least SAME_PERSON_MIN_JOINTS joints confident in
+    both, the joints decide (median distance within SAME_PERSON_REACH_H of the
+    pick's height); with fewer, only a strong overlap (SAME_PERSON_IOU) does.
+    """
+    both = (np.asarray(row_conf) >= ANKLE_MIN_CONF) & (np.asarray(det.conf) >= ANKLE_MIN_CONF)
+    if int(both.sum()) >= SAME_PERSON_MIN_JOINTS:
+        d = np.hypot(*(np.asarray(row_xy)[both] - np.asarray(det.kpts)[both]).T)
+        return float(np.median(d)) <= SAME_PERSON_REACH_H * max(1.0, det.box[3] - det.box[1])
+    return iou > SAME_PERSON_IOU
+
+
+class ZoomSwitch:
+    """Whether the zoom pass runs: on unless turned off, or until its first error.
+
+    The zoom only adds to what the full-frame pass found, so an error in it
+    (a CUDA out-of-memory on a crop, a projection that went to infinity on
+    odd marks) must cost the run nothing: the frame keeps the full-frame
+    pass's people, and the zoom stays off for the rest of the run rather than
+    failing on every frame. `failure` keeps what went wrong, for the log.
+    """
+
+    def __init__(self, enabled: bool):
+        self.on = enabled
+        self.failure: Optional[str] = None
+
+    def run(self, step, fallback):
+        if not self.on:
+            return fallback
+        try:
+            return step()
+        except Exception as err:  # noqa: BLE001 - any error turns the zoom off, never the run
+            self.on = False
+            self.failure = repr(err)
+            return fallback
+
+
+def zoom_enabled_from_env(environ) -> bool:
+    """SHUTTL_ZOOM_PASS=0 (or false, off) turns the zoom pass off without a code change."""
+    return str(environ.get("SHUTTL_ZOOM_PASS", "1")).strip().lower() not in ("0", "false", "off", "no")
 
 
 @dataclass
