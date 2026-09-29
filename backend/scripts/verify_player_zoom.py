@@ -18,7 +18,8 @@ Sections:
      search_imgsz.
   3. pick_follow: nearest continuing person, on the slot's side, read in the
      marking frame through a non-identity camera.
-  4. pick_search: inside the court lines only, most confident.
+  4. pick_search: inside the court lines (within ACQUIRE_MARGIN_M) only, most
+     confident.
   5. merge: replacement keeps the tracker's id, an append gets the zoom id,
      empty and None inputs stay well formed.
   6. PlayerZoom: what it asks for, when, and how it backs off.
@@ -145,6 +146,12 @@ got = pick_search([umpire, bystander, player], "top", COURT, IDENTITY)
 check("the umpire and the bystander, inside the margin but outside the lines, lose to the player", got is player)
 got = pick_search([umpire, bystander], "top", COURT, IDENTITY)
 check("nobody inside the lines: no pick", got is None)
+behind = COURT.to_marking((3.0, -0.4))
+got = pick_search([person(float(behind[0]), float(behind[1]))], "top", COURT, IDENTITY)
+check("a player 0.4 m behind the far baseline is adopted (ACQUIRE_MARGIN_M)", got is not None)
+wide = COURT.to_marking((-1.0, 2.0))
+got = pick_search([person(float(wide[0]), float(wide[1]))], "top", COURT, IDENTITY)
+check("someone a metre outside the sideline is not", got is None)
 a2 = person(700.0, 600.0, conf=0.5)
 got = pick_search([a2, player], "top", COURT, IDENTITY)
 check("among people inside the lines, the most confident", got is player)

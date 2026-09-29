@@ -17,8 +17,9 @@ Per identity slot (the identity tracker's player 0 and player 1):
   * Find: a slot empty for LOST_FRAMES frames (or never filled) gets its half
     of the court searched, the half plus SEARCH_MARGIN_M with room above for a
     jumping player, run at SEARCH_SCALE of its size. Only someone whose ankles
-    stand inside that half's court lines is adopted: the umpire and bystanders
-    stand in the margin, and adopting one would be followed from then on.
+    stand inside that half's court lines, or within ACQUIRE_MARGIN_M of them, is
+    adopted: the umpire and bystanders stand further out, and adopting one would
+    be followed from then on.
 
 What the zoom keeps is merged into the frame's detections (merge), and the
 loop's own filters and identity tracker still decide who is who. The zoom
@@ -63,6 +64,13 @@ FOLLOW_GROWTH_PER_EMPTY = 0.5
 CONTINUE_RADIUS_H = 0.6
 
 LOST_FRAMES = 3
+# How far outside a half's court lines a Find may still adopt someone. A far
+# player lunging or jumping at the back stands up to about 0.8 m behind the
+# baseline (aSASa: 5% of his positions beyond 0.5 m, none beyond 0.83), and a
+# Find that waited for him to step back inside lost him for seconds at a time.
+# The umpire there stands 1.06 m outside the lines and a bystander 1.75 m, so
+# half a metre adopts the player and neither of them.
+ACQUIRE_MARGIN_M = 0.5
 SEARCH_MARGIN_M = 2.0
 SEARCH_HEADROOM_M = 2.5
 SEARCH_PAD_PX = 20.0
@@ -172,9 +180,10 @@ class CourtFrame:
         return "top" if float(p[1]) < net_y else "bottom"
 
     @staticmethod
-    def inside_lines(c: Sequence[float], side: str) -> bool:
-        lo, hi = (0.0, COURT_LENGTH_M / 2) if side == "top" else (COURT_LENGTH_M / 2, COURT_LENGTH_M)
-        return 0.0 <= float(c[0]) <= COURT_WIDTH_M and lo <= float(c[1]) <= hi
+    def inside_lines(c: Sequence[float], side: str, margin_m: float = 0.0) -> bool:
+        """Inside that half's court lines, or within `margin_m` of them (never across the net)."""
+        lo, hi = (-margin_m, COURT_LENGTH_M / 2) if side == "top" else (COURT_LENGTH_M / 2, COURT_LENGTH_M + margin_m)
+        return -margin_m <= float(c[0]) <= COURT_WIDTH_M + margin_m and lo <= float(c[1]) <= hi
 
 
 def ground_point(det: Detection) -> Optional[np.ndarray]:
@@ -266,14 +275,14 @@ def pick_follow(dets: Sequence[Detection], last_box: Box, side: str, court: Cour
 
 def pick_search(dets: Sequence[Detection], side: str, court: CourtFrame,
                 frame_to_marking: Optional[np.ndarray]) -> Optional[Detection]:
-    """The most confident person standing inside the half's court lines, or None."""
+    """The most confident person standing inside the half's court lines (within ACQUIRE_MARGIN_M), or None."""
     best = None
     for det in dets:
         gp = ground_point(det)
         if gp is None:
             continue
         p = to_marking(frame_to_marking, gp)
-        if court.side_of(p) != side or not court.inside_lines(court.to_court(p), side):
+        if court.side_of(p) != side or not court.inside_lines(court.to_court(p), side, ACQUIRE_MARGIN_M):
             continue
         if best is None or det.mean_conf > best.mean_conf:
             best = det
