@@ -49,9 +49,15 @@ COURT_LENGTH_M = 13.4
 # The pose model's input size in the full-frame pass (the loop's imgsz=960).
 POSE_INPUT_PX = 960.0
 # A player whose box, scaled to the model's input, is shorter than this is
-# followed with a zoom window. aSASa's far player is about 57 px there; its
-# near player about 125, and the IMG_5892 near player 96 to 161.
-ZOOM_TRIGGER_MODEL_PX = 80.0
+# followed with a zoom window. Not only the players the full-frame pass cannot
+# find: a mid-size player it does find is placed better zoomed, because the
+# ankles are what the heatmap stands on. Measured 2026-09-29 against 80 (the
+# far player alone on aSASa, about 57 px there): IMG_5892's far player
+# (median 97 px) went from a 32 cm to a 15 cm median position error, the
+# broadcast's far player (743d7fb1, first 1500 frames) from 654 to 746 frames
+# placed, and aSASa's near player (about 125 px, zoomed when he crouches) from
+# 6.9 to 3.1 cm. A player larger than this is left to the full-frame pass.
+ZOOM_TRIGGER_MODEL_PX = 120.0
 ZOOM_IMGSZ = 640
 
 FOLLOW_WIDTH_H = 2.6

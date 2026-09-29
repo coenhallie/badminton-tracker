@@ -187,6 +187,10 @@ reqs = zoom.plan(sides, IDENTITY, marks_describe_frame=True)
 check("a small filled slot follows; a large one gets nothing",
       [(q.pid, q.kind) for q in reqs] == [(0, "follow")], str([(q.pid, q.kind) for q in reqs]))
 check("follow runs at ZOOM_IMGSZ", reqs and reqs[0].imgsz == ZOOM_IMGSZ)
+mid = PlayerZoom(COURT, FW, FH, fps=30.0)
+mid.observe({0: (855.0, 400.0, 925.0, 600.0), 1: (900.0, 400.0, 1010.0, 780.0)})
+check("a mid-size player (100 px at the model's input, IMG_5892's far player) is followed too",
+      [(q.pid, q.kind) for q in mid.plan(sides, IDENTITY, marks_describe_frame=True)] == [(0, "follow")])
 for _ in range(LOST_FRAMES - 1):
     zoom.observe({0: None, 1: (900.0, 510.0, 990.0, 765.0)})
 reqs = zoom.plan(sides, IDENTITY, marks_describe_frame=True)
