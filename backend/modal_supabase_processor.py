@@ -2966,6 +2966,67 @@ def distinct_people(kpts_data, boxes) -> List[int]:
     return sorted(kept)
 
 
+def is_sitting_pose(kpts, bbox, conf=None, min_conf=0.2) -> bool:
+    """Whether a skeleton reads as seated or crouched: most often a line judge.
+
+    Lifted unchanged from Phase 2's per-frame loop so it can be tested on its
+    own (scripts/verify_phase2_filters.py). Two kinds of evidence: a box less
+    than 1.2 times as tall as it is wide, or hips close to the knees or ankles
+    in the vertical. The shadows the loop passes carry (x, y) keypoints only,
+    so `conf` and `min_conf` never apply there; a keypoint at the (0, 0)
+    "not detected" sentinel is skipped.
+    """
+    if bbox is None:
+        return False
+
+    bbox_height = bbox["y2"] - bbox["y1"]
+    bbox_width = bbox["x2"] - bbox["x1"]
+    if bbox_width > 0:
+        aspect_ratio = bbox_height / bbox_width
+        if aspect_ratio < 1.2:
+            return True
+
+    if len(kpts) >= 15:
+        def _valid(idx):
+            if idx >= len(kpts):
+                return None
+            pt = kpts[idx]
+            if pt[0] <= 0:
+                return None
+            if len(pt) > 2 and pt[2] <= min_conf:
+                return None
+            return pt
+
+        left_hip = _valid(11)
+        right_hip = _valid(12)
+        left_knee = _valid(13)
+        right_knee = _valid(14)
+        left_ankle = _valid(15)
+        right_ankle = _valid(16)
+
+        if left_hip is not None and left_knee is not None:
+            hip_knee_diff = left_knee[1] - left_hip[1]
+            if hip_knee_diff < bbox_height * 0.15:
+                return True
+
+        if right_hip is not None and right_knee is not None:
+            hip_knee_diff = right_knee[1] - right_hip[1]
+            if hip_knee_diff < bbox_height * 0.15:
+                return True
+
+        if left_hip is not None and left_ankle is not None:
+            hip_ankle_diff = left_ankle[1] - left_hip[1]
+            if hip_ankle_diff < bbox_height * 0.3:
+                return True
+
+        if right_hip is not None and right_ankle is not None:
+            hip_ankle_diff = right_ankle[1] - right_hip[1]
+            if hip_ankle_diff < bbox_height * 0.3:
+                return True
+
+    return False
+
+
 # The phone's ground-point confidence (NearPlayer.kt, MIN_KEYPOINT_CONFIDENCE):
 # both ankles at least this sure, or there is no ground point.
 GROUND_ANKLE_MIN_CONFIDENCE = 0.5
@@ -3699,58 +3760,6 @@ with_reid: False
                         track_cumulative_movement.get(track_id, 0.0) if track_id >= 0 else 0.0
                     )
                     skeleton_data.append(skeleton)
-
-                # Helper: detect sitting/crouching pose (likely a judge)
-                def is_sitting_pose(kpts, bbox, conf=None, min_conf=0.2) -> bool:
-                    if bbox is None:
-                        return False
-
-                    bbox_height = bbox["y2"] - bbox["y1"]
-                    bbox_width = bbox["x2"] - bbox["x1"]
-                    if bbox_width > 0:
-                        aspect_ratio = bbox_height / bbox_width
-                        if aspect_ratio < 1.2:
-                            return True
-
-                    if len(kpts) >= 15:
-                        def _valid(idx):
-                            if idx >= len(kpts):
-                                return None
-                            pt = kpts[idx]
-                            if pt[0] <= 0:
-                                return None
-                            if len(pt) > 2 and pt[2] <= min_conf:
-                                return None
-                            return pt
-
-                        left_hip = _valid(11)
-                        right_hip = _valid(12)
-                        left_knee = _valid(13)
-                        right_knee = _valid(14)
-                        left_ankle = _valid(15)
-                        right_ankle = _valid(16)
-
-                        if left_hip is not None and left_knee is not None:
-                            hip_knee_diff = left_knee[1] - left_hip[1]
-                            if hip_knee_diff < bbox_height * 0.15:
-                                return True
-
-                        if right_hip is not None and right_knee is not None:
-                            hip_knee_diff = right_knee[1] - right_hip[1]
-                            if hip_knee_diff < bbox_height * 0.15:
-                                return True
-
-                        if left_hip is not None and left_ankle is not None:
-                            hip_ankle_diff = left_ankle[1] - left_hip[1]
-                            if hip_ankle_diff < bbox_height * 0.3:
-                                return True
-
-                        if right_hip is not None and right_ankle is not None:
-                            hip_ankle_diff = right_ankle[1] - right_hip[1]
-                            if hip_ankle_diff < bbox_height * 0.3:
-                                return True
-
-                    return False
 
                 if court_roi_active and court_polygon is not None:
                     in_court_skeletons = []
